@@ -1,6 +1,7 @@
 #include "debugger/debugger.hpp"
 #include "elf/elf.hpp"
 #include "registers/registers.hpp"
+#include "unwind/frame_pointer.hpp"
 
 #include <elf.h>
 
@@ -82,6 +83,24 @@ void print_stop(const mdbg::StopInfo& info, const mdbg::ElfFile& elf, pid_t pid)
   }
 }
 
+void print_backtrace(const mdbg::Debugger& debugger, const mdbg::ElfFile& elf) {
+  const auto trace = mdbg::unwind_frame_pointers(debugger);
+  for (std::size_t index = 0; index < trace.frames.size(); ++index) {
+    const auto address = trace.frames[index].instruction_pointer;
+    std::cout << '#' << index << " 0x" << std::hex << address << std::dec;
+    if (const auto symbol = elf.find_symbol_by_runtime_address(debugger.pid(), address)) {
+      std::cout << ' ' << symbol->symbol.name;
+      if (symbol->offset != 0) {
+        std::cout << "+0x" << std::hex << symbol->offset << std::dec;
+      }
+    }
+    std::cout << '\n';
+  }
+  if (trace.stop_reason != mdbg::UnwindStopReason::EndOfChain) {
+    std::cout << "backtrace stopped: " << mdbg::unwind_stop_reason_name(trace.stop_reason) << '\n';
+  }
+}
+
 void print_usage() {
   std::cerr << "usage: mdbg <program> [args...]\n"
                "       mdbg --attach <pid>\n";
@@ -146,6 +165,8 @@ int main(int argc, char** argv) {
         for (const auto& [name, value] : mdbg::general_purpose_registers(debugger.registers())) {
           std::cout << std::setw(6) << name << " 0x" << std::hex << value << std::dec << '\n';
         }
+      } else if (command == "bt") {
+        print_backtrace(debugger, elf);
       } else if (command == "reg") {
         std::string name;
         input >> name;
@@ -197,7 +218,7 @@ int main(int argc, char** argv) {
                     << std::dec << ' ' << symbol.name << '\n';
         }
       } else {
-        std::cout << "commands: continue, stepi, regs, reg <name>, x <addr|symbol> [len], "
+        std::cout << "commands: continue, stepi, regs, bt, reg <name>, x <addr|symbol> [len], "
                      "break <addr|symbol>, delete <id>, info breakpoints, symbols [filter], "
                      "detach, quit\n";
       }

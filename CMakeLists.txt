@@ -18,6 +18,7 @@ add_library(mdbg_core
   src/registers/registers.cpp
   src/elf/elf.cpp
   src/debugger/debugger.cpp
+  src/unwind/frame_pointer.cpp
 )
 target_include_directories(mdbg_core PUBLIC src)
 target_compile_options(mdbg_core PRIVATE -Wall -Wextra -Wpedantic -Werror)
@@ -58,6 +59,14 @@ if(BUILD_TESTING)
     COMMAND attach_integration $<TARGET_FILE:debugger_fixture_pie>)
   add_test(NAME attach_integration_nopie
     COMMAND attach_integration $<TARGET_FILE:debugger_fixture_nopie>)
+
+  add_executable(backtrace_integration tests/backtrace_integration.cpp)
+  target_link_libraries(backtrace_integration PRIVATE mdbg_core)
+  target_compile_options(backtrace_integration PRIVATE -Wall -Wextra -Wpedantic -Werror)
+  add_test(NAME backtrace_integration_pie
+    COMMAND backtrace_integration $<TARGET_FILE:debugger_fixture_pie>)
+  add_test(NAME backtrace_integration_nopie
+    COMMAND backtrace_integration $<TARGET_FILE:debugger_fixture_nopie>)
 
   add_executable(elf_tests tests/elf_tests.cpp)
   target_link_libraries(elf_tests PRIVATE mdbg_core)

@@ -10,6 +10,8 @@ Before detaching an attached process, `Debugger` restores every installed debugg
 
 `ElfFile` is an independent parser/resolver. It validates ELF64/x86-64/little-endian headers, reads `SHT_SYMTAB` and `SHT_DYNSYM` directly, and resolves symbols without libbfd/libelf/debugger libraries. For ET_DYN PIE executables it derives load bias from the tracee's offset-zero executable mapping and the ELF's zero-offset PT_LOAD virtual address. ET_EXEC symbols use their linked virtual addresses directly.
 
+`unwind::frame_pointer` implements the first deliberately bounded stack-unwinding strategy. It seeds the trace from stopped RIP/RBP, reads `{previous_rbp, return_address}` pairs from tracee memory, requires the RBP chain to move monotonically toward higher stack addresses, caps each frame jump and the total frame count, and returns a partial trace with an explicit stop reason when memory is unreadable or the chain is malformed. The CLI symbolizes returned instruction pointers through `ElfFile`.
+
 On a managed `SIGTRAP`, `Debugger` checks `RIP - 1` against installed breakpoints, rewinds RIP, restores the original byte, and marks the breakpoint temporarily uninstalled. The next `continue` or `stepi` executes exactly one original instruction and reinstalls `INT3` only if the breakpoint still exists.
 
-Current limits: one traced process/thread, x86-64 Linux only, no DWARF parser, no unwinder, and no hardware watchpoints.
+Current limits: one traced process/thread, x86-64 Linux only, no DWARF parser or DWARF CFI unwinder, and no hardware watchpoints. Frame-pointer backtraces require binaries that preserve RBP and intentionally degrade to a bounded partial trace when that assumption is violated.

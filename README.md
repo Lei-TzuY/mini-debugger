@@ -14,6 +14,7 @@ Implemented now:
 - ELF64 `.symtab` / `.dynsym` parsing
 - PIE vs non-PIE load-bias resolution through `/proc/<pid>/maps`
 - symbol -> runtime address and runtime address -> symbol resolution
+- bounded x86-64 frame-pointer unwinding with symbolized `bt`
 - CLI breakpoints by numeric address or symbol (`break main`)
 - deterministic PIE/non-PIE/stripped fixture coverage
 
@@ -38,6 +39,9 @@ stopped after exec
 Breakpoint 1 at 0x55... (main)
 (mdbg) continue
 breakpoint at 0x55... (main)
+(mdbg) bt
+#0 0x55... main
+#1 0x7f...
 ```
 
 Attach to an existing process:
@@ -53,7 +57,7 @@ detached
 
 Attach permission is governed by the host kernel's ptrace policy. Detaching restores all debugger-owned `INT3` bytes first; quitting an attached session also detaches instead of killing the target.
 
-Commands currently implemented: `continue`, `stepi`, `regs`, `reg <name>`, `x <address|symbol> [length]`, `break <address|symbol>`, `delete <id>`, `info breakpoints`, `symbols [filter]`, `detach`, and `quit`.
+Commands currently implemented: `continue`, `stepi`, `regs`, `bt`, `reg <name>`, `x <address|symbol> [length]`, `break <address|symbol>`, `delete <id>`, `info breakpoints`, `symbols [filter]`, `detach`, and `quit`.
 
 ## Breakpoint invariant
 
@@ -65,6 +69,12 @@ save original byte -> write 0xCC -> continue -> SIGTRAP
 
 The breakpoint table owns the saved byte. A breakpoint being stepped over is explicit debugger state, not a CLI convention. If an attached process is detached while stopped on a managed breakpoint, RIP already points back at the original instruction and detach leaves that original byte restored.
 
+## Backtrace model
+
+`bt` currently follows the classic x86-64 RBP chain. It is intentionally bounded and rejects non-monotonic, self-referential, or implausibly large frame-pointer jumps. An unreadable or malformed frame returns a partial trace rather than looping or claiming reliability.
+
+This strategy is reliable only for code compiled with frame pointers preserved (for example `-fno-omit-frame-pointer`). Optimized code that omits or repurposes RBP requires DWARF CFI / `.eh_frame`, which is not implemented yet.
+
 ## Current limits
 
-One traced process/thread only. No DWARF source mapping, source-level `next/step/finish`, unwinding/backtraces, or hardware watchpoints yet. ELF extended section numbering and non-x86-64/little-endian ELF are intentionally unsupported for now.
+One traced process/thread only. No DWARF source mapping, source-level `next/step/finish`, DWARF CFI unwinding, or hardware watchpoints yet. ELF extended section numbering and non-x86-64/little-endian ELF are intentionally unsupported for now.

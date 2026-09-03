@@ -18,6 +18,24 @@ __attribute__((noinline)) void breakpoint_two(void) {
   fixture_value += 1;
 }
 
+__attribute__((noinline)) void backtrace_leaf(void) {
+  __asm__ volatile(".globl backtrace_probe\n"
+                   "backtrace_probe:\n"
+                   "nop\n"
+                   ::: "memory");
+  fixture_value += 1;
+}
+
+__attribute__((noinline)) void backtrace_inner(void) {
+  backtrace_leaf();
+  fixture_value += 1;
+}
+
+__attribute__((noinline)) void backtrace_outer(void) {
+  backtrace_inner();
+  fixture_value += 1;
+}
+
 static void publish_addresses(const char* path) {
   FILE* file = fopen(path, "w");
   if (file == NULL) _Exit(80);
@@ -59,6 +77,10 @@ int main(int argc, char** argv) {
   if (strcmp(argv[2], "terminate") == 0) {
     raise(SIGTERM);
     return 83;
+  }
+  if (strcmp(argv[2], "backtrace") == 0) {
+    backtrace_outer();
+    return 0;
   }
 
   breakpoint_one();

@@ -61,8 +61,13 @@ std::optional<std::uintptr_t> supported_call_return_address(
     const auto modrm = std::to_integer<unsigned>(modrm_bytes.front());
     const auto mod = (modrm >> 6U) & 0x3U;
     const auto reg = (modrm >> 3U) & 0x7U;
-    if (reg == 2U && mod == 3U) {
-      instruction_length = 2;
+    const auto rm = modrm & 0x7U;
+    if (reg == 2U) {
+      if (mod == 3U) {
+        instruction_length = 2;
+      } else if (mod == 0U && rm == 5U) {
+        instruction_length = 6;
+      }
     }
   }
 

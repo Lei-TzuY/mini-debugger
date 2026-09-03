@@ -33,9 +33,30 @@ __attribute__((noinline)) void next_indirect_caller(void) {
   next_marker += 8;
 }
 
+__attribute__((noinline)) void next_memory_callee(void) {
+#line 550 "next_source.c"
+  next_marker += 16;
+#line 551 "next_source.c"
+  next_marker += 0;
+}
+
+__attribute__((used)) static void (*next_memory_target)(void) = next_memory_callee;
+
+__attribute__((noinline)) void next_memory_caller(void) {
+#line 540 "next_source.c"
+  __asm__ volatile(
+      "call *next_memory_target(%%rip)"
+      :
+      :
+      : "rax", "rcx", "rdx", "rsi", "rdi", "r8", "r9", "r10", "r11", "cc", "memory");
+#line 541 "next_source.c"
+  next_marker += 32;
+}
+
 #line 1 "next_driver.c"
 int main(void) {
   next_caller();
   next_indirect_caller();
-  return next_marker == 15 ? 0 : 1;
+  next_memory_caller();
+  return next_marker == 63 ? 0 : 1;
 }

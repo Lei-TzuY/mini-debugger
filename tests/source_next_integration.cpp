@@ -83,6 +83,28 @@ void require_register_indirect_call_encoding(const mdbg::Debugger& debugger,
           "register-indirect source-next fixture does not contain unprefixed ff d0");
 }
 
+void require_rip_relative_memory_call_encoding(const mdbg::Debugger& debugger,
+                                               std::uint64_t line540,
+                                               std::uint64_t line541) {
+  require(line541 > line540,
+          "RIP-relative memory-indirect fixture rows are not in executable order");
+  const auto span = line541 - line540;
+  require(span <= 64,
+          "RIP-relative memory-indirect fixture row unexpectedly grew beyond 64 bytes");
+  const auto bytes = debugger.read_memory(static_cast<std::uintptr_t>(line540),
+                                          static_cast<std::size_t>(span));
+  bool found = false;
+  for (std::size_t i = 0; i + 5 < bytes.size(); ++i) {
+    if (std::to_integer<unsigned>(bytes[i]) == 0xffU &&
+        std::to_integer<unsigned>(bytes[i + 1]) == 0x15U) {
+      found = true;
+      break;
+    }
+  }
+  require(found,
+          "RIP-relative memory-indirect source-next fixture does not contain ff 15 disp32");
+}
+
 void test_direct_call_step_over(const std::string& fixture) {
   auto debugger = mdbg::Debugger::launch(fixture, {});
   const mdbg::ElfFile elf(fixture);
@@ -193,6 +215,63 @@ void test_register_indirect_callee_breakpoint_interrupts_next(
   require_breakpoint_count(debugger, 2);
 }
 
+void test_rip_relative_memory_call_step_over(const std::string& fixture) {
+  auto debugger = mdbg::Debugger::launch(fixture, {});
+  const mdbg::ElfFile elf(fixture);
+  const mdbg::DwarfLineTable lines(fixture);
+  const auto line540 = source_address(lines, elf, debugger, 540);
+  const auto line541 = source_address(lines, elf, debugger, 541);
+
+  const auto start_id = debugger.add_breakpoint(static_cast<std::uintptr_t>(line540));
+  const auto hit = debugger.continue_execution();
+  require(hit.reason == mdbg::StopReason::Breakpoint && hit.breakpoint_address == line540,
+          "RIP-relative memory-indirect source-next start breakpoint was not hit");
+  require_source_line(lines.find_runtime_address(debugger.pid(), debugger.registers().rip, elf),
+                      540);
+  require_rip_relative_memory_call_encoding(debugger, line540, line541);
+
+  const auto result = mdbg::next_source(debugger, lines, elf, 64);
+  require(result.reason == mdbg::SourceStepStopReason::LineChanged,
+          "RIP-relative memory-indirect call must step over its callee");
+  require_source_line(result.source, 541);
+  require(debugger.registers().rip == line541,
+          "RIP-relative memory-indirect source next did not stop at line 541");
+  require(marker_value(debugger, elf) == 31,
+          "RIP-relative memory-indirect callee side effect must complete before next returns");
+  require_breakpoint_installed(debugger, start_id);
+  require_breakpoint_count(debugger, 1);
+
+  const auto done = debugger.continue_execution();
+  require(done.reason == mdbg::StopReason::Exited && done.value == 0,
+          "RIP-relative memory-indirect source-next fixture did not exit cleanly");
+}
+
+void test_rip_relative_memory_callee_breakpoint_interrupts_next(
+    const std::string& fixture) {
+  auto debugger = mdbg::Debugger::launch(fixture, {});
+  const mdbg::ElfFile elf(fixture);
+  const mdbg::DwarfLineTable lines(fixture);
+  const auto line540 = source_address(lines, elf, debugger, 540);
+  const auto line541 = source_address(lines, elf, debugger, 541);
+  const auto line550 = source_address(lines, elf, debugger, 550);
+
+  debugger.add_breakpoint(static_cast<std::uintptr_t>(line540));
+  debugger.add_breakpoint(static_cast<std::uintptr_t>(line550));
+  const auto hit = debugger.continue_execution();
+  require(hit.reason == mdbg::StopReason::Breakpoint && hit.breakpoint_address == line540,
+          "RIP-relative memory-indirect interruption start breakpoint was not hit");
+  require_rip_relative_memory_call_encoding(debugger, line540, line541);
+
+  const auto result = mdbg::next_source(debugger, lines, elf, 64);
+  require(result.reason == mdbg::SourceStepStopReason::Interrupted,
+          "RIP-relative memory-indirect callee breakpoint must interrupt source next");
+  require(result.stop.reason == mdbg::StopReason::Breakpoint &&
+              result.stop.breakpoint_address == line550,
+          "source next hid the RIP-relative memory-indirect callee breakpoint");
+  require_source_line(result.source, 550);
+  require_breakpoint_count(debugger, 2);
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -202,6 +281,8 @@ int main(int argc, char** argv) {
     test_callee_breakpoint_interrupts_next(argv[1]);
     test_register_indirect_call_step_over(argv[1]);
     test_register_indirect_callee_breakpoint_interrupts_next(argv[1]);
+    test_rip_relative_memory_call_step_over(argv[1]);
+    test_rip_relative_memory_callee_breakpoint_interrupts_next(argv[1]);
     return 0;
   } catch (const std::exception& error) {
     std::fprintf(stderr, "source-next integration failure: %s\n", error.what());

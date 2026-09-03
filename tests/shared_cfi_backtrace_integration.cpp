@@ -3,6 +3,7 @@
 #include "elf/elf.hpp"
 #include "ptrace/ptrace.hpp"
 #include "source/source_finish.hpp"
+#include "source/source_step.hpp"
 #include "unwind/cfi.hpp"
 
 #include <csignal>
@@ -22,6 +23,17 @@ void require_same_module(const std::string& actual, const std::string& expected,
   std::error_code error;
   const bool equivalent = std::filesystem::equivalent(actual, expected, error);
   require(!error && equivalent, message);
+}
+
+void require_breakpoint_installed(const mdbg::Debugger& debugger, std::size_t id,
+                                  const std::string& message) {
+  for (const auto& breakpoint : debugger.breakpoints()) {
+    if (breakpoint.id == id) {
+      require(breakpoint.installed, message);
+      return;
+    }
+  }
+  throw std::runtime_error("managed breakpoint disappeared");
 }
 
 void require_module_symbol(const mdbg::ElfFile& executable, pid_t pid, std::uintptr_t address,
@@ -73,6 +85,19 @@ void test_shared_library_cfi(const std::string& driver, const std::string& libra
   require_same_module(shared_source->module_path, library,
                       "shared-object reverse lookup resolved the wrong module");
 
+  const auto step710 = mdbg::find_module_source_by_file_line(
+      debugger.pid(), "shared_step_source.c", 710, executable);
+  const auto step711 = mdbg::find_module_source_by_file_line(
+      debugger.pid(), "shared_step_source.c", 711, executable);
+  require(step710 && step711,
+          "shared source-step fixture rows 710 and 711 must resolve");
+  require_same_module(step710->module_path, library,
+                      "shared source-step line 710 resolved from the wrong module");
+  require_same_module(step711->module_path, library,
+                      "shared source-step line 711 resolved from the wrong module");
+  require(step711->address > step710->address,
+          "shared source-step line 711 must follow line 710");
+
   const auto driver_source = mdbg::find_module_source_by_file_line(
       debugger.pid(), "driver_break_source.c", 800, executable);
   require(driver_source.has_value(),
@@ -105,6 +130,7 @@ void test_shared_library_cfi(const std::string& driver, const std::string& libra
       static_cast<std::uintptr_t>(shared.runtime_address(debugger.pid(), *probe));
 
   const auto source_breakpoint_id = debugger.add_breakpoint(shared_source->address);
+  const auto step_breakpoint_id = debugger.add_breakpoint(step710->address);
   debugger.add_breakpoint(probe_address);
 
   const auto source_hit = debugger.continue_execution();
@@ -118,20 +144,34 @@ void test_shared_library_cfi(const std::string& driver, const std::string& libra
                   "shared_break_source.c",
           "shared-object source breakpoint stopped on the wrong source row");
 
+  const auto step_hit = debugger.continue_execution();
+  require(step_hit.reason == mdbg::StopReason::Breakpoint &&
+              step_hit.breakpoint_address == step710->address,
+          "shared source-step start breakpoint was not hit");
+  require_breakpoint_installed(
+      debugger, source_breakpoint_id,
+      "shared-object source breakpoint was not reinserted after displaced execution");
+
+  const auto step_result = mdbg::step_source(debugger, executable, 64);
+  require(step_result.reason == mdbg::SourceStepStopReason::LineChanged,
+          "shared-library source step did not stop when source line changed");
+  require(step_result.stop.reason == mdbg::StopReason::SingleStep,
+          "shared-library source transition must be exposed as a single-step stop");
+  require(step_result.source &&
+              std::filesystem::path(step_result.source->file).filename() ==
+                  "shared_step_source.c" &&
+              step_result.source->line == 711,
+          "shared-library source step stopped on the wrong source row");
+  require(debugger.registers().rip == step711->address,
+          "shared-library source step did not stop at the first row for line 711");
+  require_breakpoint_installed(
+      debugger, step_breakpoint_id,
+      "shared source-step breakpoint was not reinserted after displaced instruction");
+
   const auto hit = debugger.continue_execution();
   require(hit.reason == mdbg::StopReason::Breakpoint &&
               hit.breakpoint_address == probe_address,
-          "shared-library CFI probe breakpoint was not hit after source step-over");
-
-  bool source_breakpoint_reinserted = false;
-  for (const auto& breakpoint : debugger.breakpoints()) {
-    if (breakpoint.id == source_breakpoint_id) {
-      source_breakpoint_reinserted = breakpoint.installed;
-      break;
-    }
-  }
-  require(source_breakpoint_reinserted,
-          "shared-object source breakpoint was not reinserted after displaced execution");
+          "shared-library CFI probe breakpoint was not hit after source stepping");
 
   auto regs = debugger.registers();
   regs.rbp = 3;

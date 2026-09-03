@@ -6,10 +6,18 @@ __attribute__((noinline)) void shared_break_target(void) {
 #line 7 "shared_cfi_library.c"
 }
 
+__attribute__((noinline)) void shared_step_target(void) {
+#line 710 "shared_step_source.c"
+  __asm__ volatile("nop\n\tnop" ::: "memory");
+#line 711 "shared_step_source.c"
+  __asm__ volatile("nop" ::: "memory");
+#line 15 "shared_cfi_library.c"
+}
+
 __attribute__((noinline)) void shared_ambiguous_target(void) {
 #line 900 "ambiguous_break_source.c"
   __asm__ volatile("nop" ::: "memory");
-#line 13 "shared_cfi_library.c"
+#line 21 "shared_cfi_library.c"
 }
 
 __attribute__((noinline)) void shared_leaf(void) {

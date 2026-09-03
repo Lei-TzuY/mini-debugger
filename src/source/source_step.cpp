@@ -1,5 +1,7 @@
 #include "source/source_step.hpp"
 
+#include "unwind/cfi.hpp"
+
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -7,8 +9,19 @@
 namespace mdbg {
 namespace {
 
+struct ModuleSourcePosition {
+  std::string module_path;
+  SourceLocation source;
+};
+
 bool same_source_line(const SourceLocation& left, const SourceLocation& right) {
   return left.file == right.file && left.line == right.line;
+}
+
+bool same_source_line(const ModuleSourcePosition& left,
+                      const ModuleSourcePosition& right) {
+  return left.module_path == right.module_path &&
+         same_source_line(left.source, right.source);
 }
 
 std::optional<SourceLocation> current_source(const Debugger& debugger,
@@ -17,6 +30,24 @@ std::optional<SourceLocation> current_source(const Debugger& debugger,
   if (debugger.state() != ProcessState::Stopped) return std::nullopt;
   const auto rip = debugger.registers().rip;
   return lines.find_runtime_address(debugger.pid(), rip, elf);
+}
+
+std::optional<ModuleSourcePosition> current_module_source(
+    const Debugger& debugger, const ElfFile& elf) {
+  if (debugger.state() != ProcessState::Stopped) return std::nullopt;
+  const auto rip = static_cast<std::uintptr_t>(debugger.registers().rip);
+  const auto resolved =
+      find_module_source_by_runtime_address(debugger.pid(), rip, elf);
+  if (!resolved) return std::nullopt;
+  return ModuleSourcePosition{
+      resolved->module_path,
+      SourceLocation{resolved->file, resolved->line, resolved->column}};
+}
+
+std::optional<SourceLocation> source_only(
+    const std::optional<ModuleSourcePosition>& position) {
+  if (!position) return std::nullopt;
+  return position->source;
 }
 
 std::optional<std::uintptr_t> direct_near_call_return_address(const Debugger& debugger) {
@@ -59,29 +90,36 @@ void validate_source_motion(const Debugger& debugger, std::size_t instruction_li
 
 }  // namespace
 
-SourceStepResult step_source(Debugger& debugger, const DwarfLineTable& lines,
-                             const ElfFile& elf, std::size_t instruction_limit) {
+SourceStepResult step_source(Debugger& debugger, const ElfFile& elf,
+                             std::size_t instruction_limit) {
   validate_source_motion(debugger, instruction_limit, "source step");
 
-  const auto start = current_source(debugger, lines, elf);
+  const auto start = current_module_source(debugger, elf);
   if (!start) {
     throw std::invalid_argument("current instruction has no source location");
   }
 
   for (std::size_t instructions = 1; instructions <= instruction_limit; ++instructions) {
     const auto stop = debugger.single_step();
-    const auto source = current_source(debugger, lines, elf);
+    const auto source = current_module_source(debugger, elf);
 
     if (stop.reason != StopReason::SingleStep) {
-      return {SourceStepStopReason::Interrupted, stop, source, instructions};
+      return {SourceStepStopReason::Interrupted, stop, source_only(source), instructions};
     }
     if (source && !same_source_line(*source, *start)) {
-      return {SourceStepStopReason::LineChanged, stop, source, instructions};
+      return {SourceStepStopReason::LineChanged, stop, source_only(source), instructions};
     }
   }
 
+  const auto source = current_module_source(debugger, elf);
   return {SourceStepStopReason::InstructionLimit, debugger.stop_info(),
-          current_source(debugger, lines, elf), instruction_limit};
+          source_only(source), instruction_limit};
+}
+
+SourceStepResult step_source(Debugger& debugger, const DwarfLineTable& lines,
+                             const ElfFile& elf, std::size_t instruction_limit) {
+  static_cast<void>(lines);
+  return step_source(debugger, elf, instruction_limit);
 }
 
 SourceStepResult next_source(Debugger& debugger, const DwarfLineTable& lines,

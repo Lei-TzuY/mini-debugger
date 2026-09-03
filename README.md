@@ -1,6 +1,6 @@
 # mini-debugger
 
-A compact x86-64 Linux debugger built directly on `ptrace(2)` with small in-tree ELF64 and DWARF line-table parsers.
+A compact x86-64 Linux debugger built directly on `ptrace(2)` with small in-tree ELF64 and DWARF parsers.
 
 Implemented now:
 
@@ -19,8 +19,8 @@ Implemented now:
 - CLI breakpoints by numeric address, symbol, or source line (`break mapped_source.c:400`)
 - bounded source-level `step` across DWARF v4 file:line transitions
 - direct-call-aware source-level `next` for canonical x86-64 `E8 rel32` calls
-- frame-pointer-based `finish` that runs to the current frame's saved return address
-- deterministic PIE/non-PIE/stripped fixture coverage
+- `finish` through bounded `.eh_frame` CFI return-address recovery, with validated RBP fallback
+- deterministic PIE/non-PIE/stripped and omitted-frame-pointer fixture coverage
 
 ## Build
 
@@ -85,13 +85,15 @@ save original byte -> write 0xCC -> continue -> SIGTRAP
 
 The breakpoint table owns the saved byte. A breakpoint being stepped over is explicit debugger state, not a CLI convention. If an attached process is detached while stopped on a managed breakpoint, RIP already points back at the original instruction and detach leaves that original byte restored.
 
-## Backtrace model
+## Backtrace and frame model
 
-`bt` currently follows the classic x86-64 RBP chain. It is intentionally bounded and rejects non-monotonic, self-referential, or implausibly large frame-pointer jumps. An unreadable or malformed frame returns a partial trace rather than looping or claiming reliability.
+`bt` currently follows the classic x86-64 RBP chain. It is intentionally bounded and rejects non-monotonic, self-referential, or implausibly large frame-pointer jumps. An unreadable or malformed frame returns a partial trace rather than looping or claiming reliability. `bt` therefore still requires code with frame pointers preserved (for example `-fno-omit-frame-pointer`).
 
-`finish` uses the same preserved-frame-pointer assumption for only the current frame. It validates the RBP frame record, reads the saved return address from `[RBP + 8]`, and continues to a managed temporary breakpoint there. Existing user breakpoints at the return address are preserved, while a breakpoint, signal, exit, or other stop before return interrupts `finish` and removes any temporary breakpoint it owned. Invalid, unaligned, or unreadable frame records fail before the tracee moves.
+`finish` has a stronger current-frame path. It first reads the executable's `.eh_frame`, selects the FDE covering the stopped RIP, evaluates a bounded x86-64 CFA rule set, and reads the saved return address from the resulting CFA-relative register rule. The implemented subset deliberately targets ordinary GCC/Clang x86-64 CIE version 1 `zR` records using `DW_EH_PE_pcrel | DW_EH_PE_sdata4`, plus the common CFA location/offset/register/state opcodes needed by deterministic fixtures. Unsupported encodings, augmentations, opcodes, malformed entries, or unreadable return slots fail explicitly instead of being guessed.
 
-This strategy is reliable only for code compiled with frame pointers preserved (for example `-fno-omit-frame-pointer`). Optimized code that omits or repurposes RBP requires DWARF CFI / `.eh_frame`, which is not implemented yet.
+If `.eh_frame` is absent or has no FDE for the current instruction, `finish` falls back to the validated preserved-RBP frame record. Once a return address is known it continues to a normal managed temporary breakpoint there. Existing user breakpoints at the return address are preserved, while a breakpoint, signal, exit, or other stop before return interrupts `finish` and removes any temporary breakpoint it owned. The omitted-frame-pointer integration fixture deliberately corrupts RBP before `finish`, so its successful PIE/non-PIE return is dependent on CFI rather than the legacy frame chain.
+
+Multi-frame CFI unwinding is not implemented yet; `.eh_frame` support in this milestone is intentionally scoped to recovering the current frame's caller return address for `finish`.
 
 ## Source-line model
 
@@ -103,10 +105,10 @@ Reverse `file:line -> address` lookup reuses those parsed ranges. When a line ha
 
 `next` uses the same source-line bound, but recognizes the canonical x86-64 direct near-call opcode `E8 rel32` before executing it. For that form it places a normal managed temporary breakpoint at the five-byte call's return address, continues through the callee, removes only the breakpoint it owns, and then resumes source-line comparison in the caller. Existing user breakpoints take precedence and any breakpoint or signal encountered inside the callee interrupts `next` instead of being hidden. Indirect calls (`FF /2`), prefixed call encodings, tail calls, and other instruction forms are not decoded yet; on those forms `next` falls back to instruction-driven stepping and may enter the callee.
 
-`finish` is frame-oriented rather than line-driven. After it reaches the caller's saved return address, the CLI resolves and prints a DWARF source location when one is available; execution itself does not depend on DWARF line information.
+`finish` is frame-oriented rather than line-driven. After it reaches the caller's saved return address, the CLI resolves and prints a DWARF source location when one is available; execution itself does not depend on `.debug_line` information.
 
-Source display, DWARF5, and DWARF CFI remain future work.
+Source display, DWARF5 line tables, general-purpose DWARF CFI unwinding, and broader instruction decoding remain future work.
 
 ## Current limits
 
-One traced process/thread only. Source mapping, source breakpoints, `step`, and `next` are limited to DWARF v4 `.debug_line`; `next` only steps over canonical `E8 rel32` direct calls and does not yet decode indirect calls. `bt` and `finish` require a valid preserved RBP chain because there is no DWARF CFI unwinder yet. Hardware watchpoints are not implemented. ELF extended section numbering and non-x86-64/little-endian ELF are intentionally unsupported for now.
+One traced process/thread only. Source mapping, source breakpoints, `step`, and `next` are limited to DWARF v4 `.debug_line`; `next` only steps over canonical `E8 rel32` direct calls and does not yet decode indirect calls. `bt` still requires a valid preserved RBP chain. `finish` can recover the current return address from the bounded `.eh_frame` subset above and falls back to RBP when no applicable FDE exists, but it is not a general CFI unwinder. Hardware watchpoints are not implemented. ELF extended section numbering and non-x86-64/little-endian ELF are intentionally unsupported for now.

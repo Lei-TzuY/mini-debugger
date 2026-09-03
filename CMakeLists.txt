@@ -21,6 +21,7 @@ add_library(mdbg_core
   src/unwind/frame_pointer.cpp
   src/dwarf/line_table.cpp
   src/dwarf/source_lookup.cpp
+  src/dwarf/eh_frame.cpp
   src/source/source_step.cpp
   src/source/source_finish.cpp
 )
@@ -68,6 +69,16 @@ if(BUILD_TESTING)
   target_compile_options(source_next_fixture_nopie PRIVATE
     -O0 -g -gdwarf-4 -fno-omit-frame-pointer -fno-pie)
   target_link_options(source_next_fixture_nopie PRIVATE -no-pie)
+
+  add_executable(source_finish_omit_fixture_pie tests/fixtures/source_finish_omit_fixture.c)
+  target_compile_options(source_finish_omit_fixture_pie PRIVATE
+    -O0 -g -gdwarf-4 -fomit-frame-pointer -fPIE)
+  target_link_options(source_finish_omit_fixture_pie PRIVATE -pie)
+
+  add_executable(source_finish_omit_fixture_nopie tests/fixtures/source_finish_omit_fixture.c)
+  target_compile_options(source_finish_omit_fixture_nopie PRIVATE
+    -O0 -g -gdwarf-4 -fomit-frame-pointer -fno-pie)
+  target_link_options(source_finish_omit_fixture_nopie PRIVATE -no-pie)
 
   add_executable(debugger_integration tests/debugger_integration.cpp)
   target_link_libraries(debugger_integration PRIVATE mdbg_core)
@@ -132,9 +143,13 @@ if(BUILD_TESTING)
   target_link_libraries(source_finish_integration PRIVATE mdbg_core)
   target_compile_options(source_finish_integration PRIVATE -Wall -Wextra -Wpedantic -Werror)
   add_test(NAME source_finish_integration_pie
-    COMMAND source_finish_integration $<TARGET_FILE:source_next_fixture_pie>)
+    COMMAND source_finish_integration
+      $<TARGET_FILE:source_next_fixture_pie>
+      $<TARGET_FILE:source_finish_omit_fixture_pie>)
   add_test(NAME source_finish_integration_nopie
-    COMMAND source_finish_integration $<TARGET_FILE:source_next_fixture_nopie>)
+    COMMAND source_finish_integration
+      $<TARGET_FILE:source_next_fixture_nopie>
+      $<TARGET_FILE:source_finish_omit_fixture_nopie>)
 
   add_executable(elf_tests tests/elf_tests.cpp)
   target_link_libraries(elf_tests PRIVATE mdbg_core)

@@ -29,8 +29,7 @@ void require_source_line(const std::optional<mdbg::SourceLocation>& source,
 
 std::uintptr_t source_address(const mdbg::DwarfLineTable& lines, const mdbg::ElfFile& elf,
                               const mdbg::Debugger& debugger, std::uint64_t line) {
-  const auto address =
-      lines.find_runtime_source(debugger.pid(), "next_source.c", line, elf);
+  const auto address = lines.find_runtime_source(debugger.pid(), "next_source.c", line, elf);
   require(address.has_value(), "finish fixture is missing line " + std::to_string(line));
   return static_cast<std::uintptr_t>(*address);
 }
@@ -179,16 +178,16 @@ void test_invalid_frame_pointer_is_fail_closed(const std::string& fixture) {
     mdbg::lowlevel::set_registers(debugger.pid(), changed);
     bool rejected = false;
     try {
-      static_cast<void>(mdbg::finish_frame(debugger));
+      static_cast<void>(mdbg::finish_frame_pointer(debugger));
     } catch (const std::invalid_argument&) {
       rejected = true;
     }
-    require(rejected, "invalid or unreadable frame pointer must reject finish");
+    require(rejected, "invalid or unreadable frame pointer must reject frame-pointer finish");
     require(debugger.state() == mdbg::ProcessState::Stopped &&
                 debugger.registers().rip == original_rip,
-            "rejected finish must not move RIP");
+            "rejected frame-pointer finish must not move RIP");
     require(debugger.breakpoints().size() == original_breakpoints,
-            "rejected finish must not mutate breakpoint state");
+            "rejected frame-pointer finish must not mutate breakpoint state");
   }
   mdbg::lowlevel::set_registers(debugger.pid(), original);
 
@@ -197,15 +196,49 @@ void test_invalid_frame_pointer_is_fail_closed(const std::string& fixture) {
           "tracee did not remain usable after rejected finish attempts");
 }
 
+void test_cfi_finish_without_frame_pointer(const std::string& fixture) {
+  auto debugger = mdbg::Debugger::launch(fixture, {});
+  const mdbg::ElfFile elf(fixture);
+  const mdbg::DwarfLineTable lines(fixture);
+  const auto line510 = source_address(lines, elf, debugger, 510);
+  const auto line501 = source_address(lines, elf, debugger, 501);
+
+  const auto start_id = debugger.add_breakpoint(line510);
+  const auto hit = debugger.continue_execution();
+  require(hit.reason == mdbg::StopReason::Breakpoint && hit.breakpoint_address == line510,
+          "CFI finish start breakpoint was not hit");
+
+  auto regs = debugger.registers();
+  regs.rbp = 3;
+  mdbg::lowlevel::set_registers(debugger.pid(), regs);
+
+  const auto result = mdbg::finish_frame(debugger);
+  require(result.reason == mdbg::FinishStopReason::Returned &&
+              result.return_address == line501 && debugger.registers().rip == line501,
+          ".eh_frame finish did not recover the caller return address without RBP");
+  require_source_line(lines.find_runtime_address(debugger.pid(), debugger.registers().rip, elf),
+                      501);
+  require(marker_value(debugger, elf) == 1,
+          "CFI finish must execute the callee before returning to the caller");
+  require_breakpoint_state(debugger, start_id, true);
+  require(debugger.breakpoints().size() == 1,
+          "CFI finish leaked a temporary return breakpoint");
+
+  const auto done = debugger.continue_execution();
+  require(done.reason == mdbg::StopReason::Exited && done.value == 0,
+          "CFI finish fixture did not exit cleanly");
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
-  if (argc != 2) return 2;
+  if (argc != 3) return 2;
   try {
     test_finish_returns_to_caller(argv[1]);
     test_callee_breakpoint_interrupts_finish(argv[1]);
     test_user_return_breakpoint_is_preserved(argv[1]);
     test_invalid_frame_pointer_is_fail_closed(argv[1]);
+    test_cfi_finish_without_frame_pointer(argv[2]);
     return 0;
   } catch (const std::exception& error) {
     std::fprintf(stderr, "source-finish integration failure: %s\n", error.what());

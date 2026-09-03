@@ -15,5 +15,6 @@ struct FinishResult {
 };
 
 FinishResult finish_frame(Debugger& debugger);
+FinishResult finish_frame_pointer(Debugger& debugger);
 
 }  // namespace mdbg

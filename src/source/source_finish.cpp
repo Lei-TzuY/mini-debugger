@@ -1,12 +1,17 @@
 #include "source/source_finish.hpp"
 
+#include "dwarf/eh_frame.hpp"
+#include "elf/elf.hpp"
 #include "ptrace/ptrace.hpp"
+
+#include <unistd.h>
 
 #include <cstddef>
 #include <cstdint>
 #include <limits>
 #include <optional>
 #include <stdexcept>
+#include <string>
 #include <vector>
 
 namespace mdbg {
@@ -23,7 +28,16 @@ std::uint64_t read_u64(const std::vector<std::byte>& bytes, std::size_t offset) 
   return value;
 }
 
-std::uintptr_t frame_return_address(const Debugger& debugger) {
+std::string process_executable(pid_t pid) {
+  const std::string link = "/proc/" + std::to_string(pid) + "/exe";
+  std::vector<char> buffer(4096);
+  const auto length = ::readlink(link.c_str(), buffer.data(), buffer.size() - 1);
+  if (length < 0) throw std::runtime_error("failed to resolve tracee executable for finish");
+  buffer[static_cast<std::size_t>(length)] = '\0';
+  return std::string(buffer.data());
+}
+
+std::uintptr_t frame_pointer_return_address(const Debugger& debugger) {
   if (debugger.state() != ProcessState::Stopped) {
     throw std::logic_error("finish requires a stopped tracee");
   }
@@ -63,6 +77,20 @@ std::uintptr_t frame_return_address(const Debugger& debugger) {
   return return_address;
 }
 
+std::uintptr_t automatic_return_address(const Debugger& debugger) {
+  if (debugger.state() != ProcessState::Stopped) {
+    throw std::logic_error("finish requires a stopped tracee");
+  }
+
+  const auto executable = process_executable(debugger.pid());
+  const ElfFile elf(executable);
+  const EhFrame cfi(executable);
+  if (const auto return_address = cfi.caller_return_address(debugger, elf)) {
+    return *return_address;
+  }
+  return frame_pointer_return_address(debugger);
+}
+
 bool has_breakpoint_at(const Debugger& debugger, std::uintptr_t address) {
   for (const auto& breakpoint : debugger.breakpoints()) {
     if (breakpoint.address == address) return true;
@@ -78,10 +106,7 @@ void remove_temporary_breakpoint(Debugger& debugger, std::optional<std::size_t>&
   id.reset();
 }
 
-}  // namespace
-
-FinishResult finish_frame(Debugger& debugger) {
-  const auto return_address = frame_return_address(debugger);
+FinishResult run_to_return_address(Debugger& debugger, std::uintptr_t return_address) {
   const bool user_breakpoint = has_breakpoint_at(debugger, return_address);
   std::optional<std::size_t> temporary_breakpoint;
   if (!user_breakpoint) {
@@ -109,6 +134,16 @@ FinishResult finish_frame(Debugger& debugger) {
   return {returned && !user_breakpoint ? FinishStopReason::Returned
                                       : FinishStopReason::Interrupted,
           stop, return_address};
+}
+
+}  // namespace
+
+FinishResult finish_frame(Debugger& debugger) {
+  return run_to_return_address(debugger, automatic_return_address(debugger));
+}
+
+FinishResult finish_frame_pointer(Debugger& debugger) {
+  return run_to_return_address(debugger, frame_pointer_return_address(debugger));
 }
 
 }  // namespace mdbg

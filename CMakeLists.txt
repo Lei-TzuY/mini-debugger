@@ -71,6 +71,16 @@ if(BUILD_TESTING)
     -O0 -g -gdwarf-4 -fno-omit-frame-pointer -fno-pie)
   target_link_options(source_next_fixture_nopie PRIVATE -no-pie)
 
+  add_executable(source_next_disp8_fixture_pie tests/fixtures/source_next_disp8_fixture.c)
+  target_compile_options(source_next_disp8_fixture_pie PRIVATE
+    -O0 -g -gdwarf-4 -fno-omit-frame-pointer -fPIE)
+  target_link_options(source_next_disp8_fixture_pie PRIVATE -pie)
+
+  add_executable(source_next_disp8_fixture_nopie tests/fixtures/source_next_disp8_fixture.c)
+  target_compile_options(source_next_disp8_fixture_nopie PRIVATE
+    -O0 -g -gdwarf-4 -fno-omit-frame-pointer -fno-pie)
+  target_link_options(source_next_disp8_fixture_nopie PRIVATE -no-pie)
+
   add_executable(source_finish_omit_fixture_pie tests/fixtures/source_finish_omit_fixture.c)
   target_compile_options(source_finish_omit_fixture_pie PRIVATE
     -O0 -g -gdwarf-4 -fomit-frame-pointer -fPIE)
@@ -175,6 +185,15 @@ if(BUILD_TESTING)
     COMMAND source_next_integration $<TARGET_FILE:source_next_fixture_pie>)
   add_test(NAME source_next_integration_nopie
     COMMAND source_next_integration $<TARGET_FILE:source_next_fixture_nopie>)
+
+  add_executable(source_next_disp8_integration tests/source_next_disp8_integration.cpp)
+  target_link_libraries(source_next_disp8_integration PRIVATE mdbg_core)
+  target_compile_options(source_next_disp8_integration PRIVATE
+    -Wall -Wextra -Wpedantic -Werror)
+  add_test(NAME source_next_disp8_integration_pie
+    COMMAND source_next_disp8_integration $<TARGET_FILE:source_next_disp8_fixture_pie>)
+  add_test(NAME source_next_disp8_integration_nopie
+    COMMAND source_next_disp8_integration $<TARGET_FILE:source_next_disp8_fixture_nopie>)
 
   add_executable(source_finish_integration tests/source_finish_integration.cpp)
   target_link_libraries(source_finish_integration PRIVATE mdbg_core)

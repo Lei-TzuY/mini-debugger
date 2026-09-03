@@ -26,6 +26,7 @@ Process::~Process() { cleanup(); }
 Process::Process(Process&& other) noexcept
     : pid_(std::exchange(other.pid_, -1)),
       state_(other.state_),
+      origin_(other.origin_),
       exit_code_(other.exit_code_),
       termination_signal_(other.termination_signal_) {}
 
@@ -34,6 +35,7 @@ Process& Process::operator=(Process&& other) noexcept {
     cleanup();
     pid_ = std::exchange(other.pid_, -1);
     state_ = other.state_;
+    origin_ = other.origin_;
     exit_code_ = other.exit_code_;
     termination_signal_ = other.termination_signal_;
   }
@@ -65,12 +67,31 @@ Process Process::launch(const std::string& executable,
     _exit(127);
   }
 
-  Process process(child);
+  Process process(child, ProcessOrigin::Launched);
   const auto initial = process.wait();
   if (initial.kind != WaitEvent::Kind::Stopped || initial.value != SIGTRAP) {
     throw std::runtime_error("tracee did not stop with SIGTRAP after exec");
   }
   lowlevel::set_options(child, PTRACE_O_EXITKILL);
+  return process;
+}
+
+Process Process::attach(pid_t pid) {
+  if (pid <= 0) {
+    throw std::invalid_argument("attach requires a positive pid");
+  }
+
+  lowlevel::attach(pid);
+  Process process(pid, ProcessOrigin::Attached);
+  try {
+    const auto initial = process.wait();
+    if (initial.kind != WaitEvent::Kind::Stopped || initial.value != SIGSTOP) {
+      throw std::runtime_error("attached tracee did not stop with SIGSTOP");
+    }
+  } catch (...) {
+    process.cleanup();
+    throw;
+  }
   return process;
 }
 
@@ -101,10 +122,36 @@ WaitEvent Process::wait() {
   throw std::runtime_error("waitpid returned an unsupported process state");
 }
 
+void Process::detach(int signal) {
+  if (origin_ != ProcessOrigin::Attached) {
+    throw std::logic_error("detach is only valid for an attached process");
+  }
+  if (state_ != ProcessState::Stopped) {
+    throw std::logic_error("detach requires a stopped process");
+  }
+  lowlevel::detach(pid_, signal);
+  state_ = ProcessState::Detached;
+  pid_ = -1;
+}
+
 void Process::cleanup() noexcept {
-  if (pid_ <= 0 || state_ == ProcessState::Exited || state_ == ProcessState::Signaled) {
+  if (pid_ <= 0 || state_ == ProcessState::Exited || state_ == ProcessState::Signaled ||
+      state_ == ProcessState::Detached) {
     return;
   }
+
+  if (origin_ == ProcessOrigin::Attached) {
+    if (state_ == ProcessState::Stopped) {
+      try {
+        lowlevel::detach(pid_);
+      } catch (...) {
+      }
+    }
+    pid_ = -1;
+    state_ = ProcessState::Detached;
+    return;
+  }
+
   ::kill(pid_, SIGKILL);
   int status = 0;
   while (::waitpid(pid_, &status, 0) == -1 && errno == EINTR) {

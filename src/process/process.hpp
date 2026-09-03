@@ -8,7 +8,8 @@
 
 namespace mdbg {
 
-enum class ProcessState { Stopped, Running, Exited, Signaled };
+enum class ProcessState { Stopped, Running, Exited, Signaled, Detached };
+enum class ProcessOrigin { Launched, Attached };
 
 struct WaitEvent {
   enum class Kind { Stopped, Exited, Signaled };
@@ -28,9 +29,11 @@ class Process {
 
   static Process launch(const std::string& executable,
                         const std::vector<std::string>& arguments = {});
+  static Process attach(pid_t pid);
 
   [[nodiscard]] pid_t pid() const noexcept { return pid_; }
   [[nodiscard]] ProcessState state() const noexcept { return state_; }
+  [[nodiscard]] ProcessOrigin origin() const noexcept { return origin_; }
   [[nodiscard]] std::optional<int> exit_code() const noexcept { return exit_code_; }
   [[nodiscard]] std::optional<int> termination_signal() const noexcept {
     return termination_signal_;
@@ -38,13 +41,16 @@ class Process {
 
   WaitEvent wait();
   void mark_running() noexcept { state_ = ProcessState::Running; }
+  void detach(int signal = 0);
 
  private:
-  explicit Process(pid_t pid) : pid_(pid), state_(ProcessState::Running) {}
+  Process(pid_t pid, ProcessOrigin origin)
+      : pid_(pid), state_(ProcessState::Running), origin_(origin) {}
   void cleanup() noexcept;
 
   pid_t pid_{-1};
   ProcessState state_{ProcessState::Exited};
+  ProcessOrigin origin_{ProcessOrigin::Launched};
   std::optional<int> exit_code_;
   std::optional<int> termination_signal_;
 };

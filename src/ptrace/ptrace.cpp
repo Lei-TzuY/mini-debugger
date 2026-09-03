@@ -31,6 +31,19 @@ void traceme() {
   }
 }
 
+void attach(pid_t pid) {
+  if (::ptrace(PTRACE_ATTACH, pid, nullptr, nullptr) == -1) {
+    throw_errno("PTRACE_ATTACH");
+  }
+}
+
+void detach(pid_t pid, int signal) {
+  if (::ptrace(PTRACE_DETACH, pid, nullptr,
+               reinterpret_cast<void*>(static_cast<intptr_t>(signal))) == -1) {
+    throw_errno("PTRACE_DETACH");
+  }
+}
+
 void set_options(pid_t pid, unsigned long options) {
   if (::ptrace(PTRACE_SETOPTIONS, pid, nullptr,
                reinterpret_cast<void*>(options)) == -1) {

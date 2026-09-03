@@ -51,6 +51,14 @@ if(BUILD_TESTING)
   add_test(NAME debugger_integration_nopie
     COMMAND debugger_integration $<TARGET_FILE:debugger_fixture_nopie>)
 
+  add_executable(attach_integration tests/attach_integration.cpp)
+  target_link_libraries(attach_integration PRIVATE mdbg_core)
+  target_compile_options(attach_integration PRIVATE -Wall -Wextra -Wpedantic -Werror)
+  add_test(NAME attach_integration_pie
+    COMMAND attach_integration $<TARGET_FILE:debugger_fixture_pie>)
+  add_test(NAME attach_integration_nopie
+    COMMAND attach_integration $<TARGET_FILE:debugger_fixture_nopie>)
+
   add_executable(elf_tests tests/elf_tests.cpp)
   target_link_libraries(elf_tests PRIVATE mdbg_core)
   target_compile_options(elf_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)

@@ -4,8 +4,10 @@
 
 #include <elf.h>
 
+#include <filesystem>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -22,6 +24,20 @@ std::optional<std::uintptr_t> try_parse_address(const std::string& text) {
   return std::nullopt;
 }
 
+pid_t parse_pid(const std::string& text) {
+  std::size_t consumed = 0;
+  const auto value = std::stoll(text, &consumed, 10);
+  if (consumed != text.size() || value <= 0 ||
+      value > static_cast<long long>(std::numeric_limits<pid_t>::max())) {
+    throw std::invalid_argument("invalid pid: " + text);
+  }
+  return static_cast<pid_t>(value);
+}
+
+std::string process_executable(pid_t pid) {
+  return std::filesystem::read_symlink("/proc/" + std::to_string(pid) + "/exe").string();
+}
+
 std::uintptr_t resolve_location(const std::string& text, const mdbg::ElfFile& elf, pid_t pid) {
   if (const auto address = try_parse_address(text)) return *address;
   const auto symbol = elf.find_symbol(text);
@@ -34,6 +50,9 @@ void print_stop(const mdbg::StopInfo& info, const mdbg::ElfFile& elf, pid_t pid)
   switch (info.reason) {
     case StopReason::InitialExec:
       std::cout << "stopped after exec\n";
+      break;
+    case StopReason::Attached:
+      std::cout << "attached to process " << pid << '\n';
       break;
     case StopReason::Breakpoint: {
       std::cout << "breakpoint at 0x" << std::hex << *info.breakpoint_address << std::dec;
@@ -63,20 +82,37 @@ void print_stop(const mdbg::StopInfo& info, const mdbg::ElfFile& elf, pid_t pid)
   }
 }
 
+void print_usage() {
+  std::cerr << "usage: mdbg <program> [args...]\n"
+               "       mdbg --attach <pid>\n";
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
-  if (argc < 2) {
-    std::cerr << "usage: mdbg <program> [args...]\n";
+  if (argc < 2 || (std::string(argv[1]) == "--attach" && argc != 3)) {
+    print_usage();
     return 2;
   }
 
-  std::vector<std::string> args;
-  for (int i = 2; i < argc; ++i) args.emplace_back(argv[i]);
-
   try {
-    const mdbg::ElfFile elf(argv[1]);
-    auto debugger = mdbg::Debugger::launch(argv[1], args);
+    const bool attach_mode = std::string(argv[1]) == "--attach";
+    std::string executable;
+    std::vector<std::string> args;
+
+    auto debugger = [&]() -> mdbg::Debugger {
+      if (attach_mode) {
+        const pid_t pid = parse_pid(argv[2]);
+        executable = process_executable(pid);
+        return mdbg::Debugger::attach(pid);
+      }
+
+      executable = argv[1];
+      for (int i = 2; i < argc; ++i) args.emplace_back(argv[i]);
+      return mdbg::Debugger::launch(executable, args);
+    }();
+
+    const mdbg::ElfFile elf(executable);
     print_stop(debugger.stop_info(), elf, debugger.pid());
 
     std::string line;
@@ -86,7 +122,22 @@ int main(int argc, char** argv) {
       std::string command;
       input >> command;
       if (command.empty()) continue;
-      if (command == "quit" || command == "q") break;
+      if (command == "quit" || command == "q") {
+        if (debugger.origin() == mdbg::ProcessOrigin::Attached) {
+          debugger.detach();
+          std::cout << "detached\n";
+        }
+        break;
+      }
+      if (command == "detach") {
+        if (debugger.origin() != mdbg::ProcessOrigin::Attached) {
+          std::cout << "detach is only valid for an attached process\n";
+          continue;
+        }
+        debugger.detach();
+        std::cout << "detached\n";
+        break;
+      }
       if (command == "continue" || command == "c") {
         print_stop(debugger.continue_execution(), elf, debugger.pid());
       } else if (command == "stepi" || command == "si") {
@@ -147,7 +198,8 @@ int main(int argc, char** argv) {
         }
       } else {
         std::cout << "commands: continue, stepi, regs, reg <name>, x <addr|symbol> [len], "
-                     "break <addr|symbol>, delete <id>, info breakpoints, symbols [filter], quit\n";
+                     "break <addr|symbol>, delete <id>, info breakpoints, symbols [filter], "
+                     "detach, quit\n";
       }
     }
   } catch (const std::exception& error) {

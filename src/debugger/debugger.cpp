@@ -4,6 +4,7 @@
 
 #include <csignal>
 #include <stdexcept>
+#include <utility>
 
 namespace mdbg {
 namespace {
@@ -12,10 +13,28 @@ constexpr std::byte kInt3{0xcc};
 
 Debugger Debugger::launch(const std::string& executable,
                           const std::vector<std::string>& arguments) {
-  return Debugger(Process::launch(executable, arguments));
+  return Debugger(Process::launch(executable, arguments),
+                  {StopReason::InitialExec, SIGTRAP, std::nullopt});
 }
 
-Debugger::Debugger(Process process) : process_(std::move(process)) {}
+Debugger Debugger::attach(pid_t pid) {
+  return Debugger(Process::attach(pid), {StopReason::Attached, SIGSTOP, std::nullopt});
+}
+
+Debugger::Debugger(Process process, StopInfo initial_stop)
+    : process_(std::move(process)), stop_info_(std::move(initial_stop)) {}
+
+Debugger::~Debugger() {
+  if (process_.origin() != ProcessOrigin::Attached ||
+      process_.state() != ProcessState::Stopped) {
+    return;
+  }
+  try {
+    restore_all_breakpoints();
+    process_.detach();
+  } catch (...) {
+  }
+}
 
 user_regs_struct Debugger::registers() const {
   if (process_.state() != ProcessState::Stopped) {
@@ -115,6 +134,34 @@ StopInfo Debugger::single_step(SignalPolicy policy) {
   lowlevel::single_step(process_.pid(), signal);
   process_.mark_running();
   return wait_and_classify(true);
+}
+
+void Debugger::detach(SignalPolicy policy) {
+  if (process_.origin() != ProcessOrigin::Attached) {
+    throw std::logic_error("detach is only valid for an attached process");
+  }
+  if (process_.state() != ProcessState::Stopped) {
+    throw std::logic_error("detach requires a stopped tracee");
+  }
+
+  const int signal = resume_signal(policy);
+  restore_all_breakpoints();
+  process_.detach(signal);
+  breakpoints_by_address_.clear();
+  breakpoint_ids_.clear();
+  pending_breakpoint_step_.reset();
+}
+
+void Debugger::restore_all_breakpoints() {
+  if (process_.state() != ProcessState::Stopped) {
+    throw std::logic_error("breakpoints can only be restored while the tracee is stopped");
+  }
+  for (auto& [address, breakpoint] : breakpoints_by_address_) {
+    if (!breakpoint.installed) continue;
+    lowlevel::write_byte(process_.pid(), address, breakpoint.original_byte);
+    breakpoint.installed = false;
+  }
+  pending_breakpoint_step_.reset();
 }
 
 StopInfo Debugger::step_over_pending_breakpoint(bool expose_single_step) {

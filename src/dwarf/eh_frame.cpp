@@ -22,6 +22,9 @@ namespace mdbg {
 namespace {
 
 constexpr std::uint8_t kPcrelSdata4 = 0x1b;
+constexpr std::uint64_t kDwarfRbp = 6;
+constexpr std::uint64_t kDwarfRsp = 7;
+constexpr std::uint64_t kDwarfRip = 16;
 
 struct Cie {
   std::uint64_t code_alignment{0};
@@ -42,6 +45,11 @@ struct CfiState {
   std::uint64_t cfa_register{0};
   std::int64_t cfa_offset{0};
   std::map<std::uint64_t, RegisterRule> rules;
+};
+struct EvaluatedFrame {
+  CfiState state;
+  std::uint64_t cfa;
+  std::uint64_t return_address;
 };
 
 template <typename T>
@@ -364,15 +372,130 @@ std::uint64_t dwarf_register(const user_regs_struct& regs, std::uint64_t reg) {
   }
 }
 
+std::uint64_t cursor_register(const EhFrameCursor& cursor, std::uint64_t reg) {
+  switch (reg) {
+    case kDwarfRbp:
+      if (!cursor.frame_pointer) {
+        throw std::runtime_error("CFI backtrace requires an unavailable caller RBP");
+      }
+      return *cursor.frame_pointer;
+    case kDwarfRsp:
+      return cursor.stack_pointer;
+    case kDwarfRip:
+      return cursor.instruction_pointer;
+    default:
+      throw std::runtime_error("CFI backtrace requires an unrecovered x86-64 register");
+  }
+}
+
 std::uint64_t read_u64(const std::vector<std::byte>& bytes) {
   if (bytes.size() != sizeof(std::uint64_t)) {
-    throw std::runtime_error("unexpected CFI return-address read size");
+    throw std::runtime_error("unexpected CFI register read size");
   }
   std::uint64_t value = 0;
   for (std::size_t index = 0; index < sizeof(std::uint64_t); ++index) {
     value |= static_cast<std::uint64_t>(std::to_integer<unsigned>(bytes[index])) << (index * 8U);
   }
   return value;
+}
+
+std::uint64_t read_cfi_slot(const Debugger& debugger, std::uint64_t address,
+                            const char* what) {
+  try {
+    return read_u64(
+        debugger.read_memory(static_cast<std::uintptr_t>(address), sizeof(std::uint64_t)));
+  } catch (const lowlevel::PtraceError&) {
+    throw std::runtime_error(std::string(what) + " is unreadable");
+  }
+}
+
+template <typename ReadRegister>
+std::optional<EvaluatedFrame> evaluate_frame(const std::vector<std::byte>& section,
+                                             std::uint64_t section_virtual_address,
+                                             std::uint64_t target,
+                                             const Debugger& debugger,
+                                             ReadRegister&& read_register) {
+  std::map<std::size_t, Cie> cies;
+  std::size_t entry = 0;
+  while (entry < section.size()) {
+    const auto length = read_at<std::uint32_t>(section, entry, ".eh_frame length");
+    if (length == 0) break;
+    if (length == 0xffffffffU) throw std::runtime_error("DWARF64 .eh_frame is unsupported");
+
+    const auto content = entry + sizeof(std::uint32_t);
+    if (length > section.size() - content) {
+      throw std::runtime_error(".eh_frame entry extends past section boundary");
+    }
+    const auto end = content + static_cast<std::size_t>(length);
+    std::size_t cursor = content;
+    const auto cie_pointer = read_scalar<std::uint32_t>(section, cursor, end, "CIE pointer");
+
+    if (cie_pointer == 0) {
+      cies.emplace(entry, parse_cie(section, cursor, end));
+      entry = end;
+      continue;
+    }
+    if (cie_pointer > content) throw std::runtime_error("FDE CIE pointer underflows section");
+    const auto cie_it = cies.find(content - static_cast<std::size_t>(cie_pointer));
+    if (cie_it == cies.end()) throw std::runtime_error("FDE references an unknown CIE");
+    const auto& cie = cie_it->second;
+
+    const auto field_virtual_address = section_virtual_address + cursor;
+    const auto relative = read_scalar<std::int32_t>(section, cursor, end, "FDE initial location");
+    const auto initial_location = add_signed(field_virtual_address, relative, "FDE start");
+    const auto signed_range = read_scalar<std::int32_t>(section, cursor, end, "FDE address range");
+    if (signed_range < 0) throw std::runtime_error("negative FDE address range");
+    const auto range = static_cast<std::uint64_t>(signed_range);
+    if (range > std::numeric_limits<std::uint64_t>::max() - initial_location) {
+      throw std::runtime_error("FDE address range overflows address space");
+    }
+
+    const auto augmentation_size = read_uleb(section, cursor, end);
+    if (augmentation_size > end - cursor) {
+      throw std::runtime_error("FDE augmentation extends past entry boundary");
+    }
+    cursor += static_cast<std::size_t>(augmentation_size);
+
+    if (target >= initial_location && target < initial_location + range) {
+      const auto cie_state =
+          execute(section, cie.instructions_begin, cie.instructions_end, cie, {}, nullptr,
+                  initial_location, std::numeric_limits<std::uint64_t>::max());
+      const auto state =
+          execute(section, cursor, end, cie, cie_state, &cie_state, initial_location, target);
+      if (!state.cfa_defined) throw std::runtime_error("CFI did not define a CFA");
+
+      const auto cfa = add_signed(read_register(state.cfa_register), state.cfa_offset, "CFI CFA");
+      const auto rule = state.rules.find(cie.return_register);
+      if (rule == state.rules.end() || rule->second.kind != RuleKind::Offset) {
+        throw std::runtime_error("CFI return-address rule is not a supported memory offset");
+      }
+      const auto slot = add_signed(cfa, rule->second.offset, "CFI return slot");
+      const auto return_address = read_cfi_slot(debugger, slot, "CFI return-address slot");
+      if (return_address == 0) throw std::runtime_error("CFI resolved a zero return address");
+      return EvaluatedFrame{state, cfa, return_address};
+    }
+
+    entry = end;
+  }
+  return std::nullopt;
+}
+
+std::optional<std::uintptr_t> recover_frame_pointer(const Debugger& debugger,
+                                                    const EhFrameCursor& current,
+                                                    const EvaluatedFrame& evaluated) {
+  const auto rule = evaluated.state.rules.find(kDwarfRbp);
+  if (rule == evaluated.state.rules.end()) return std::nullopt;
+  switch (rule->second.kind) {
+    case RuleKind::Undefined:
+      return std::nullopt;
+    case RuleKind::SameValue:
+      return current.frame_pointer;
+    case RuleKind::Offset: {
+      const auto slot = add_signed(evaluated.cfa, rule->second.offset, "CFI RBP slot");
+      return static_cast<std::uintptr_t>(read_cfi_slot(debugger, slot, "CFI RBP slot"));
+    }
+  }
+  throw std::runtime_error("unknown CFI register rule");
 }
 
 }  // namespace
@@ -396,76 +519,33 @@ std::optional<std::uintptr_t> EhFrame::caller_return_address(
   const auto bias = elf.load_bias(debugger.pid());
   if (regs.rip < bias) throw std::runtime_error("runtime RIP is below executable load bias");
   const auto target = static_cast<std::uint64_t>(regs.rip - bias);
+  const auto evaluated = evaluate_frame(
+      section_, section_virtual_address_, target, debugger,
+      [&regs](std::uint64_t reg) { return dwarf_register(regs, reg); });
+  if (!evaluated) return std::nullopt;
+  return static_cast<std::uintptr_t>(evaluated->return_address);
+}
 
-  std::map<std::size_t, Cie> cies;
-  std::size_t entry = 0;
-  while (entry < section_.size()) {
-    const auto length = read_at<std::uint32_t>(section_, entry, ".eh_frame length");
-    if (length == 0) break;
-    if (length == 0xffffffffU) throw std::runtime_error("DWARF64 .eh_frame is unsupported");
-
-    const auto content = entry + sizeof(std::uint32_t);
-    if (length > section_.size() - content) {
-      throw std::runtime_error(".eh_frame entry extends past section boundary");
-    }
-    const auto end = content + static_cast<std::size_t>(length);
-    std::size_t cursor = content;
-    const auto cie_pointer = read_scalar<std::uint32_t>(section_, cursor, end, "CIE pointer");
-
-    if (cie_pointer == 0) {
-      cies.emplace(entry, parse_cie(section_, cursor, end));
-      entry = end;
-      continue;
-    }
-    if (cie_pointer > content) throw std::runtime_error("FDE CIE pointer underflows section");
-    const auto cie_it = cies.find(content - static_cast<std::size_t>(cie_pointer));
-    if (cie_it == cies.end()) throw std::runtime_error("FDE references an unknown CIE");
-    const auto& cie = cie_it->second;
-
-    const auto field_virtual_address = section_virtual_address_ + cursor;
-    const auto relative = read_scalar<std::int32_t>(section_, cursor, end, "FDE initial location");
-    const auto initial_location = add_signed(field_virtual_address, relative, "FDE start");
-    const auto signed_range = read_scalar<std::int32_t>(section_, cursor, end, "FDE address range");
-    if (signed_range < 0) throw std::runtime_error("negative FDE address range");
-    const auto range = static_cast<std::uint64_t>(signed_range);
-    if (range > std::numeric_limits<std::uint64_t>::max() - initial_location) {
-      throw std::runtime_error("FDE address range overflows address space");
-    }
-
-    const auto augmentation_size = read_uleb(section_, cursor, end);
-    if (augmentation_size > end - cursor) {
-      throw std::runtime_error("FDE augmentation extends past entry boundary");
-    }
-    cursor += static_cast<std::size_t>(augmentation_size);
-
-    if (target >= initial_location && target < initial_location + range) {
-      const auto cie_state =
-          execute(section_, cie.instructions_begin, cie.instructions_end, cie, {}, nullptr,
-                  initial_location, std::numeric_limits<std::uint64_t>::max());
-      const auto state =
-          execute(section_, cursor, end, cie, cie_state, &cie_state, initial_location, target);
-      if (!state.cfa_defined) throw std::runtime_error("CFI did not define a CFA");
-
-      const auto cfa = add_signed(dwarf_register(regs, state.cfa_register), state.cfa_offset,
-                                  "CFI CFA");
-      const auto rule = state.rules.find(cie.return_register);
-      if (rule == state.rules.end() || rule->second.kind != RuleKind::Offset) {
-        throw std::runtime_error("CFI return-address rule is not a supported memory offset");
-      }
-      const auto slot = add_signed(cfa, rule->second.offset, "CFI return slot");
-      try {
-        const auto return_address =
-            read_u64(debugger.read_memory(static_cast<std::uintptr_t>(slot), sizeof(std::uint64_t)));
-        if (return_address == 0) throw std::runtime_error("CFI resolved a zero return address");
-        return static_cast<std::uintptr_t>(return_address);
-      } catch (const lowlevel::PtraceError&) {
-        throw std::runtime_error("CFI return-address slot is unreadable");
-      }
-    }
-
-    entry = end;
+std::optional<EhFrameCursor> EhFrame::caller_frame(
+    const Debugger& debugger, const ElfFile& elf, const EhFrameCursor& current) const {
+  if (!available_) return std::nullopt;
+  if (debugger.state() != ProcessState::Stopped) {
+    throw std::logic_error("CFI backtrace requires a stopped tracee");
   }
-  return std::nullopt;
+
+  const auto bias = elf.load_bias(debugger.pid());
+  if (current.instruction_pointer < bias) {
+    throw std::runtime_error("runtime frame RIP is below executable load bias");
+  }
+  const auto target = static_cast<std::uint64_t>(current.instruction_pointer - bias);
+  const auto evaluated = evaluate_frame(
+      section_, section_virtual_address_, target, debugger,
+      [&current](std::uint64_t reg) { return cursor_register(current, reg); });
+  if (!evaluated) return std::nullopt;
+
+  return EhFrameCursor{static_cast<std::uintptr_t>(evaluated->return_address),
+                       static_cast<std::uintptr_t>(evaluated->cfa),
+                       recover_frame_pointer(debugger, current, *evaluated)};
 }
 
 }  // namespace mdbg

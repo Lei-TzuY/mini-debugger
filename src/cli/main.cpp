@@ -1,9 +1,11 @@
 #include "debugger/debugger.hpp"
+#include "dwarf/eh_frame.hpp"
 #include "dwarf/line_table.hpp"
 #include "elf/elf.hpp"
 #include "registers/registers.hpp"
 #include "source/source_finish.hpp"
 #include "source/source_step.hpp"
+#include "unwind/cfi.hpp"
 #include "unwind/frame_pointer.hpp"
 
 #include <elf.h>
@@ -124,18 +126,42 @@ void print_stop(const mdbg::StopInfo& info, const mdbg::ElfFile& elf, pid_t pid)
   }
 }
 
+void print_symbolized_frame(std::size_t index, std::uintptr_t address,
+                            const mdbg::Debugger& debugger, const mdbg::ElfFile& elf) {
+  std::cout << '#' << index << " 0x" << std::hex << address << std::dec;
+  if (const auto symbol = elf.find_symbol_by_runtime_address(debugger.pid(), address)) {
+    std::cout << ' ' << symbol->symbol.name;
+    if (symbol->offset != 0) {
+      std::cout << "+0x" << std::hex << symbol->offset << std::dec;
+    }
+  }
+  std::cout << '\n';
+}
+
 void print_backtrace(const mdbg::Debugger& debugger, const mdbg::ElfFile& elf) {
-  const auto trace = mdbg::unwind_frame_pointers(debugger);
-  for (std::size_t index = 0; index < trace.frames.size(); ++index) {
-    const auto address = trace.frames[index].instruction_pointer;
-    std::cout << '#' << index << " 0x" << std::hex << address << std::dec;
-    if (const auto symbol = elf.find_symbol_by_runtime_address(debugger.pid(), address)) {
-      std::cout << ' ' << symbol->symbol.name;
-      if (symbol->offset != 0) {
-        std::cout << "+0x" << std::hex << symbol->offset << std::dec;
+  try {
+    const mdbg::EhFrame cfi(elf.path());
+    if (cfi.available()) {
+      const auto trace = mdbg::unwind_eh_frame(debugger, elf, cfi);
+      if (trace.stop_reason != mdbg::CfiUnwindStopReason::NoFrameInfo) {
+        for (std::size_t index = 0; index < trace.frames.size(); ++index) {
+          print_symbolized_frame(index, trace.frames[index].instruction_pointer, debugger, elf);
+        }
+        if (trace.stop_reason != mdbg::CfiUnwindStopReason::EndOfChain) {
+          std::cout << "backtrace stopped: "
+                    << mdbg::cfi_unwind_stop_reason_name(trace.stop_reason) << '\n';
+        }
+        return;
       }
     }
-    std::cout << '\n';
+  } catch (const std::exception& error) {
+    std::cout << "backtrace stopped: CFI unavailable: " << error.what() << '\n';
+    return;
+  }
+
+  const auto trace = mdbg::unwind_frame_pointers(debugger);
+  for (std::size_t index = 0; index < trace.frames.size(); ++index) {
+    print_symbolized_frame(index, trace.frames[index].instruction_pointer, debugger, elf);
   }
   if (trace.stop_reason != mdbg::UnwindStopReason::EndOfChain) {
     std::cout << "backtrace stopped: " << mdbg::unwind_stop_reason_name(trace.stop_reason) << '\n';

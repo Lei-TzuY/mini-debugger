@@ -1,6 +1,9 @@
 #include "debugger/debugger.hpp"
+#include "dwarf/eh_frame.hpp"
+#include "dwarf/line_table.hpp"
 #include "elf/elf.hpp"
 #include "ptrace/ptrace.hpp"
+#include "unwind/cfi.hpp"
 #include "unwind/frame_pointer.hpp"
 
 #include <csignal>
@@ -29,6 +32,14 @@ void require_frame_name(const mdbg::ElfFile& elf, pid_t pid, std::uintptr_t addr
   const auto resolved = elf.find_symbol_by_runtime_address(pid, address);
   require(resolved && resolved->symbol.name == expected,
           "expected frame " + expected + " at address " + std::to_string(address));
+}
+
+std::uintptr_t source_address(const mdbg::DwarfLineTable& lines, const mdbg::ElfFile& elf,
+                              const mdbg::Debugger& debugger, std::uint64_t line) {
+  const auto address = lines.find_runtime_source(debugger.pid(), "next_source.c", line, elf);
+  require(address.has_value(), "backtrace fixture is missing source line " +
+                                   std::to_string(line));
+  return static_cast<std::uintptr_t>(*address);
 }
 
 void test_frame_pointer_backtrace(const std::string& fixture) {
@@ -85,12 +96,55 @@ void test_frame_pointer_backtrace(const std::string& fixture) {
   std::remove(path.c_str());
 }
 
+void test_cfi_backtrace_without_frame_pointer(const std::string& fixture) {
+  auto debugger = mdbg::Debugger::launch(fixture, {});
+  const mdbg::ElfFile elf(fixture);
+  const mdbg::DwarfLineTable lines(fixture);
+  const mdbg::EhFrame cfi(fixture);
+  require(cfi.available(), "omit-frame-pointer fixture is missing .eh_frame");
+
+  const auto line510 = source_address(lines, elf, debugger, 510);
+  debugger.add_breakpoint(line510);
+  const auto hit = debugger.continue_execution();
+  require(hit.reason == mdbg::StopReason::Breakpoint && hit.breakpoint_address == line510,
+          "CFI backtrace start breakpoint was not hit");
+
+  auto regs = debugger.registers();
+  regs.rbp = 3;
+  mdbg::lowlevel::set_registers(debugger.pid(), regs);
+
+  const auto trace = mdbg::unwind_eh_frame(debugger, elf, cfi, 16);
+  require(trace.frames.size() >= 4, "CFI unwind returned fewer than four frames");
+  require(trace.frames[0].instruction_pointer == line510,
+          "CFI top frame did not preserve repaired RIP");
+  require_frame_name(elf, debugger.pid(), trace.frames[0].instruction_pointer, "next_callee");
+  require_frame_name(elf, debugger.pid(), trace.frames[1].instruction_pointer, "next_caller");
+  require_frame_name(elf, debugger.pid(), trace.frames[2].instruction_pointer, "next_outer");
+  require_frame_name(elf, debugger.pid(), trace.frames[3].instruction_pointer, "main");
+
+  const auto limited = mdbg::unwind_eh_frame(debugger, elf, cfi, 2);
+  require(limited.frames.size() == 2 &&
+              limited.stop_reason == mdbg::CfiUnwindStopReason::FrameLimit,
+          "CFI frame limit must bound the unwind deterministically");
+
+  const auto original = debugger.registers();
+  auto broken = original;
+  broken.rsp = 8;
+  mdbg::lowlevel::set_registers(debugger.pid(), broken);
+  const auto invalid = mdbg::unwind_eh_frame(debugger, elf, cfi, 16);
+  mdbg::lowlevel::set_registers(debugger.pid(), original);
+  require(invalid.frames.size() == 1 &&
+              invalid.stop_reason == mdbg::CfiUnwindStopReason::InvalidFrameState,
+          "unreadable CFI stack state must return a bounded partial trace");
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
-  if (argc != 2) return 2;
+  if (argc != 3) return 2;
   try {
     test_frame_pointer_backtrace(argv[1]);
+    test_cfi_backtrace_without_frame_pointer(argv[2]);
     return 0;
   } catch (const std::exception& error) {
     std::fprintf(stderr, "backtrace integration failure: %s\n", error.what());

@@ -17,7 +17,12 @@ __attribute__((noinline)) void next_caller(void) {
 }
 
 #line 1 "next_driver.c"
-int main(void) {
+__attribute__((noinline)) void next_outer(void) {
   next_caller();
+  next_marker += 0;
+}
+
+int main(void) {
+  next_outer();
   return next_marker == 3 ? 0 : 1;
 }

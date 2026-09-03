@@ -19,6 +19,7 @@ add_library(mdbg_core
   src/elf/elf.cpp
   src/debugger/debugger.cpp
   src/unwind/frame_pointer.cpp
+  src/unwind/cfi.cpp
   src/dwarf/line_table.cpp
   src/dwarf/source_lookup.cpp
   src/dwarf/eh_frame.cpp
@@ -101,9 +102,13 @@ if(BUILD_TESTING)
   target_link_libraries(backtrace_integration PRIVATE mdbg_core)
   target_compile_options(backtrace_integration PRIVATE -Wall -Wextra -Wpedantic -Werror)
   add_test(NAME backtrace_integration_pie
-    COMMAND backtrace_integration $<TARGET_FILE:debugger_fixture_pie>)
+    COMMAND backtrace_integration
+      $<TARGET_FILE:debugger_fixture_pie>
+      $<TARGET_FILE:source_finish_omit_fixture_pie>)
   add_test(NAME backtrace_integration_nopie
-    COMMAND backtrace_integration $<TARGET_FILE:debugger_fixture_nopie>)
+    COMMAND backtrace_integration
+      $<TARGET_FILE:debugger_fixture_nopie>
+      $<TARGET_FILE:source_finish_omit_fixture_nopie>)
 
   add_executable(dwarf_line_integration tests/dwarf_line_integration.cpp)
   target_link_libraries(dwarf_line_integration PRIVATE mdbg_core)

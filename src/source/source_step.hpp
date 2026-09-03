@@ -22,6 +22,8 @@ SourceStepResult step_source(Debugger& debugger, const ElfFile& elf,
                              std::size_t instruction_limit = 4096);
 SourceStepResult step_source(Debugger& debugger, const DwarfLineTable& lines,
                              const ElfFile& elf, std::size_t instruction_limit = 4096);
+SourceStepResult next_source(Debugger& debugger, const ElfFile& elf,
+                             std::size_t instruction_limit = 4096);
 SourceStepResult next_source(Debugger& debugger, const DwarfLineTable& lines,
                              const ElfFile& elf, std::size_t instruction_limit = 4096);
 

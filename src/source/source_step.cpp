@@ -24,14 +24,6 @@ bool same_source_line(const ModuleSourcePosition& left,
          same_source_line(left.source, right.source);
 }
 
-std::optional<SourceLocation> current_source(const Debugger& debugger,
-                                             const DwarfLineTable& lines,
-                                             const ElfFile& elf) {
-  if (debugger.state() != ProcessState::Stopped) return std::nullopt;
-  const auto rip = debugger.registers().rip;
-  return lines.find_runtime_address(debugger.pid(), rip, elf);
-}
-
 std::optional<ModuleSourcePosition> current_module_source(
     const Debugger& debugger, const ElfFile& elf) {
   if (debugger.state() != ProcessState::Stopped) return std::nullopt;
@@ -122,11 +114,11 @@ SourceStepResult step_source(Debugger& debugger, const DwarfLineTable& lines,
   return step_source(debugger, elf, instruction_limit);
 }
 
-SourceStepResult next_source(Debugger& debugger, const DwarfLineTable& lines,
-                             const ElfFile& elf, std::size_t instruction_limit) {
+SourceStepResult next_source(Debugger& debugger, const ElfFile& elf,
+                             std::size_t instruction_limit) {
   validate_source_motion(debugger, instruction_limit, "source next");
 
-  const auto start = current_source(debugger, lines, elf);
+  const auto start = current_module_source(debugger, elf);
   if (!start) {
     throw std::invalid_argument("current instruction has no source location");
   }
@@ -157,29 +149,36 @@ SourceStepResult next_source(Debugger& debugger, const DwarfLineTable& lines,
       if (temporary_breakpoint) {
         remove_temporary_breakpoint(debugger, temporary_breakpoint);
       }
-      const auto source = current_source(debugger, lines, elf);
+      const auto source = current_module_source(debugger, elf);
 
       if (!returned || user_breakpoint) {
-        return {SourceStepStopReason::Interrupted, stop, source, instructions};
+        return {SourceStepStopReason::Interrupted, stop, source_only(source), instructions};
       }
       if (source && !same_source_line(*source, *start)) {
-        return {SourceStepStopReason::LineChanged, stop, source, instructions};
+        return {SourceStepStopReason::LineChanged, stop, source_only(source), instructions};
       }
       continue;
     }
 
     const auto stop = debugger.single_step();
-    const auto source = current_source(debugger, lines, elf);
+    const auto source = current_module_source(debugger, elf);
     if (stop.reason != StopReason::SingleStep) {
-      return {SourceStepStopReason::Interrupted, stop, source, instructions};
+      return {SourceStepStopReason::Interrupted, stop, source_only(source), instructions};
     }
     if (source && !same_source_line(*source, *start)) {
-      return {SourceStepStopReason::LineChanged, stop, source, instructions};
+      return {SourceStepStopReason::LineChanged, stop, source_only(source), instructions};
     }
   }
 
+  const auto source = current_module_source(debugger, elf);
   return {SourceStepStopReason::InstructionLimit, debugger.stop_info(),
-          current_source(debugger, lines, elf), instruction_limit};
+          source_only(source), instruction_limit};
+}
+
+SourceStepResult next_source(Debugger& debugger, const DwarfLineTable& lines,
+                             const ElfFile& elf, std::size_t instruction_limit) {
+  static_cast<void>(lines);
+  return next_source(debugger, elf, instruction_limit);
 }
 
 }  // namespace mdbg

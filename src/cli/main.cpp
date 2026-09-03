@@ -293,18 +293,10 @@ int main(int argc, char** argv) {
       } else if (command == "step" || command == "s" || command == "next" || command == "n") {
         const bool next = command == "next" || command == "n";
         try {
-          if (next) {
-            const mdbg::DwarfLineTable lines(executable);
-            if (!lines.available()) {
-              std::cout << "no DWARF line table\n";
-              continue;
-            }
-            const auto result = mdbg::next_source(debugger, lines, elf);
-            print_source_motion_result("source next", result, debugger, elf);
-          } else {
-            const auto result = mdbg::step_source(debugger, elf);
-            print_source_motion_result("source step", result, debugger, elf);
-          }
+          const auto result = next ? mdbg::next_source(debugger, elf)
+                                   : mdbg::step_source(debugger, elf);
+          print_source_motion_result(next ? "source next" : "source step", result,
+                                     debugger, elf);
         } catch (const std::exception& error) {
           std::cout << (next ? "source next unavailable: " : "source step unavailable: ")
                     << error.what() << '\n';

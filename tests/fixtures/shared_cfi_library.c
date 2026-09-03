@@ -1,9 +1,10 @@
 volatile int shared_cfi_marker = 0;
+volatile int shared_next_marker = 0;
 
 __attribute__((noinline)) void shared_break_target(void) {
 #line 700 "shared_break_source.c"
   __asm__ volatile("nop" ::: "memory");
-#line 7 "shared_cfi_library.c"
+#line 8 "shared_cfi_library.c"
 }
 
 __attribute__((noinline)) void shared_step_target(void) {
@@ -11,13 +12,27 @@ __attribute__((noinline)) void shared_step_target(void) {
   __asm__ volatile("nop\n\tnop" ::: "memory");
 #line 711 "shared_step_source.c"
   __asm__ volatile("nop" ::: "memory");
-#line 15 "shared_cfi_library.c"
+#line 16 "shared_cfi_library.c"
+}
+
+__attribute__((noinline)) static void shared_next_callee(void) {
+#line 730 "shared_next_callee.c"
+  shared_next_marker += 1;
+#line 22 "shared_cfi_library.c"
+}
+
+__attribute__((noinline)) void shared_next_target(void) {
+#line 720 "shared_next_source.c"
+  shared_next_callee();
+#line 721 "shared_next_source.c"
+  __asm__ volatile("nop" ::: "memory");
+#line 30 "shared_cfi_library.c"
 }
 
 __attribute__((noinline)) void shared_ambiguous_target(void) {
 #line 900 "ambiguous_break_source.c"
   __asm__ volatile("nop" ::: "memory");
-#line 21 "shared_cfi_library.c"
+#line 36 "shared_cfi_library.c"
 }
 
 __attribute__((noinline)) void shared_leaf(void) {

@@ -8,6 +8,7 @@
 
 #include <csignal>
 #include <cstdio>
+#include <cstring>
 #include <filesystem>
 #include <stdexcept>
 #include <string>
@@ -34,6 +35,19 @@ void require_breakpoint_installed(const mdbg::Debugger& debugger, std::size_t id
     }
   }
   throw std::runtime_error("managed breakpoint disappeared");
+}
+
+int read_int_symbol(const mdbg::Debugger& debugger, const mdbg::ElfFile& elf,
+                    const std::string& name) {
+  const auto symbol = elf.find_symbol(name);
+  require(symbol.has_value(), name + " symbol is missing");
+  const auto address = static_cast<std::uintptr_t>(
+      elf.runtime_address(debugger.pid(), *symbol));
+  const auto bytes = debugger.read_memory(address, sizeof(int));
+  require(bytes.size() == sizeof(int), "failed to read " + name);
+  int value = 0;
+  std::memcpy(&value, bytes.data(), sizeof(value));
+  return value;
 }
 
 void require_module_symbol(const mdbg::ElfFile& executable, pid_t pid, std::uintptr_t address,
@@ -98,6 +112,19 @@ void test_shared_library_cfi(const std::string& driver, const std::string& libra
   require(step711->address > step710->address,
           "shared source-step line 711 must follow line 710");
 
+  const auto next720 = mdbg::find_module_source_by_file_line(
+      debugger.pid(), "shared_next_source.c", 720, executable);
+  const auto next721 = mdbg::find_module_source_by_file_line(
+      debugger.pid(), "shared_next_source.c", 721, executable);
+  require(next720 && next721,
+          "shared source-next fixture rows 720 and 721 must resolve");
+  require_same_module(next720->module_path, library,
+                      "shared source-next line 720 resolved from the wrong module");
+  require_same_module(next721->module_path, library,
+                      "shared source-next line 721 resolved from the wrong module");
+  require(next721->address > next720->address,
+          "shared source-next line 721 must follow line 720");
+
   const auto driver_source = mdbg::find_module_source_by_file_line(
       debugger.pid(), "driver_break_source.c", 800, executable);
   require(driver_source.has_value(),
@@ -131,6 +158,7 @@ void test_shared_library_cfi(const std::string& driver, const std::string& libra
 
   const auto source_breakpoint_id = debugger.add_breakpoint(shared_source->address);
   const auto step_breakpoint_id = debugger.add_breakpoint(step710->address);
+  const auto next_breakpoint_id = debugger.add_breakpoint(next720->address);
   debugger.add_breakpoint(probe_address);
 
   const auto source_hit = debugger.continue_execution();
@@ -167,6 +195,29 @@ void test_shared_library_cfi(const std::string& driver, const std::string& libra
   require_breakpoint_installed(
       debugger, step_breakpoint_id,
       "shared source-step breakpoint was not reinserted after displaced instruction");
+
+  const auto next_hit = debugger.continue_execution();
+  require(next_hit.reason == mdbg::StopReason::Breakpoint &&
+              next_hit.breakpoint_address == next720->address,
+          "shared source-next start breakpoint was not hit");
+
+  const auto next_result = mdbg::next_source(debugger, executable, 64);
+  require(next_result.reason == mdbg::SourceStepStopReason::LineChanged,
+          "shared-library source next did not reach the following caller source line");
+  require(next_result.source &&
+              std::filesystem::path(next_result.source->file).filename() ==
+                  "shared_next_source.c" &&
+              next_result.source->line == 721,
+          "shared-library source next stopped on the wrong source row");
+  require(debugger.registers().rip == next721->address,
+          "shared-library source next did not stop at the first row for line 721");
+  require(read_int_symbol(debugger, shared, "shared_next_marker") == 1,
+          "shared source-next callee side effect did not complete");
+  require_breakpoint_installed(
+      debugger, next_breakpoint_id,
+      "shared source-next breakpoint was not reinserted after displaced execution");
+  require(debugger.breakpoints().size() == 4,
+          "temporary shared source-next return breakpoint leaked into debugger state");
 
   const auto hit = debugger.continue_execution();
   require(hit.reason == mdbg::StopReason::Breakpoint &&

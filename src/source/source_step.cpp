@@ -42,16 +42,35 @@ std::optional<SourceLocation> source_only(
   return position->source;
 }
 
-std::optional<std::uintptr_t> direct_near_call_return_address(const Debugger& debugger) {
+std::optional<std::uintptr_t> supported_call_return_address(
+    const Debugger& debugger) {
   const auto rip = static_cast<std::uintptr_t>(debugger.registers().rip);
   const auto opcode = debugger.read_memory(rip, 1);
-  if (opcode.empty() || std::to_integer<unsigned>(opcode.front()) != 0xe8U) {
-    return std::nullopt;
+  if (opcode.empty()) return std::nullopt;
+
+  const auto first = std::to_integer<unsigned>(opcode.front());
+  std::size_t instruction_length = 0;
+  if (first == 0xe8U) {
+    instruction_length = 5;
+  } else if (first == 0xffU) {
+    if (rip == std::numeric_limits<std::uintptr_t>::max()) {
+      return std::nullopt;
+    }
+    const auto modrm_bytes = debugger.read_memory(rip + 1, 1);
+    if (modrm_bytes.empty()) return std::nullopt;
+    const auto modrm = std::to_integer<unsigned>(modrm_bytes.front());
+    const auto mod = (modrm >> 6U) & 0x3U;
+    const auto reg = (modrm >> 3U) & 0x7U;
+    if (reg == 2U && mod == 3U) {
+      instruction_length = 2;
+    }
   }
-  if (rip > std::numeric_limits<std::uintptr_t>::max() - 5) {
-    throw std::runtime_error("direct call return address overflows address space");
+
+  if (instruction_length == 0) return std::nullopt;
+  if (rip > std::numeric_limits<std::uintptr_t>::max() - instruction_length) {
+    throw std::runtime_error("call return address overflows address space");
   }
-  return rip + 5;
+  return rip + instruction_length;
 }
 
 bool has_breakpoint_at(const Debugger& debugger, std::uintptr_t address) {
@@ -124,7 +143,7 @@ SourceStepResult next_source(Debugger& debugger, const ElfFile& elf,
   }
 
   for (std::size_t instructions = 1; instructions <= instruction_limit; ++instructions) {
-    if (const auto return_address = direct_near_call_return_address(debugger)) {
+    if (const auto return_address = supported_call_return_address(debugger)) {
       const bool user_breakpoint = has_breakpoint_at(debugger, *return_address);
       std::optional<std::size_t> temporary_breakpoint;
       if (!user_breakpoint) {

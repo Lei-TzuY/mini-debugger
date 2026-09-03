@@ -14,8 +14,28 @@ __attribute__((noinline)) void next_caller(void) {
   next_marker += 2;
 }
 
+__attribute__((noinline)) void next_indirect_callee(void) {
+#line 530 "next_source.c"
+  next_marker += 4;
+#line 531 "next_source.c"
+  next_marker += 0;
+}
+
+__attribute__((noinline)) void next_indirect_caller(void) {
+#line 520 "next_source.c"
+  __asm__ volatile(
+      "leaq next_indirect_callee(%%rip), %%rax\n\t"
+      "call *%%rax"
+      :
+      :
+      : "rax", "rcx", "rdx", "rsi", "rdi", "r8", "r9", "r10", "r11", "cc", "memory");
+#line 521 "next_source.c"
+  next_marker += 8;
+}
+
 #line 1 "next_driver.c"
 int main(void) {
   next_caller();
-  return next_marker == 3 ? 0 : 1;
+  next_indirect_caller();
+  return next_marker == 15 ? 0 : 1;
 }

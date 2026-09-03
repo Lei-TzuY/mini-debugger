@@ -1,4 +1,5 @@
 #include "debugger/debugger.hpp"
+#include "dwarf/line_table.hpp"
 #include "elf/elf.hpp"
 #include "registers/registers.hpp"
 #include "unwind/frame_pointer.hpp"
@@ -101,6 +102,28 @@ void print_backtrace(const mdbg::Debugger& debugger, const mdbg::ElfFile& elf) {
   }
 }
 
+void print_source_location(const std::string& executable, std::uintptr_t address,
+                           const mdbg::Debugger& debugger, const mdbg::ElfFile& elf) {
+  try {
+    const mdbg::DwarfLineTable lines(executable);
+    if (!lines.available()) {
+      std::cout << "no DWARF line table\n";
+      return;
+    }
+    const auto source = lines.find_runtime_address(debugger.pid(), address, elf);
+    if (!source) {
+      std::cout << "no source location for 0x" << std::hex << address << std::dec << '\n';
+      return;
+    }
+    std::cout << "0x" << std::hex << address << std::dec << ' ' << source->file << ':'
+              << source->line;
+    if (source->column != 0) std::cout << ':' << source->column;
+    std::cout << '\n';
+  } catch (const std::exception& error) {
+    std::cout << "line info unavailable: " << error.what() << '\n';
+  }
+}
+
 void print_usage() {
   std::cerr << "usage: mdbg <program> [args...]\n"
                "       mdbg --attach <pid>\n";
@@ -167,6 +190,15 @@ int main(int argc, char** argv) {
         }
       } else if (command == "bt") {
         print_backtrace(debugger, elf);
+      } else if (command == "line") {
+        std::string location;
+        input >> location;
+        if (location.empty()) {
+          std::cout << "usage: line <address|symbol>\n";
+          continue;
+        }
+        const auto address = resolve_location(location, elf, debugger.pid());
+        print_source_location(executable, address, debugger, elf);
       } else if (command == "reg") {
         std::string name;
         input >> name;
@@ -218,9 +250,9 @@ int main(int argc, char** argv) {
                     << std::dec << ' ' << symbol.name << '\n';
         }
       } else {
-        std::cout << "commands: continue, stepi, regs, bt, reg <name>, x <addr|symbol> [len], "
-                     "break <addr|symbol>, delete <id>, info breakpoints, symbols [filter], "
-                     "detach, quit\n";
+        std::cout << "commands: continue, stepi, regs, bt, line <addr|symbol>, reg <name>, "
+                     "x <addr|symbol> [len], break <addr|symbol>, delete <id>, "
+                     "info breakpoints, symbols [filter], detach, quit\n";
       }
     }
   } catch (const std::exception& error) {

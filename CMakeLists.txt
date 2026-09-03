@@ -19,6 +19,7 @@ add_library(mdbg_core
   src/elf/elf.cpp
   src/debugger/debugger.cpp
   src/unwind/frame_pointer.cpp
+  src/dwarf/line_table.cpp
 )
 target_include_directories(mdbg_core PUBLIC src)
 target_compile_options(mdbg_core PRIVATE -Wall -Wextra -Wpedantic -Werror)
@@ -42,6 +43,18 @@ if(BUILD_TESTING)
   target_link_options(debugger_fixture_stripped PRIVATE -pie)
   add_custom_command(TARGET debugger_fixture_stripped POST_BUILD
     COMMAND ${CMAKE_STRIP} --strip-all $<TARGET_FILE:debugger_fixture_stripped>)
+
+  add_executable(debug_line_fixture_pie tests/fixtures/debug_line_fixture.c)
+  target_compile_options(debug_line_fixture_pie PRIVATE -O0 -g -gdwarf-4 -fPIE)
+  target_link_options(debug_line_fixture_pie PRIVATE -pie)
+
+  add_executable(debug_line_fixture_nopie tests/fixtures/debug_line_fixture.c)
+  target_compile_options(debug_line_fixture_nopie PRIVATE -O0 -g -gdwarf-4 -fno-pie)
+  target_link_options(debug_line_fixture_nopie PRIVATE -no-pie)
+
+  add_executable(debug_line_fixture_v5 tests/fixtures/debug_line_fixture.c)
+  target_compile_options(debug_line_fixture_v5 PRIVATE -O0 -g -gdwarf-5 -fno-pie)
+  target_link_options(debug_line_fixture_v5 PRIVATE -no-pie)
 
   add_executable(debugger_integration tests/debugger_integration.cpp)
   target_link_libraries(debugger_integration PRIVATE mdbg_core)
@@ -67,6 +80,20 @@ if(BUILD_TESTING)
     COMMAND backtrace_integration $<TARGET_FILE:debugger_fixture_pie>)
   add_test(NAME backtrace_integration_nopie
     COMMAND backtrace_integration $<TARGET_FILE:debugger_fixture_nopie>)
+
+  add_executable(dwarf_line_integration tests/dwarf_line_integration.cpp)
+  target_link_libraries(dwarf_line_integration PRIVATE mdbg_core)
+  target_compile_options(dwarf_line_integration PRIVATE -Wall -Wextra -Wpedantic -Werror)
+  add_test(NAME dwarf_line_integration_pie
+    COMMAND dwarf_line_integration
+      $<TARGET_FILE:debug_line_fixture_pie>
+      $<TARGET_FILE:debugger_fixture_stripped>
+      $<TARGET_FILE:debug_line_fixture_v5>)
+  add_test(NAME dwarf_line_integration_nopie
+    COMMAND dwarf_line_integration
+      $<TARGET_FILE:debug_line_fixture_nopie>
+      $<TARGET_FILE:debugger_fixture_stripped>
+      $<TARGET_FILE:debug_line_fixture_v5>)
 
   add_executable(elf_tests tests/elf_tests.cpp)
   target_link_libraries(elf_tests PRIVATE mdbg_core)

@@ -17,6 +17,7 @@ Implemented now:
 - bounded x86-64 frame-pointer unwinding with symbolized `bt`
 - bounded DWARF v4 `.debug_line` address <-> file:line resolution
 - CLI breakpoints by numeric address, symbol, or source line (`break mapped_source.c:400`)
+- bounded source-level `step` across DWARF v4 file:line transitions
 - deterministic PIE/non-PIE/stripped fixture coverage
 
 ## Build
@@ -47,6 +48,10 @@ breakpoint at 0x55... (main)
 0x55... hello.c:12
 (mdbg) break hello.c:12
 Breakpoint 2 at 0x55... (hello.c:12)
+(mdbg) continue
+breakpoint at 0x55... (main+0x...)
+(mdbg) step
+0x55... hello.c:13
 ```
 
 Attach to an existing process:
@@ -62,7 +67,7 @@ detached
 
 Attach permission is governed by the host kernel's ptrace policy. Detaching restores all debugger-owned `INT3` bytes first; quitting an attached session also detaches instead of killing the target.
 
-Commands currently implemented: `continue`, `stepi`, `regs`, `bt`, `line <address|symbol>`, `reg <name>`, `x <address|symbol> [length]`, `break <address|symbol|file:line>`, `delete <id>`, `info breakpoints`, `symbols [filter]`, `detach`, and `quit`.
+Commands currently implemented: `continue`, `step`, `stepi`, `regs`, `bt`, `line <address|symbol>`, `reg <name>`, `x <address|symbol> [length]`, `break <address|symbol|file:line>`, `delete <id>`, `info breakpoints`, `symbols [filter]`, `detach`, and `quit`.
 
 ## Breakpoint invariant
 
@@ -86,8 +91,10 @@ This strategy is reliable only for code compiled with frame pointers preserved (
 
 Reverse `file:line -> address` lookup reuses those parsed ranges. When a line has multiple emitted rows, the debugger chooses the lowest virtual address deterministically. Basename lookup such as `mapped_source.c:400` is accepted only when all matching rows for that line refer to the same source path; ambiguous basenames fail explicitly. `break file.c:line` then installs a normal managed software breakpoint at the resolved runtime address.
 
-Source display, source-level `step`/`next`, DWARF5, and DWARF CFI remain future work.
+`step` is intentionally source-level while `stepi` remains one machine instruction. Source stepping starts from the current mapped `file:line`, repeatedly delegates to the existing managed instruction-step path, and stops at the first different mapped `file:line`. That means a breakpoint currently pending displaced execution is stepped correctly and reinserted by the same breakpoint state machine. A hard instruction bound prevents an unbounded walk through code without line information; signals, exits, and other non-single-step stops interrupt the operation instead of being hidden.
+
+Source display, source-level `next`/`finish`, DWARF5, and DWARF CFI remain future work.
 
 ## Current limits
 
-One traced process/thread only. Source mapping and source breakpoints are limited to DWARF v4 `.debug_line`; there is no source-level `next/step/finish`, DWARF CFI unwinding, or hardware watchpoints yet. ELF extended section numbering and non-x86-64/little-endian ELF are intentionally unsupported for now.
+One traced process/thread only. Source mapping, source breakpoints, and source stepping are limited to DWARF v4 `.debug_line`; `step` is instruction-driven and bounded rather than a call-aware `next`. There is no source-level `next/finish`, DWARF CFI unwinding, or hardware watchpoints yet. ELF extended section numbering and non-x86-64/little-endian ELF are intentionally unsupported for now.

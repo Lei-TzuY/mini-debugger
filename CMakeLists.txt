@@ -21,6 +21,7 @@ add_library(mdbg_core
   src/unwind/frame_pointer.cpp
   src/dwarf/line_table.cpp
   src/dwarf/source_lookup.cpp
+  src/source/source_step.cpp
 )
 target_include_directories(mdbg_core PUBLIC src)
 target_compile_options(mdbg_core PRIVATE -Wall -Wextra -Wpedantic -Werror)
@@ -95,6 +96,18 @@ if(BUILD_TESTING)
       $<TARGET_FILE:debug_line_fixture_nopie>
       $<TARGET_FILE:debugger_fixture_stripped>
       $<TARGET_FILE:debug_line_fixture_v5>)
+
+  add_executable(source_step_integration tests/source_step_integration.cpp)
+  target_link_libraries(source_step_integration PRIVATE mdbg_core)
+  target_compile_options(source_step_integration PRIVATE -Wall -Wextra -Wpedantic -Werror)
+  add_test(NAME source_step_integration_pie
+    COMMAND source_step_integration
+      $<TARGET_FILE:debug_line_fixture_pie>
+      $<TARGET_FILE:debugger_fixture_stripped>)
+  add_test(NAME source_step_integration_nopie
+    COMMAND source_step_integration
+      $<TARGET_FILE:debug_line_fixture_nopie>
+      $<TARGET_FILE:debugger_fixture_stripped>)
 
   add_executable(elf_tests tests/elf_tests.cpp)
   target_link_libraries(elf_tests PRIVATE mdbg_core)

@@ -1,5 +1,8 @@
 #line 400 "mapped_source.c"
 __attribute__((noinline)) void line_probe(void) {
+#line 401 "mapped_source.c"
+  __asm__ volatile("nop\n\tnop\n\tnop" ::: "memory");
+#line 402 "mapped_source.c"
   __asm__ volatile("nop" ::: "memory");
 }
 

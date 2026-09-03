@@ -8,6 +8,7 @@
 #include <cctype>
 #include <filesystem>
 #include <fstream>
+#include <memory>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -23,6 +24,18 @@ std::string trim_left(std::string value) {
   });
   value.erase(value.begin(), first);
   return value;
+}
+
+bool is_deleted_mapping(const std::string& path) {
+  constexpr const char* deleted_suffix = " (deleted)";
+  return path.size() >= 10 && path.compare(path.size() - 10, 10, deleted_suffix) == 0;
+}
+
+bool same_file(const std::string& left, const std::string& right) {
+  std::error_code error;
+  const bool equivalent = std::filesystem::equivalent(left, right, error);
+  if (!error) return equivalent;
+  return left == right;
 }
 
 std::optional<std::string> mapped_module_path(pid_t pid, std::uintptr_t address) {
@@ -50,9 +63,7 @@ std::optional<std::string> mapped_module_path(pid_t pid, std::uintptr_t address)
     std::string path;
     std::getline(fields, path);
     path = trim_left(std::move(path));
-    if (path.empty() || path.front() != '/') return std::nullopt;
-    constexpr const char* deleted_suffix = " (deleted)";
-    if (path.size() >= 10 && path.compare(path.size() - 10, 10, deleted_suffix) == 0) {
+    if (path.empty() || path.front() != '/' || is_deleted_mapping(path)) {
       return std::nullopt;
     }
     return path;
@@ -60,11 +71,60 @@ std::optional<std::string> mapped_module_path(pid_t pid, std::uintptr_t address)
   return std::nullopt;
 }
 
-bool same_file(const std::string& left, const std::string& right) {
-  std::error_code error;
-  const bool equivalent = std::filesystem::equivalent(left, right, error);
-  if (!error) return equivalent;
-  return left == right;
+std::vector<std::string> mapped_module_paths(pid_t pid) {
+  std::ifstream maps("/proc/" + std::to_string(pid) + "/maps");
+  if (!maps) throw std::runtime_error("failed to open tracee memory map for source lookup");
+
+  std::vector<std::string> paths;
+  std::string line;
+  while (std::getline(maps, line)) {
+    std::istringstream fields(line);
+    std::string range, permissions, offset, device, inode;
+    if (!(fields >> range >> permissions >> offset >> device >> inode)) continue;
+
+    std::string path;
+    std::getline(fields, path);
+    path = trim_left(std::move(path));
+    if (path.empty() || path.front() != '/' || is_deleted_mapping(path)) continue;
+
+    const auto duplicate = std::find_if(paths.begin(), paths.end(), [&](const std::string& known) {
+      return same_file(known, path);
+    });
+    if (duplicate == paths.end()) paths.push_back(std::move(path));
+  }
+  return paths;
+}
+
+std::optional<ModuleResolvedSourceAddress> source_address_in_module(
+    pid_t pid, std::string_view file, std::uint64_t line, const std::string& path,
+    const ElfFile& preferred_elf) {
+  const ElfFile* elf = &preferred_elf;
+  std::unique_ptr<ElfFile> owned_elf;
+  if (!same_file(path, preferred_elf.path())) {
+    try {
+      owned_elf = std::make_unique<ElfFile>(path);
+      elf = owned_elf.get();
+    } catch (const std::exception&) {
+      return std::nullopt;
+    }
+  }
+
+  std::unique_ptr<DwarfLineTable> lines;
+  try {
+    lines = std::make_unique<DwarfLineTable>(elf->path());
+  } catch (const std::exception&) {
+    return std::nullopt;
+  }
+  if (!lines->available()) return std::nullopt;
+
+  const auto address = lines->find_runtime_source(pid, file, line, *elf);
+  if (!address) return std::nullopt;
+  const auto source = lines->find_runtime_address(pid, *address, *elf);
+  if (!source) {
+    throw std::runtime_error("reverse source lookup resolved an unmapped line-table address");
+  }
+  return ModuleResolvedSourceAddress{path, source->file, source->line,
+                                     static_cast<std::uintptr_t>(*address)};
 }
 
 struct ModuleCfi {
@@ -142,6 +202,23 @@ std::optional<ModuleResolvedSource> find_module_source_by_runtime_address(
   } catch (const std::exception&) {
     return std::nullopt;
   }
+}
+
+std::optional<ModuleResolvedSourceAddress> find_module_source_by_file_line(
+    pid_t pid, std::string_view file, std::uint64_t line, const ElfFile& preferred_elf) {
+  if (file.empty() || line == 0) return std::nullopt;
+
+  std::optional<ModuleResolvedSourceAddress> result;
+  for (const auto& path : mapped_module_paths(pid)) {
+    const auto candidate = source_address_in_module(pid, file, line, path, preferred_elf);
+    if (!candidate) continue;
+    if (result) {
+      throw std::runtime_error("ambiguous source location across loaded modules: " +
+                               std::string(file) + ':' + std::to_string(line));
+    }
+    result = candidate;
+  }
+  return result;
 }
 
 std::optional<std::uintptr_t> module_caller_return_address(

@@ -72,19 +72,19 @@ std::uintptr_t resolve_location(const std::string& text, const mdbg::ElfFile& el
   return static_cast<std::uintptr_t>(elf.runtime_address(pid, *symbol));
 }
 
-std::uintptr_t resolve_break_location(const std::string& text, const std::string& executable,
-                                      const mdbg::ElfFile& elf, pid_t pid) {
+std::uintptr_t resolve_break_location(const std::string& text, const mdbg::ElfFile& elf,
+                                      pid_t pid) {
   if (const auto address = try_parse_address(text)) return *address;
   if (const auto symbol = elf.find_symbol(text)) {
     return static_cast<std::uintptr_t>(elf.runtime_address(pid, *symbol));
   }
   if (const auto source = try_parse_source_spec(text)) {
-    const mdbg::DwarfLineTable lines(executable);
-    const auto address = lines.find_runtime_source(pid, source->file, source->line, elf);
-    if (!address) {
+    const auto resolved =
+        mdbg::find_module_source_by_file_line(pid, source->file, source->line, elf);
+    if (!resolved) {
       throw std::invalid_argument("no executable address for source location: " + text);
     }
-    return static_cast<std::uintptr_t>(*address);
+    return resolved->address;
   }
   throw std::invalid_argument("unknown symbol or source location: " + text);
 }
@@ -365,7 +365,7 @@ int main(int argc, char** argv) {
           std::cout << "usage: break <address|symbol|file:line>\n";
           continue;
         }
-        const auto address = resolve_break_location(location, executable, elf, debugger.pid());
+        const auto address = resolve_break_location(location, elf, debugger.pid());
         const auto id = debugger.add_breakpoint(address);
         std::cout << "Breakpoint " << id << " at 0x" << std::hex << address << std::dec;
         if (!try_parse_address(location)) std::cout << " (" << location << ')';

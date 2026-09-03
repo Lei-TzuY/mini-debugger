@@ -17,6 +17,13 @@ void require(bool condition, const std::string& message) {
   if (!condition) throw std::runtime_error(message);
 }
 
+void require_same_module(const std::string& actual, const std::string& expected,
+                         const std::string& message) {
+  std::error_code error;
+  const bool equivalent = std::filesystem::equivalent(actual, expected, error);
+  require(!error && equivalent, message);
+}
+
 void require_module_symbol(const mdbg::ElfFile& executable, pid_t pid, std::uintptr_t address,
                            const std::string& expected_module,
                            const std::string& expected_symbol) {
@@ -25,12 +32,9 @@ void require_module_symbol(const mdbg::ElfFile& executable, pid_t pid, std::uint
   require(resolved && resolved->name == expected_symbol,
           "expected module symbol " + expected_symbol + " at address " +
               std::to_string(address));
-
-  std::error_code error;
-  const bool equivalent =
-      std::filesystem::equivalent(resolved->module_path, expected_module, error);
-  require(!error && equivalent,
-          "module symbol " + expected_symbol + " resolved from the wrong ELF image");
+  require_same_module(resolved->module_path, expected_module,
+                      "module symbol " + expected_symbol +
+                          " resolved from the wrong ELF image");
 }
 
 void require_module_source(const mdbg::ElfFile& executable, pid_t pid, std::uintptr_t address,
@@ -43,12 +47,9 @@ void require_module_source(const mdbg::ElfFile& executable, pid_t pid, std::uint
   require(std::filesystem::path(resolved->file).filename() == expected_file,
           "module source resolved to the wrong source file: " + resolved->file);
   require(resolved->line != 0, "module source must expose a non-zero source line");
-
-  std::error_code error;
-  const bool equivalent =
-      std::filesystem::equivalent(resolved->module_path, expected_module, error);
-  require(!error && equivalent,
-          "module source " + expected_file + " resolved from the wrong ELF image");
+  require_same_module(resolved->module_path, expected_module,
+                      "module source " + expected_file +
+                          " resolved from the wrong ELF image");
 }
 
 void test_shared_library_cfi(const std::string& driver, const std::string& library) {
@@ -60,16 +61,77 @@ void test_shared_library_cfi(const std::string& driver, const std::string& libra
   const mdbg::ElfFile executable(driver);
   const mdbg::EhFrame executable_cfi(driver);
   const mdbg::ElfFile shared(library);
+
+  const auto shared_source = mdbg::find_module_source_by_file_line(
+      debugger.pid(), "shared_break_source.c", 700, executable);
+  require(shared_source.has_value(),
+          "loaded shared-object source line did not resolve to a runtime address");
+  require(shared_source->line == 700 &&
+              std::filesystem::path(shared_source->file).filename() ==
+                  "shared_break_source.c",
+          "shared-object reverse lookup resolved the wrong source row");
+  require_same_module(shared_source->module_path, library,
+                      "shared-object reverse lookup resolved the wrong module");
+
+  const auto driver_source = mdbg::find_module_source_by_file_line(
+      debugger.pid(), "driver_break_source.c", 800, executable);
+  require(driver_source.has_value(),
+          "main-executable source line did not resolve through module routing");
+  require(driver_source->line == 800 &&
+              std::filesystem::path(driver_source->file).filename() ==
+                  "driver_break_source.c",
+          "main-executable reverse lookup resolved the wrong source row");
+  require_same_module(driver_source->module_path, driver,
+                      "main-executable reverse lookup resolved the wrong module");
+
+  bool ambiguous = false;
+  try {
+    (void)mdbg::find_module_source_by_file_line(
+        debugger.pid(), "ambiguous_break_source.c", 900, executable);
+  } catch (const std::runtime_error& error) {
+    ambiguous = std::string(error.what()).find(
+                    "ambiguous source location across loaded modules") != std::string::npos;
+  }
+  require(ambiguous,
+          "source line present in multiple loaded modules must be rejected as ambiguous");
+
+  require(!mdbg::find_module_source_by_file_line(
+              debugger.pid(), "missing_break_source.c", 1, executable),
+          "unknown source line must not resolve to a loaded module");
+
   const auto probe = shared.find_symbol("shared_cfi_probe");
   require(probe.has_value(), "shared_cfi_probe symbol is missing");
   const auto probe_address =
       static_cast<std::uintptr_t>(shared.runtime_address(debugger.pid(), *probe));
 
+  const auto source_breakpoint_id = debugger.add_breakpoint(shared_source->address);
   debugger.add_breakpoint(probe_address);
+
+  const auto source_hit = debugger.continue_execution();
+  require(source_hit.reason == mdbg::StopReason::Breakpoint &&
+              source_hit.breakpoint_address == shared_source->address,
+          "module-aware source breakpoint in shared object was not hit");
+  const auto hit_source = mdbg::find_module_source_by_runtime_address(
+      debugger.pid(), *source_hit.breakpoint_address, executable);
+  require(hit_source && hit_source->line == 700 &&
+              std::filesystem::path(hit_source->file).filename() ==
+                  "shared_break_source.c",
+          "shared-object source breakpoint stopped on the wrong source row");
+
   const auto hit = debugger.continue_execution();
   require(hit.reason == mdbg::StopReason::Breakpoint &&
               hit.breakpoint_address == probe_address,
-          "shared-library CFI probe breakpoint was not hit");
+          "shared-library CFI probe breakpoint was not hit after source step-over");
+
+  bool source_breakpoint_reinserted = false;
+  for (const auto& breakpoint : debugger.breakpoints()) {
+    if (breakpoint.id == source_breakpoint_id) {
+      source_breakpoint_reinserted = breakpoint.installed;
+      break;
+    }
+  }
+  require(source_breakpoint_reinserted,
+          "shared-object source breakpoint was not reinserted after displaced execution");
 
   auto regs = debugger.registers();
   regs.rbp = 3;
@@ -134,6 +196,9 @@ void test_unsupported_module_source(const std::string& dwarf5_fixture) {
   require(!mdbg::find_module_source_by_runtime_address(
               debugger.pid(), address, executable),
           "unsupported DWARF module source must degrade to no source information");
+  require(!mdbg::find_module_source_by_file_line(
+              debugger.pid(), "mapped_source.c", 400, executable),
+          "unsupported DWARF reverse lookup must degrade to no source information");
 }
 
 }  // namespace

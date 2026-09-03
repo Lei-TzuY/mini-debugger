@@ -1,6 +1,7 @@
 #include "unwind/cfi.hpp"
 
 #include "debugger/debugger.hpp"
+#include "dwarf/line_table.hpp"
 #include "elf/elf.hpp"
 
 #include <algorithm>
@@ -115,6 +116,32 @@ std::optional<ModuleResolvedSymbol> find_module_symbol_by_runtime_address(
   if (same_file(*path, preferred_elf.path())) return resolve(preferred_elf);
   const ElfFile module(*path);
   return resolve(module);
+}
+
+std::optional<ModuleResolvedSource> find_module_source_by_runtime_address(
+    pid_t pid, std::uintptr_t address, const ElfFile& preferred_elf) {
+  const auto path = mapped_module_path(pid, address);
+  if (!path) return std::nullopt;
+
+  const auto resolve = [&](const ElfFile& elf) -> std::optional<ModuleResolvedSource> {
+    try {
+      const DwarfLineTable lines(elf.path());
+      if (!lines.available()) return std::nullopt;
+      const auto source = lines.find_runtime_address(pid, address, elf);
+      if (!source) return std::nullopt;
+      return ModuleResolvedSource{*path, source->file, source->line, source->column};
+    } catch (const std::exception&) {
+      return std::nullopt;
+    }
+  };
+
+  if (same_file(*path, preferred_elf.path())) return resolve(preferred_elf);
+  try {
+    const ElfFile module(*path);
+    return resolve(module);
+  } catch (const std::exception&) {
+    return std::nullopt;
+  }
 }
 
 std::optional<std::uintptr_t> module_caller_return_address(

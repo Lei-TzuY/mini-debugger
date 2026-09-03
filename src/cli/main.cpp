@@ -139,6 +139,14 @@ void print_symbolized_frame(std::size_t index, std::uintptr_t address,
     }
   } catch (const std::exception&) {
   }
+  try {
+    if (const auto source =
+            mdbg::find_module_source_by_runtime_address(debugger.pid(), address, elf)) {
+      std::cout << ' ' << source->file << ':' << source->line;
+      if (source->column != 0) std::cout << ':' << source->column;
+    }
+  } catch (const std::exception&) {
+  }
   std::cout << '\n';
 }
 

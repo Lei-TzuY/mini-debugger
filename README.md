@@ -15,7 +15,7 @@ Implemented now:
 - PIE and shared-object load-bias resolution through `/proc/<pid>/maps`
 - symbol -> runtime address and runtime address -> symbol resolution
 - bounded module-aware `.eh_frame` CFI backtraces with validated frame-pointer fallback
-- module-aware ELF symbolization for backtrace frames
+- module-aware ELF symbolization and DWARF v4 source mapping for backtrace frames
 - bounded DWARF v4 `.debug_line` address <-> file:line resolution
 - CLI breakpoints by numeric address, symbol, or source line (`break mapped_source.c:400`)
 - bounded source-level `step` across DWARF v4 file:line transitions
@@ -45,8 +45,8 @@ Breakpoint 1 at 0x55... (main)
 (mdbg) continue
 breakpoint at 0x55... (main)
 (mdbg) bt
-#0 0x55... main
-#1 0x7f... shared_worker+0x...
+#0 0x55... main hello.c:12
+#1 0x7f... shared_worker+0x... shared_worker.c:31
 (mdbg) line main
 0x55... hello.c:12
 (mdbg) break hello.c:12
@@ -90,7 +90,7 @@ The breakpoint table owns the saved byte. A breakpoint being stepped over is exp
 
 `bt` resolves the file-backed mapping that contains each frame RIP through `/proc/<pid>/maps`, opens that module's ELF image, and evaluates its `.eh_frame`. It recovers caller RIP, uses CFA as caller RSP, and recovers caller RBP only when the active CFI rule explicitly describes it. The recovered cursor is then resolved again for the next module, so a backtrace can cross from an omitted-frame-pointer shared object back into the main executable without mutating the tracee. Parsed CFI modules are cached for the duration of one unwind. Anonymous mappings, deleted files, or modules without an applicable `.eh_frame` terminate the bounded CFI chain rather than being guessed.
 
-Frame rendering uses the same file-backed module routing independently of CFI evaluation. Each frame address is resolved against the ELF image that actually owns its mapping, and `symbol+offset` uses that module's own runtime load bias. Anonymous or deleted mappings, missing symbols, and module parse failures simply leave the raw frame address visible; symbolization is presentation and does not invalidate an otherwise valid unwind.
+Frame rendering uses the same file-backed module routing independently of CFI evaluation. Each frame address is resolved against the ELF image that actually owns its mapping: `symbol+offset` uses that module's own runtime load bias, and a supported DWARF v4 `.debug_line` table supplies `file:line[:column]` from the same owning image. Anonymous or deleted mappings, missing symbols or line tables, unsupported DWARF versions, and module parse failures simply leave the unavailable presentation fields out; they do not invalidate an otherwise valid unwind.
 
 The implemented CFI subset deliberately targets ordinary GCC/Clang x86-64 CIE version 1 `zR` records using `DW_EH_PE_pcrel | DW_EH_PE_sdata4`, plus the common CFA location/offset/register/state opcodes exercised by deterministic fixtures. Unsupported encodings, augmentations, opcodes, malformed entries, or unreadable slots fail explicitly instead of being guessed. Shared-library support does not broaden that parser subset; it only routes each frame to the correct file-backed ELF image and load bias.
 
@@ -104,14 +104,16 @@ If the starting instruction has no applicable file-backed CFI, `bt` falls back t
 
 Reverse `file:line -> address` lookup reuses those parsed ranges. When a line has multiple emitted rows, the debugger chooses the lowest virtual address deterministically. Basename lookup such as `mapped_source.c:400` is accepted only when all matching rows for that line refer to the same source path; ambiguous basenames fail explicitly. `break file.c:line` then installs a normal managed software breakpoint at the resolved runtime address.
 
+For backtrace rendering only, the same DWARF v4 address lookup is routed through the file-backed module that owns each frame RIP. This lets `bt` show source locations from a shared object's own `.debug_line` while returning to the main executable's line table for caller frames. A module with missing or unsupported line information contributes no source annotation rather than causing `bt` to fail.
+
 `step` is intentionally source-level while `stepi` remains one machine instruction. Source stepping starts from the current mapped `file:line`, repeatedly delegates to the existing managed instruction-step path, and stops at the first different mapped `file:line`. That means a breakpoint currently pending displaced execution is stepped correctly and reinserted by the same breakpoint state machine. A hard instruction bound prevents an unbounded walk through code without line information; signals, exits, and other non-single-step stops interrupt the operation instead of being hidden.
 
 `next` uses the same source-line bound, but recognizes the canonical x86-64 direct near-call opcode `E8 rel32` before executing it. For that form it places a normal managed temporary breakpoint at the five-byte call's return address, continues through the callee, removes only the breakpoint it owns, and then resumes source-line comparison in the caller. Existing user breakpoints take precedence and any breakpoint or signal encountered inside the callee interrupts `next` instead of being hidden. Indirect calls (`FF /2`), prefixed call encodings, tail calls, and other instruction forms are not decoded yet; on those forms `next` falls back to instruction-driven stepping and may enter the callee.
 
 `finish` is frame-oriented rather than line-driven. After it reaches the caller's saved return address, the CLI resolves and prints a DWARF source location when one is available; execution itself does not depend on `.debug_line` information.
 
-Source display, DWARF5 line tables, broader CFI encodings/register recovery, module-aware source mapping, and broader instruction decoding remain future work.
+Source display, DWARF5 line tables, broader CFI encodings/register recovery, shared-library-aware source commands, and broader instruction decoding remain future work.
 
 ## Current limits
 
-One traced process/thread only. Source mapping, source breakpoints, `step`, and `next` are limited to DWARF v4 `.debug_line`; `next` only steps over canonical `E8 rel32` direct calls and does not yet decode indirect calls. `bt` can route the bounded CFI subset and ELF symbolization across ordinary file-backed shared objects and the main executable while each next CFA can be computed from recovered `RSP`, `RBP`, or `RIP`; anonymous/deleted mappings and unsupported module CFI stop with a bounded partial trace. `finish` uses the same current-frame file-backed module routing. Source mapping and non-backtrace CLI symbolization remain main-executable-oriented. Hardware watchpoints, ELF extended section numbering, and non-x86-64/little-endian ELF are intentionally unsupported for now.
+One traced process/thread only. Source mapping, source breakpoints, `step`, and `next` are limited to DWARF v4 `.debug_line`; `next` only steps over canonical `E8 rel32` direct calls and does not yet decode indirect calls. `bt` can route the bounded CFI subset, ELF symbolization, and supported DWARF v4 frame source mapping across ordinary file-backed shared objects and the main executable while each next CFA can be computed from recovered `RSP`, `RBP`, or `RIP`; anonymous/deleted mappings and unsupported module CFI stop with a bounded partial trace, while unavailable frame presentation data is omitted. `finish` uses the same current-frame file-backed CFI routing. Source commands and non-backtrace CLI symbolization remain main-executable-oriented. Hardware watchpoints, ELF extended section numbering, and non-x86-64/little-endian ELF are intentionally unsupported for now.

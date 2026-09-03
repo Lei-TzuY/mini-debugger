@@ -82,16 +82,18 @@ if(BUILD_TESTING)
   target_link_options(source_finish_omit_fixture_nopie PRIVATE -no-pie)
 
   add_library(shared_cfi_fixture SHARED tests/fixtures/shared_cfi_library.c)
-  target_compile_options(shared_cfi_fixture PRIVATE -O0 -g -fomit-frame-pointer -fPIC)
+  target_compile_options(shared_cfi_fixture PRIVATE -O0 -g -gdwarf-4 -fomit-frame-pointer -fPIC)
 
   add_executable(shared_cfi_driver_pie tests/fixtures/shared_cfi_driver.c)
-  target_compile_options(shared_cfi_driver_pie PRIVATE -O0 -g -fomit-frame-pointer -fPIE)
+  target_compile_options(shared_cfi_driver_pie PRIVATE
+    -O0 -g -gdwarf-4 -fomit-frame-pointer -fPIE)
   target_link_libraries(shared_cfi_driver_pie PRIVATE shared_cfi_fixture)
   target_link_options(shared_cfi_driver_pie PRIVATE -pie)
   set_target_properties(shared_cfi_driver_pie PROPERTIES BUILD_RPATH "$ORIGIN")
 
   add_executable(shared_cfi_driver_nopie tests/fixtures/shared_cfi_driver.c)
-  target_compile_options(shared_cfi_driver_nopie PRIVATE -O0 -g -fomit-frame-pointer -fno-pie)
+  target_compile_options(shared_cfi_driver_nopie PRIVATE
+    -O0 -g -gdwarf-4 -fomit-frame-pointer -fno-pie)
   target_link_libraries(shared_cfi_driver_nopie PRIVATE shared_cfi_fixture)
   target_link_options(shared_cfi_driver_nopie PRIVATE -no-pie)
   set_target_properties(shared_cfi_driver_nopie PROPERTIES BUILD_RPATH "$ORIGIN")
@@ -132,11 +134,13 @@ if(BUILD_TESTING)
   add_test(NAME shared_cfi_backtrace_integration_pie
     COMMAND shared_cfi_backtrace_integration
       $<TARGET_FILE:shared_cfi_driver_pie>
-      $<TARGET_FILE:shared_cfi_fixture>)
+      $<TARGET_FILE:shared_cfi_fixture>
+      $<TARGET_FILE:debug_line_fixture_v5>)
   add_test(NAME shared_cfi_backtrace_integration_nopie
     COMMAND shared_cfi_backtrace_integration
       $<TARGET_FILE:shared_cfi_driver_nopie>
-      $<TARGET_FILE:shared_cfi_fixture>)
+      $<TARGET_FILE:shared_cfi_fixture>
+      $<TARGET_FILE:debug_line_fixture_v5>)
 
   add_executable(dwarf_line_integration tests/dwarf_line_integration.cpp)
   target_link_libraries(dwarf_line_integration PRIVATE mdbg_core)

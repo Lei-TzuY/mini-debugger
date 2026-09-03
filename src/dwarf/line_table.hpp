@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace mdbg {
@@ -26,6 +27,10 @@ class DwarfLineTable {
       std::uint64_t address) const;
   [[nodiscard]] std::optional<SourceLocation> find_runtime_address(
       pid_t pid, std::uint64_t address, const ElfFile& elf) const;
+  [[nodiscard]] std::optional<std::uint64_t> find_virtual_source(
+      std::string_view file, std::uint64_t line) const;
+  [[nodiscard]] std::optional<std::uint64_t> find_runtime_source(
+      pid_t pid, std::string_view file, std::uint64_t line, const ElfFile& elf) const;
 
  private:
   struct Range {

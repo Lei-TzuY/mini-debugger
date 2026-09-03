@@ -20,6 +20,7 @@ add_library(mdbg_core
   src/debugger/debugger.cpp
   src/unwind/frame_pointer.cpp
   src/dwarf/line_table.cpp
+  src/dwarf/source_lookup.cpp
 )
 target_include_directories(mdbg_core PUBLIC src)
 target_compile_options(mdbg_core PRIVATE -Wall -Wextra -Wpedantic -Werror)

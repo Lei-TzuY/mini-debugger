@@ -16,6 +16,11 @@
 
 namespace {
 
+struct SourceSpec {
+  std::string file;
+  std::uint64_t line;
+};
+
 std::optional<std::uintptr_t> try_parse_address(const std::string& text) {
   try {
     std::size_t consumed = 0;
@@ -24,6 +29,21 @@ std::optional<std::uintptr_t> try_parse_address(const std::string& text) {
   } catch (const std::exception&) {
   }
   return std::nullopt;
+}
+
+std::optional<SourceSpec> try_parse_source_spec(const std::string& text) {
+  const auto separator = text.rfind(':');
+  if (separator == std::string::npos || separator == 0 || separator + 1 >= text.size()) {
+    return std::nullopt;
+  }
+  try {
+    std::size_t consumed = 0;
+    const auto line = std::stoull(text.substr(separator + 1), &consumed, 10);
+    if (consumed != text.size() - separator - 1 || line == 0) return std::nullopt;
+    return SourceSpec{text.substr(0, separator), line};
+  } catch (const std::exception&) {
+    return std::nullopt;
+  }
 }
 
 pid_t parse_pid(const std::string& text) {
@@ -45,6 +65,23 @@ std::uintptr_t resolve_location(const std::string& text, const mdbg::ElfFile& el
   const auto symbol = elf.find_symbol(text);
   if (!symbol) throw std::invalid_argument("unknown symbol: " + text);
   return static_cast<std::uintptr_t>(elf.runtime_address(pid, *symbol));
+}
+
+std::uintptr_t resolve_break_location(const std::string& text, const std::string& executable,
+                                      const mdbg::ElfFile& elf, pid_t pid) {
+  if (const auto address = try_parse_address(text)) return *address;
+  if (const auto symbol = elf.find_symbol(text)) {
+    return static_cast<std::uintptr_t>(elf.runtime_address(pid, *symbol));
+  }
+  if (const auto source = try_parse_source_spec(text)) {
+    const mdbg::DwarfLineTable lines(executable);
+    const auto address = lines.find_runtime_source(pid, source->file, source->line, elf);
+    if (!address) {
+      throw std::invalid_argument("no executable address for source location: " + text);
+    }
+    return static_cast<std::uintptr_t>(*address);
+  }
+  throw std::invalid_argument("unknown symbol or source location: " + text);
 }
 
 void print_stop(const mdbg::StopInfo& info, const mdbg::ElfFile& elf, pid_t pid) {
@@ -220,7 +257,11 @@ int main(int argc, char** argv) {
       } else if (command == "break" || command == "b") {
         std::string location;
         input >> location;
-        const auto address = resolve_location(location, elf, debugger.pid());
+        if (location.empty()) {
+          std::cout << "usage: break <address|symbol|file:line>\n";
+          continue;
+        }
+        const auto address = resolve_break_location(location, executable, elf, debugger.pid());
         const auto id = debugger.add_breakpoint(address);
         std::cout << "Breakpoint " << id << " at 0x" << std::hex << address << std::dec;
         if (!try_parse_address(location)) std::cout << " (" << location << ')';
@@ -251,7 +292,7 @@ int main(int argc, char** argv) {
         }
       } else {
         std::cout << "commands: continue, stepi, regs, bt, line <addr|symbol>, reg <name>, "
-                     "x <addr|symbol> [len], break <addr|symbol>, delete <id>, "
+                     "x <addr|symbol> [len], break <addr|symbol|file:line>, delete <id>, "
                      "info breakpoints, symbols [filter], detach, quit\n";
       }
     }

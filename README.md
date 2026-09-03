@@ -15,8 +15,8 @@ Implemented now:
 - PIE vs non-PIE load-bias resolution through `/proc/<pid>/maps`
 - symbol -> runtime address and runtime address -> symbol resolution
 - bounded x86-64 frame-pointer unwinding with symbolized `bt`
-- bounded DWARF v4 `.debug_line` address -> file:line resolution
-- CLI breakpoints by numeric address or symbol (`break main`)
+- bounded DWARF v4 `.debug_line` address <-> file:line resolution
+- CLI breakpoints by numeric address, symbol, or source line (`break mapped_source.c:400`)
 - deterministic PIE/non-PIE/stripped fixture coverage
 
 ## Build
@@ -45,6 +45,8 @@ breakpoint at 0x55... (main)
 #1 0x7f...
 (mdbg) line main
 0x55... hello.c:12
+(mdbg) break hello.c:12
+Breakpoint 2 at 0x55... (hello.c:12)
 ```
 
 Attach to an existing process:
@@ -60,7 +62,7 @@ detached
 
 Attach permission is governed by the host kernel's ptrace policy. Detaching restores all debugger-owned `INT3` bytes first; quitting an attached session also detaches instead of killing the target.
 
-Commands currently implemented: `continue`, `stepi`, `regs`, `bt`, `line <address|symbol>`, `reg <name>`, `x <address|symbol> [length]`, `break <address|symbol>`, `delete <id>`, `info breakpoints`, `symbols [filter]`, `detach`, and `quit`.
+Commands currently implemented: `continue`, `stepi`, `regs`, `bt`, `line <address|symbol>`, `reg <name>`, `x <address|symbol> [length]`, `break <address|symbol|file:line>`, `delete <id>`, `info breakpoints`, `symbols [filter]`, `detach`, and `quit`.
 
 ## Breakpoint invariant
 
@@ -82,8 +84,10 @@ This strategy is reliable only for code compiled with frame pointers preserved (
 
 `line <address|symbol>` interprets 32-bit-format DWARF v4 `.debug_line` programs directly and applies the executable's PIE load bias before lookup. Rows are converted into bounded half-open address ranges; malformed units, compressed line sections, multi-operation instruction tables, DWARF64, and versions other than 4 are rejected instead of guessed.
 
-This is intentionally one-way source mapping. Reverse file:line -> address lookup, `break file.c:line`, source display, source-level `step`/`next`, DWARF5, and DWARF CFI remain future work.
+Reverse `file:line -> address` lookup reuses those parsed ranges. When a line has multiple emitted rows, the debugger chooses the lowest virtual address deterministically. Basename lookup such as `mapped_source.c:400` is accepted only when all matching rows for that line refer to the same source path; ambiguous basenames fail explicitly. `break file.c:line` then installs a normal managed software breakpoint at the resolved runtime address.
+
+Source display, source-level `step`/`next`, DWARF5, and DWARF CFI remain future work.
 
 ## Current limits
 
-One traced process/thread only. Source mapping is limited to DWARF v4 `.debug_line` address -> file:line lookup; there is no source-level `next/step/finish`, DWARF CFI unwinding, or hardware watchpoints yet. ELF extended section numbering and non-x86-64/little-endian ELF are intentionally unsupported for now.
+One traced process/thread only. Source mapping and source breakpoints are limited to DWARF v4 `.debug_line`; there is no source-level `next/step/finish`, DWARF CFI unwinding, or hardware watchpoints yet. ELF extended section numbering and non-x86-64/little-endian ELF are intentionally unsupported for now.

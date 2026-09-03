@@ -187,6 +187,13 @@ void print_source_position(std::uintptr_t address, const mdbg::SourceLocation& s
   std::cout << '\n';
 }
 
+void print_source_position(std::uintptr_t address, const mdbg::ModuleResolvedSource& source) {
+  std::cout << "0x" << std::hex << address << std::dec << ' ' << source.file << ':'
+            << source.line;
+  if (source.column != 0) std::cout << ':' << source.column;
+  std::cout << '\n';
+}
+
 void print_source_motion_result(const char* operation, const mdbg::SourceStepResult& result,
                                 const mdbg::Debugger& debugger, const mdbg::ElfFile& elf) {
   if (result.reason == mdbg::SourceStepStopReason::LineChanged) {
@@ -208,15 +215,11 @@ void print_source_motion_result(const char* operation, const mdbg::SourceStepRes
   }
 }
 
-void print_source_location(const std::string& executable, std::uintptr_t address,
-                           const mdbg::Debugger& debugger, const mdbg::ElfFile& elf) {
+void print_source_location(std::uintptr_t address, const mdbg::Debugger& debugger,
+                           const mdbg::ElfFile& elf) {
   try {
-    const mdbg::DwarfLineTable lines(executable);
-    if (!lines.available()) {
-      std::cout << "no DWARF line table\n";
-      return;
-    }
-    const auto source = lines.find_runtime_address(debugger.pid(), address, elf);
+    const auto source =
+        mdbg::find_module_source_by_runtime_address(debugger.pid(), address, elf);
     if (!source) {
       std::cout << "no source location for 0x" << std::hex << address << std::dec << '\n';
       return;
@@ -307,8 +310,7 @@ int main(int argc, char** argv) {
           const auto result = mdbg::finish_frame(debugger);
           if (result.reason == mdbg::FinishStopReason::Returned) {
             if (debugger.state() == mdbg::ProcessState::Stopped) {
-              print_source_location(executable,
-                                    static_cast<std::uintptr_t>(debugger.registers().rip),
+              print_source_location(static_cast<std::uintptr_t>(debugger.registers().rip),
                                     debugger, elf);
             } else {
               print_stop(result.stop, elf, debugger.pid());
@@ -316,8 +318,7 @@ int main(int argc, char** argv) {
           } else {
             print_stop(result.stop, elf, debugger.pid());
             if (debugger.state() == mdbg::ProcessState::Stopped) {
-              print_source_location(executable,
-                                    static_cast<std::uintptr_t>(debugger.registers().rip),
+              print_source_location(static_cast<std::uintptr_t>(debugger.registers().rip),
                                     debugger, elf);
             }
           }
@@ -338,7 +339,7 @@ int main(int argc, char** argv) {
           continue;
         }
         const auto address = resolve_location(location, elf, debugger.pid());
-        print_source_location(executable, address, debugger, elf);
+        print_source_location(address, debugger, elf);
       } else if (command == "reg") {
         std::string name;
         input >> name;

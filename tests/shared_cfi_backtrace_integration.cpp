@@ -116,6 +116,8 @@ void test_shared_library_cfi(const std::string& driver, const std::string& libra
           "shared-library finish did not stop on its return-address breakpoint");
   require_module_symbol(executable, debugger.pid(), finish.return_address,
                         library, "shared_inner");
+  require_module_source(executable, debugger.pid(), finish.return_address,
+                        library, "shared_cfi_library.c");
 
   const auto done = debugger.continue_execution();
   require(done.reason == mdbg::StopReason::Exited && done.value == 0,

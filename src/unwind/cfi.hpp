@@ -30,6 +30,8 @@ struct CfiBacktrace {
   CfiUnwindStopReason stop_reason;
 };
 
+std::optional<std::uintptr_t> module_caller_return_address(
+    const Debugger& debugger, const ElfFile& preferred_elf, const EhFrame& preferred_cfi);
 CfiBacktrace unwind_eh_frame(const Debugger& debugger, const ElfFile& elf,
                              const EhFrame& cfi, std::size_t max_frames = 64);
 const char* cfi_unwind_stop_reason_name(CfiUnwindStopReason reason) noexcept;

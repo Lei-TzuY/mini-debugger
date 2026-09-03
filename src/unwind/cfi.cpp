@@ -101,6 +101,26 @@ std::optional<EhFrameCursor> caller_for_cursor(
 
 }  // namespace
 
+std::optional<std::uintptr_t> module_caller_return_address(
+    const Debugger& debugger, const ElfFile& preferred_elf, const EhFrame& preferred_cfi) {
+  if (debugger.state() != ProcessState::Stopped) {
+    throw std::logic_error("CFI return-address recovery requires a stopped tracee");
+  }
+
+  const auto regs = debugger.registers();
+  const auto path = mapped_module_path(debugger.pid(), static_cast<std::uintptr_t>(regs.rip));
+  if (!path) return std::nullopt;
+
+  if (same_file(*path, preferred_elf.path())) {
+    if (!preferred_cfi.available()) return std::nullopt;
+    return preferred_cfi.caller_return_address(debugger, preferred_elf);
+  }
+
+  ModuleCfi module(*path);
+  if (!module.cfi.available()) return std::nullopt;
+  return module.cfi.caller_return_address(debugger, module.elf);
+}
+
 CfiBacktrace unwind_eh_frame(const Debugger& debugger, const ElfFile& elf,
                              const EhFrame& cfi, std::size_t max_frames) {
   if (max_frames == 0) {

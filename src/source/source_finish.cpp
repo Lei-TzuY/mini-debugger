@@ -3,6 +3,7 @@
 #include "dwarf/eh_frame.hpp"
 #include "elf/elf.hpp"
 #include "ptrace/ptrace.hpp"
+#include "unwind/cfi.hpp"
 
 #include <unistd.h>
 
@@ -85,7 +86,7 @@ std::uintptr_t automatic_return_address(const Debugger& debugger) {
   const auto executable = process_executable(debugger.pid());
   const ElfFile elf(executable);
   const EhFrame cfi(executable);
-  if (const auto return_address = cfi.caller_return_address(debugger, elf)) {
+  if (const auto return_address = module_caller_return_address(debugger, elf, cfi)) {
     return *return_address;
   }
   return frame_pointer_return_address(debugger);

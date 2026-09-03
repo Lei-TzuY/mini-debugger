@@ -2,6 +2,7 @@
 #include "dwarf/eh_frame.hpp"
 #include "elf/elf.hpp"
 #include "ptrace/ptrace.hpp"
+#include "source/source_finish.hpp"
 #include "unwind/cfi.hpp"
 
 #include <csignal>
@@ -62,6 +63,14 @@ void test_shared_library_cfi(const std::string& driver, const std::string& libra
   require(limited.frames.size() == 2 &&
               limited.stop_reason == mdbg::CfiUnwindStopReason::FrameLimit,
           "shared-library CFI frame limit must remain deterministic");
+
+  const auto finish = mdbg::finish_frame(debugger);
+  require(finish.reason == mdbg::FinishStopReason::Returned,
+          "shared-library finish did not report a normal return");
+  require(finish.stop.reason == mdbg::StopReason::Breakpoint &&
+              finish.stop.breakpoint_address == finish.return_address,
+          "shared-library finish did not stop on its return-address breakpoint");
+  require_frame_name(shared, debugger.pid(), finish.return_address, "shared_inner");
 
   const auto done = debugger.continue_execution();
   require(done.reason == mdbg::StopReason::Exited && done.value == 0,

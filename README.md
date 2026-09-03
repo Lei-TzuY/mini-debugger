@@ -19,7 +19,7 @@ Implemented now:
 - CLI breakpoints by numeric address, symbol, or source line (`break mapped_source.c:400`)
 - bounded source-level `step` across DWARF v4 file:line transitions
 - direct-call-aware source-level `next` for canonical x86-64 `E8 rel32` calls
-- `finish` through bounded `.eh_frame` CFI return-address recovery, with validated RBP fallback
+- module-aware `finish` through bounded `.eh_frame` CFI return-address recovery, with validated RBP fallback
 - deterministic PIE/non-PIE/stripped, omitted-frame-pointer, and shared-library fixture coverage
 
 ## Build
@@ -93,7 +93,7 @@ The implemented CFI subset deliberately targets ordinary GCC/Clang x86-64 CIE ve
 
 If the starting instruction has no applicable file-backed CFI, `bt` falls back to the classic bounded RBP-chain unwinder. It does not silently switch to RBP after malformed or unsupported CFI has already been selected. The legacy RBP path still rejects non-monotonic, self-referential, or implausibly large frame-pointer jumps and returns a partial trace on unreadable memory.
 
-`finish` still uses the main executable's current-frame CFI evaluator to recover its caller return address and falls back to the validated preserved-RBP frame record when no executable FDE applies. Shared-library-aware `finish` is intentionally not part of this milestone. Once a return address is known it continues to a normal managed temporary breakpoint there. Existing user breakpoints at the return address are preserved, while a breakpoint, signal, exit, or other stop before return interrupts `finish` and removes any temporary breakpoint it owned.
+`finish` resolves the file-backed mapping that contains the stopped RIP and asks that module's `.eh_frame` to recover the caller return address against the complete live register set. If the current mapping is anonymous/deleted, the module has no applicable `.eh_frame`, or no FDE covers the current instruction, it falls back to the validated preserved-RBP frame record. Malformed or unsupported selected CFI remains an explicit error rather than a reason to silently trust RBP. Once a return address is known it continues to a normal managed temporary breakpoint there. Existing user breakpoints at the return address are preserved, while a breakpoint, signal, exit, or other stop before return interrupts `finish` and removes any temporary breakpoint it owned.
 
 ## Source-line model
 
@@ -107,8 +107,8 @@ Reverse `file:line -> address` lookup reuses those parsed ranges. When a line ha
 
 `finish` is frame-oriented rather than line-driven. After it reaches the caller's saved return address, the CLI resolves and prints a DWARF source location when one is available; execution itself does not depend on `.debug_line` information.
 
-Source display, DWARF5 line tables, broader CFI encodings/register recovery, shared-library-aware `finish`, module-aware symbolization/source mapping, and broader instruction decoding remain future work.
+Source display, DWARF5 line tables, broader CFI encodings/register recovery, module-aware symbolization/source mapping, and broader instruction decoding remain future work.
 
 ## Current limits
 
-One traced process/thread only. Source mapping, source breakpoints, `step`, and `next` are limited to DWARF v4 `.debug_line`; `next` only steps over canonical `E8 rel32` direct calls and does not yet decode indirect calls. `bt` can route the bounded CFI subset across ordinary file-backed shared objects and the main executable while each next CFA can be computed from recovered `RSP`, `RBP`, or `RIP`; anonymous/deleted mappings and unsupported module CFI stop with a bounded partial trace. `finish` remains executable-CFI-only. CLI frame symbolization still uses the main executable symbol table. Hardware watchpoints, ELF extended section numbering, and non-x86-64/little-endian ELF are intentionally unsupported for now.
+One traced process/thread only. Source mapping, source breakpoints, `step`, and `next` are limited to DWARF v4 `.debug_line`; `next` only steps over canonical `E8 rel32` direct calls and does not yet decode indirect calls. `bt` can route the bounded CFI subset across ordinary file-backed shared objects and the main executable while each next CFA can be computed from recovered `RSP`, `RBP`, or `RIP`; anonymous/deleted mappings and unsupported module CFI stop with a bounded partial trace. `finish` now uses the same current-frame file-backed module routing, but CLI frame/source symbolization remains main-executable-oriented. Hardware watchpoints, ELF extended section numbering, and non-x86-64/little-endian ELF are intentionally unsupported for now.

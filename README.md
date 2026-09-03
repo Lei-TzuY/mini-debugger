@@ -18,6 +18,7 @@ Implemented now:
 - bounded DWARF v4 `.debug_line` address <-> file:line resolution
 - CLI breakpoints by numeric address, symbol, or source line (`break mapped_source.c:400`)
 - bounded source-level `step` across DWARF v4 file:line transitions
+- direct-call-aware source-level `next` for canonical x86-64 `E8 rel32` calls
 - deterministic PIE/non-PIE/stripped fixture coverage
 
 ## Build
@@ -52,6 +53,8 @@ Breakpoint 2 at 0x55... (hello.c:12)
 breakpoint at 0x55... (main+0x...)
 (mdbg) step
 0x55... hello.c:13
+(mdbg) next
+0x55... hello.c:14
 ```
 
 Attach to an existing process:
@@ -67,7 +70,7 @@ detached
 
 Attach permission is governed by the host kernel's ptrace policy. Detaching restores all debugger-owned `INT3` bytes first; quitting an attached session also detaches instead of killing the target.
 
-Commands currently implemented: `continue`, `step`, `stepi`, `regs`, `bt`, `line <address|symbol>`, `reg <name>`, `x <address|symbol> [length]`, `break <address|symbol|file:line>`, `delete <id>`, `info breakpoints`, `symbols [filter]`, `detach`, and `quit`.
+Commands currently implemented: `continue`, `step`, `next`, `stepi`, `regs`, `bt`, `line <address|symbol>`, `reg <name>`, `x <address|symbol> [length]`, `break <address|symbol|file:line>`, `delete <id>`, `info breakpoints`, `symbols [filter]`, `detach`, and `quit`.
 
 ## Breakpoint invariant
 
@@ -93,8 +96,10 @@ Reverse `file:line -> address` lookup reuses those parsed ranges. When a line ha
 
 `step` is intentionally source-level while `stepi` remains one machine instruction. Source stepping starts from the current mapped `file:line`, repeatedly delegates to the existing managed instruction-step path, and stops at the first different mapped `file:line`. That means a breakpoint currently pending displaced execution is stepped correctly and reinserted by the same breakpoint state machine. A hard instruction bound prevents an unbounded walk through code without line information; signals, exits, and other non-single-step stops interrupt the operation instead of being hidden.
 
-Source display, source-level `next`/`finish`, DWARF5, and DWARF CFI remain future work.
+`next` uses the same source-line bound, but recognizes the canonical x86-64 direct near-call opcode `E8 rel32` before executing it. For that form it places a normal managed temporary breakpoint at the five-byte call's return address, continues through the callee, removes only the breakpoint it owns, and then resumes source-line comparison in the caller. Existing user breakpoints take precedence and any breakpoint or signal encountered inside the callee interrupts `next` instead of being hidden. Indirect calls (`FF /2`), prefixed call encodings, tail calls, and other instruction forms are not decoded yet; on those forms `next` falls back to instruction-driven stepping and may enter the callee.
+
+Source display, source-level `finish`, DWARF5, and DWARF CFI remain future work.
 
 ## Current limits
 
-One traced process/thread only. Source mapping, source breakpoints, and source stepping are limited to DWARF v4 `.debug_line`; `step` is instruction-driven and bounded rather than a call-aware `next`. There is no source-level `next/finish`, DWARF CFI unwinding, or hardware watchpoints yet. ELF extended section numbering and non-x86-64/little-endian ELF are intentionally unsupported for now.
+One traced process/thread only. Source mapping, source breakpoints, `step`, and `next` are limited to DWARF v4 `.debug_line`; `next` only steps over canonical `E8 rel32` direct calls and does not yet decode indirect calls. There is no source-level `finish`, DWARF CFI unwinding, or hardware watchpoints yet. ELF extended section numbering and non-x86-64/little-endian ELF are intentionally unsupported for now.

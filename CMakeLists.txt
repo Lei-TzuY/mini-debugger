@@ -58,6 +58,16 @@ if(BUILD_TESTING)
   target_compile_options(debug_line_fixture_v5 PRIVATE -O0 -g -gdwarf-5 -fno-pie)
   target_link_options(debug_line_fixture_v5 PRIVATE -no-pie)
 
+  add_executable(source_next_fixture_pie tests/fixtures/source_next_fixture.c)
+  target_compile_options(source_next_fixture_pie PRIVATE
+    -O0 -g -gdwarf-4 -fno-omit-frame-pointer -fPIE)
+  target_link_options(source_next_fixture_pie PRIVATE -pie)
+
+  add_executable(source_next_fixture_nopie tests/fixtures/source_next_fixture.c)
+  target_compile_options(source_next_fixture_nopie PRIVATE
+    -O0 -g -gdwarf-4 -fno-omit-frame-pointer -fno-pie)
+  target_link_options(source_next_fixture_nopie PRIVATE -no-pie)
+
   add_executable(debugger_integration tests/debugger_integration.cpp)
   target_link_libraries(debugger_integration PRIVATE mdbg_core)
   target_compile_options(debugger_integration PRIVATE -Wall -Wextra -Wpedantic -Werror)
@@ -108,6 +118,14 @@ if(BUILD_TESTING)
     COMMAND source_step_integration
       $<TARGET_FILE:debug_line_fixture_nopie>
       $<TARGET_FILE:debugger_fixture_stripped>)
+
+  add_executable(source_next_integration tests/source_next_integration.cpp)
+  target_link_libraries(source_next_integration PRIVATE mdbg_core)
+  target_compile_options(source_next_integration PRIVATE -Wall -Wextra -Wpedantic -Werror)
+  add_test(NAME source_next_integration_pie
+    COMMAND source_next_integration $<TARGET_FILE:source_next_fixture_pie>)
+  add_test(NAME source_next_integration_nopie
+    COMMAND source_next_integration $<TARGET_FILE:source_next_fixture_nopie>)
 
   add_executable(elf_tests tests/elf_tests.cpp)
   target_link_libraries(elf_tests PRIVATE mdbg_core)

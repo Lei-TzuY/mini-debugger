@@ -148,6 +148,27 @@ void print_source_position(std::uintptr_t address, const mdbg::SourceLocation& s
   std::cout << '\n';
 }
 
+void print_source_motion_result(const char* operation, const mdbg::SourceStepResult& result,
+                                const mdbg::Debugger& debugger, const mdbg::ElfFile& elf) {
+  if (result.reason == mdbg::SourceStepStopReason::LineChanged) {
+    print_source_position(static_cast<std::uintptr_t>(debugger.registers().rip), *result.source);
+    return;
+  }
+  if (result.reason == mdbg::SourceStepStopReason::Interrupted) {
+    print_stop(result.stop, elf, debugger.pid());
+    if (debugger.state() == mdbg::ProcessState::Stopped && result.source) {
+      print_source_position(static_cast<std::uintptr_t>(debugger.registers().rip), *result.source);
+    }
+    return;
+  }
+
+  std::cout << operation << " stopped after " << result.instructions
+            << " instructions: instruction limit reached\n";
+  if (result.source) {
+    print_source_position(static_cast<std::uintptr_t>(debugger.registers().rip), *result.source);
+  }
+}
+
 void print_source_location(const std::string& executable, std::uintptr_t address,
                            const mdbg::Debugger& debugger, const mdbg::ElfFile& elf) {
   try {
@@ -227,33 +248,20 @@ int main(int argc, char** argv) {
         print_stop(debugger.continue_execution(), elf, debugger.pid());
       } else if (command == "stepi" || command == "si") {
         print_stop(debugger.single_step(), elf, debugger.pid());
-      } else if (command == "step" || command == "s") {
+      } else if (command == "step" || command == "s" || command == "next" || command == "n") {
+        const bool next = command == "next" || command == "n";
         try {
           const mdbg::DwarfLineTable lines(executable);
           if (!lines.available()) {
             std::cout << "no DWARF line table\n";
             continue;
           }
-          const auto result = mdbg::step_source(debugger, lines, elf);
-          if (result.reason == mdbg::SourceStepStopReason::LineChanged) {
-            print_source_position(static_cast<std::uintptr_t>(debugger.registers().rip),
-                                  *result.source);
-          } else if (result.reason == mdbg::SourceStepStopReason::Interrupted) {
-            print_stop(result.stop, elf, debugger.pid());
-            if (debugger.state() == mdbg::ProcessState::Stopped && result.source) {
-              print_source_position(static_cast<std::uintptr_t>(debugger.registers().rip),
-                                    *result.source);
-            }
-          } else {
-            std::cout << "source step stopped after " << result.instructions
-                      << " instructions: instruction limit reached\n";
-            if (result.source) {
-              print_source_position(static_cast<std::uintptr_t>(debugger.registers().rip),
-                                    *result.source);
-            }
-          }
+          const auto result = next ? mdbg::next_source(debugger, lines, elf)
+                                   : mdbg::step_source(debugger, lines, elf);
+          print_source_motion_result(next ? "source next" : "source step", result, debugger, elf);
         } catch (const std::exception& error) {
-          std::cout << "source step unavailable: " << error.what() << '\n';
+          std::cout << (next ? "source next unavailable: " : "source step unavailable: ")
+                    << error.what() << '\n';
         }
       } else if (command == "regs") {
         for (const auto& [name, value] : mdbg::general_purpose_registers(debugger.registers())) {
@@ -325,7 +333,7 @@ int main(int argc, char** argv) {
                     << std::dec << ' ' << symbol.name << '\n';
         }
       } else {
-        std::cout << "commands: continue, step, stepi, regs, bt, line <addr|symbol>, "
+        std::cout << "commands: continue, step, next, stepi, regs, bt, line <addr|symbol>, "
                      "reg <name>, x <addr|symbol> [len], break <addr|symbol|file:line>, "
                      "delete <id>, info breakpoints, symbols [filter], detach, quit\n";
       }

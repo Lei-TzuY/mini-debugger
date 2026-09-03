@@ -3,9 +3,103 @@
 #include "debugger/debugger.hpp"
 #include "elf/elf.hpp"
 
+#include <algorithm>
+#include <cctype>
+#include <filesystem>
+#include <fstream>
+#include <sstream>
 #include <stdexcept>
+#include <string>
+#include <utility>
+#include <vector>
 
 namespace mdbg {
+namespace {
+
+std::string trim_left(std::string value) {
+  const auto first = std::find_if_not(value.begin(), value.end(), [](unsigned char c) {
+    return std::isspace(c) != 0;
+  });
+  value.erase(value.begin(), first);
+  return value;
+}
+
+std::optional<std::string> mapped_module_path(pid_t pid, std::uintptr_t address) {
+  std::ifstream maps("/proc/" + std::to_string(pid) + "/maps");
+  if (!maps) throw std::runtime_error("failed to open tracee memory map for CFI unwind");
+
+  std::string line;
+  while (std::getline(maps, line)) {
+    std::istringstream fields(line);
+    std::string range, permissions, offset, device, inode;
+    if (!(fields >> range >> permissions >> offset >> device >> inode)) continue;
+    const auto dash = range.find('-');
+    if (dash == std::string::npos) continue;
+
+    std::uintptr_t begin = 0;
+    std::uintptr_t end = 0;
+    try {
+      begin = static_cast<std::uintptr_t>(std::stoull(range.substr(0, dash), nullptr, 16));
+      end = static_cast<std::uintptr_t>(std::stoull(range.substr(dash + 1), nullptr, 16));
+    } catch (const std::exception&) {
+      continue;
+    }
+    if (address < begin || address >= end) continue;
+
+    std::string path;
+    std::getline(fields, path);
+    path = trim_left(std::move(path));
+    if (path.empty() || path.front() != '/') return std::nullopt;
+    constexpr const char* deleted_suffix = " (deleted)";
+    if (path.size() >= 10 && path.compare(path.size() - 10, 10, deleted_suffix) == 0) {
+      return std::nullopt;
+    }
+    return path;
+  }
+  return std::nullopt;
+}
+
+bool same_file(const std::string& left, const std::string& right) {
+  std::error_code error;
+  const bool equivalent = std::filesystem::equivalent(left, right, error);
+  if (!error) return equivalent;
+  return left == right;
+}
+
+struct ModuleCfi {
+  explicit ModuleCfi(std::string module_path)
+      : path(std::move(module_path)), elf(path), cfi(path) {}
+
+  std::string path;
+  ElfFile elf;
+  EhFrame cfi;
+};
+
+ModuleCfi& cached_module(std::vector<ModuleCfi>& modules, const std::string& path) {
+  for (auto& module : modules) {
+    if (same_file(module.path, path)) return module;
+  }
+  modules.emplace_back(path);
+  return modules.back();
+}
+
+std::optional<EhFrameCursor> caller_for_cursor(
+    const Debugger& debugger, const ElfFile& preferred_elf, const EhFrame& preferred_cfi,
+    const EhFrameCursor& current, std::vector<ModuleCfi>& modules) {
+  const auto path = mapped_module_path(debugger.pid(), current.instruction_pointer);
+  if (!path) return std::nullopt;
+
+  if (same_file(*path, preferred_elf.path())) {
+    if (!preferred_cfi.available()) return std::nullopt;
+    return preferred_cfi.caller_frame(debugger, preferred_elf, current);
+  }
+
+  auto& module = cached_module(modules, *path);
+  if (!module.cfi.available()) return std::nullopt;
+  return module.cfi.caller_frame(debugger, module.elf, current);
+}
+
+}  // namespace
 
 CfiBacktrace unwind_eh_frame(const Debugger& debugger, const ElfFile& elf,
                              const EhFrame& cfi, std::size_t max_frames) {
@@ -28,10 +122,11 @@ CfiBacktrace unwind_eh_frame(const Debugger& debugger, const ElfFile& elf,
     return result;
   }
 
+  std::vector<ModuleCfi> modules;
   while (result.frames.size() < max_frames) {
     std::optional<EhFrameCursor> caller;
     try {
-      caller = cfi.caller_frame(debugger, elf, current);
+      caller = caller_for_cursor(debugger, elf, cfi, current, modules);
     } catch (const std::exception&) {
       result.stop_reason = CfiUnwindStopReason::InvalidFrameState;
       return result;

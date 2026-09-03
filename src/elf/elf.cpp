@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <limits>
 #include <sstream>
@@ -45,23 +46,18 @@ std::string read_string(const std::vector<std::byte>& bytes, std::uint64_t table
   return {};
 }
 
-std::string proc_exe_path(pid_t pid) {
-  const std::string link = "/proc/" + std::to_string(pid) + "/exe";
-  std::vector<char> buffer(4096);
-  const auto length = ::readlink(link.c_str(), buffer.data(), buffer.size() - 1);
-  if (length == -1) {
-    throw std::runtime_error("failed to read tracee executable symlink");
-  }
-  buffer[static_cast<std::size_t>(length)] = '\0';
-  return std::string(buffer.data());
-}
-
 std::string trim_left(std::string value) {
   const auto first = std::find_if_not(value.begin(), value.end(), [](unsigned char c) {
     return std::isspace(c) != 0;
   });
   value.erase(value.begin(), first);
   return value;
+}
+
+std::string mapped_identity_path(const std::string& path) {
+  std::error_code error;
+  const auto canonical = std::filesystem::canonical(path, error);
+  return error ? path : canonical.string();
 }
 
 }  // namespace
@@ -187,7 +183,7 @@ std::uint64_t ElfFile::load_bias(pid_t pid) const {
   if (elf_type_ == ET_EXEC) return 0;
   if (elf_type_ != ET_DYN) throw std::runtime_error("unsupported ELF executable type");
 
-  const auto executable = proc_exe_path(pid);
+  const auto mapped_file = mapped_identity_path(path_);
   std::ifstream maps("/proc/" + std::to_string(pid) + "/maps");
   if (!maps) throw std::runtime_error("failed to open tracee memory map");
 
@@ -199,7 +195,7 @@ std::uint64_t ElfFile::load_bias(pid_t pid) const {
     std::string mapped_path;
     std::getline(fields, mapped_path);
     mapped_path = trim_left(std::move(mapped_path));
-    if (mapped_path != executable) continue;
+    if (mapped_path != mapped_file) continue;
 
     const auto offset = std::stoull(offset_text, nullptr, 16);
     if (offset != 0) continue;
@@ -207,11 +203,11 @@ std::uint64_t ElfFile::load_bias(pid_t pid) const {
     if (dash == std::string::npos) continue;
     const auto start = std::stoull(range.substr(0, dash), nullptr, 16);
     if (start < zero_offset_load_vaddr_) {
-      throw std::runtime_error("invalid PIE mapping below ELF load virtual address");
+      throw std::runtime_error("invalid ELF mapping below load virtual address");
     }
     return start - zero_offset_load_vaddr_;
   }
-  throw std::runtime_error("could not locate executable mapping for PIE load bias");
+  throw std::runtime_error("could not locate ELF mapping for load bias: " + mapped_file);
 }
 
 std::uint64_t ElfFile::runtime_address(pid_t pid, const ElfSymbol& symbol) const {

@@ -15,6 +15,7 @@ Implemented now:
 - PIE and shared-object load-bias resolution through `/proc/<pid>/maps`
 - symbol -> runtime address and runtime address -> symbol resolution
 - bounded module-aware `.eh_frame` CFI backtraces with validated frame-pointer fallback
+- module-aware ELF symbolization for backtrace frames
 - bounded DWARF v4 `.debug_line` address <-> file:line resolution
 - CLI breakpoints by numeric address, symbol, or source line (`break mapped_source.c:400`)
 - bounded source-level `step` across DWARF v4 file:line transitions
@@ -45,7 +46,7 @@ Breakpoint 1 at 0x55... (main)
 breakpoint at 0x55... (main)
 (mdbg) bt
 #0 0x55... main
-#1 0x7f...
+#1 0x7f... shared_worker+0x...
 (mdbg) line main
 0x55... hello.c:12
 (mdbg) break hello.c:12
@@ -87,7 +88,9 @@ The breakpoint table owns the saved byte. A breakpoint being stepped over is exp
 
 ## Backtrace and frame model
 
-`bt` resolves the file-backed mapping that contains each frame RIP through `/proc/<pid>/maps`, opens that module's ELF image, and evaluates its `.eh_frame`. It recovers caller RIP, uses CFA as caller RSP, and recovers caller RBP only when the active CFI rule explicitly describes it. The recovered cursor is then resolved again for the next module, so a backtrace can cross from an omitted-frame-pointer shared object back into the main executable without mutating the tracee. Parsed modules are cached for the duration of one unwind. Anonymous mappings, deleted files, or modules without an applicable `.eh_frame` terminate the bounded CFI chain rather than being guessed.
+`bt` resolves the file-backed mapping that contains each frame RIP through `/proc/<pid>/maps`, opens that module's ELF image, and evaluates its `.eh_frame`. It recovers caller RIP, uses CFA as caller RSP, and recovers caller RBP only when the active CFI rule explicitly describes it. The recovered cursor is then resolved again for the next module, so a backtrace can cross from an omitted-frame-pointer shared object back into the main executable without mutating the tracee. Parsed CFI modules are cached for the duration of one unwind. Anonymous mappings, deleted files, or modules without an applicable `.eh_frame` terminate the bounded CFI chain rather than being guessed.
+
+Frame rendering uses the same file-backed module routing independently of CFI evaluation. Each frame address is resolved against the ELF image that actually owns its mapping, and `symbol+offset` uses that module's own runtime load bias. Anonymous or deleted mappings, missing symbols, and module parse failures simply leave the raw frame address visible; symbolization is presentation and does not invalidate an otherwise valid unwind.
 
 The implemented CFI subset deliberately targets ordinary GCC/Clang x86-64 CIE version 1 `zR` records using `DW_EH_PE_pcrel | DW_EH_PE_sdata4`, plus the common CFA location/offset/register/state opcodes exercised by deterministic fixtures. Unsupported encodings, augmentations, opcodes, malformed entries, or unreadable slots fail explicitly instead of being guessed. Shared-library support does not broaden that parser subset; it only routes each frame to the correct file-backed ELF image and load bias.
 
@@ -107,8 +110,8 @@ Reverse `file:line -> address` lookup reuses those parsed ranges. When a line ha
 
 `finish` is frame-oriented rather than line-driven. After it reaches the caller's saved return address, the CLI resolves and prints a DWARF source location when one is available; execution itself does not depend on `.debug_line` information.
 
-Source display, DWARF5 line tables, broader CFI encodings/register recovery, module-aware symbolization/source mapping, and broader instruction decoding remain future work.
+Source display, DWARF5 line tables, broader CFI encodings/register recovery, module-aware source mapping, and broader instruction decoding remain future work.
 
 ## Current limits
 
-One traced process/thread only. Source mapping, source breakpoints, `step`, and `next` are limited to DWARF v4 `.debug_line`; `next` only steps over canonical `E8 rel32` direct calls and does not yet decode indirect calls. `bt` can route the bounded CFI subset across ordinary file-backed shared objects and the main executable while each next CFA can be computed from recovered `RSP`, `RBP`, or `RIP`; anonymous/deleted mappings and unsupported module CFI stop with a bounded partial trace. `finish` now uses the same current-frame file-backed module routing, but CLI frame/source symbolization remains main-executable-oriented. Hardware watchpoints, ELF extended section numbering, and non-x86-64/little-endian ELF are intentionally unsupported for now.
+One traced process/thread only. Source mapping, source breakpoints, `step`, and `next` are limited to DWARF v4 `.debug_line`; `next` only steps over canonical `E8 rel32` direct calls and does not yet decode indirect calls. `bt` can route the bounded CFI subset and ELF symbolization across ordinary file-backed shared objects and the main executable while each next CFA can be computed from recovered `RSP`, `RBP`, or `RIP`; anonymous/deleted mappings and unsupported module CFI stop with a bounded partial trace. `finish` uses the same current-frame file-backed module routing. Source mapping and non-backtrace CLI symbolization remain main-executable-oriented. Hardware watchpoints, ELF extended section numbering, and non-x86-64/little-endian ELF are intentionally unsupported for now.

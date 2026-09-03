@@ -129,11 +129,15 @@ void print_stop(const mdbg::StopInfo& info, const mdbg::ElfFile& elf, pid_t pid)
 void print_symbolized_frame(std::size_t index, std::uintptr_t address,
                             const mdbg::Debugger& debugger, const mdbg::ElfFile& elf) {
   std::cout << '#' << index << " 0x" << std::hex << address << std::dec;
-  if (const auto symbol = elf.find_symbol_by_runtime_address(debugger.pid(), address)) {
-    std::cout << ' ' << symbol->symbol.name;
-    if (symbol->offset != 0) {
-      std::cout << "+0x" << std::hex << symbol->offset << std::dec;
+  try {
+    if (const auto symbol =
+            mdbg::find_module_symbol_by_runtime_address(debugger.pid(), address, elf)) {
+      std::cout << ' ' << symbol->name;
+      if (symbol->offset != 0) {
+        std::cout << "+0x" << std::hex << symbol->offset << std::dec;
+      }
     }
+  } catch (const std::exception&) {
   }
   std::cout << '\n';
 }

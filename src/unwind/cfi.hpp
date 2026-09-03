@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <string>
 #include <vector>
 
 namespace mdbg {
@@ -30,6 +31,14 @@ struct CfiBacktrace {
   CfiUnwindStopReason stop_reason;
 };
 
+struct ModuleResolvedSymbol {
+  std::string module_path;
+  std::string name;
+  std::uint64_t offset;
+};
+
+std::optional<ModuleResolvedSymbol> find_module_symbol_by_runtime_address(
+    pid_t pid, std::uintptr_t address, const ElfFile& preferred_elf);
 std::optional<std::uintptr_t> module_caller_return_address(
     const Debugger& debugger, const ElfFile& preferred_elf, const EhFrame& preferred_cfi);
 CfiBacktrace unwind_eh_frame(const Debugger& debugger, const ElfFile& elf,

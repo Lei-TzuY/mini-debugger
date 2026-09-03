@@ -7,6 +7,7 @@
 
 #include <csignal>
 #include <cstdio>
+#include <filesystem>
 #include <stdexcept>
 #include <string>
 
@@ -16,11 +17,20 @@ void require(bool condition, const std::string& message) {
   if (!condition) throw std::runtime_error(message);
 }
 
-void require_frame_name(const mdbg::ElfFile& elf, pid_t pid, std::uintptr_t address,
-                        const std::string& expected) {
-  const auto resolved = elf.find_symbol_by_runtime_address(pid, address);
-  require(resolved && resolved->symbol.name == expected,
-          "expected frame " + expected + " at address " + std::to_string(address));
+void require_module_symbol(const mdbg::ElfFile& executable, pid_t pid, std::uintptr_t address,
+                           const std::string& expected_module,
+                           const std::string& expected_symbol) {
+  const auto resolved =
+      mdbg::find_module_symbol_by_runtime_address(pid, address, executable);
+  require(resolved && resolved->name == expected_symbol,
+          "expected module symbol " + expected_symbol + " at address " +
+              std::to_string(address));
+
+  std::error_code error;
+  const bool equivalent =
+      std::filesystem::equivalent(resolved->module_path, expected_module, error);
+  require(!error && equivalent,
+          "module symbol " + expected_symbol + " resolved from the wrong ELF image");
 }
 
 void test_shared_library_cfi(const std::string& driver, const std::string& library) {
@@ -52,12 +62,17 @@ void test_shared_library_cfi(const std::string& driver, const std::string& libra
           "module-aware CFI unwind returned fewer than four frames");
   require(trace.frames[0].instruction_pointer == probe_address,
           "shared-library CFI top frame did not preserve repaired RIP");
-  require_frame_name(shared, debugger.pid(), trace.frames[1].instruction_pointer,
-                     "shared_inner");
-  require_frame_name(shared, debugger.pid(), trace.frames[2].instruction_pointer,
-                     "shared_outer");
-  require_frame_name(executable, debugger.pid(), trace.frames[3].instruction_pointer,
-                     "main");
+  require_module_symbol(executable, debugger.pid(), trace.frames[0].instruction_pointer,
+                        library, "shared_cfi_probe");
+  require_module_symbol(executable, debugger.pid(), trace.frames[1].instruction_pointer,
+                        library, "shared_inner");
+  require_module_symbol(executable, debugger.pid(), trace.frames[2].instruction_pointer,
+                        library, "shared_outer");
+  require_module_symbol(executable, debugger.pid(), trace.frames[3].instruction_pointer,
+                        driver, "main");
+  require(!mdbg::find_module_symbol_by_runtime_address(
+              debugger.pid(), trace.frames[0].stack_pointer, executable),
+          "anonymous stack mapping must not be symbolized as a file-backed module");
 
   const auto limited = mdbg::unwind_eh_frame(debugger, executable, executable_cfi, 2);
   require(limited.frames.size() == 2 &&
@@ -70,7 +85,8 @@ void test_shared_library_cfi(const std::string& driver, const std::string& libra
   require(finish.stop.reason == mdbg::StopReason::Breakpoint &&
               finish.stop.breakpoint_address == finish.return_address,
           "shared-library finish did not stop on its return-address breakpoint");
-  require_frame_name(shared, debugger.pid(), finish.return_address, "shared_inner");
+  require_module_symbol(executable, debugger.pid(), finish.return_address,
+                        library, "shared_inner");
 
   const auto done = debugger.continue_execution();
   require(done.reason == mdbg::StopReason::Exited && done.value == 0,

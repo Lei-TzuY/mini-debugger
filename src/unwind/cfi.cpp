@@ -101,6 +101,22 @@ std::optional<EhFrameCursor> caller_for_cursor(
 
 }  // namespace
 
+std::optional<ModuleResolvedSymbol> find_module_symbol_by_runtime_address(
+    pid_t pid, std::uintptr_t address, const ElfFile& preferred_elf) {
+  const auto path = mapped_module_path(pid, address);
+  if (!path) return std::nullopt;
+
+  const auto resolve = [&](const ElfFile& elf) -> std::optional<ModuleResolvedSymbol> {
+    const auto symbol = elf.find_symbol_by_runtime_address(pid, address);
+    if (!symbol) return std::nullopt;
+    return ModuleResolvedSymbol{*path, symbol->symbol.name, symbol->offset};
+  };
+
+  if (same_file(*path, preferred_elf.path())) return resolve(preferred_elf);
+  const ElfFile module(*path);
+  return resolve(module);
+}
+
 std::optional<std::uintptr_t> module_caller_return_address(
     const Debugger& debugger, const ElfFile& preferred_elf, const EhFrame& preferred_cfi) {
   if (debugger.state() != ProcessState::Stopped) {

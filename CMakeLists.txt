@@ -22,6 +22,7 @@ add_library(mdbg_core
   src/dwarf/line_table.cpp
   src/dwarf/source_lookup.cpp
   src/source/source_step.cpp
+  src/source/source_finish.cpp
 )
 target_include_directories(mdbg_core PUBLIC src)
 target_compile_options(mdbg_core PRIVATE -Wall -Wextra -Wpedantic -Werror)
@@ -126,6 +127,14 @@ if(BUILD_TESTING)
     COMMAND source_next_integration $<TARGET_FILE:source_next_fixture_pie>)
   add_test(NAME source_next_integration_nopie
     COMMAND source_next_integration $<TARGET_FILE:source_next_fixture_nopie>)
+
+  add_executable(source_finish_integration tests/source_finish_integration.cpp)
+  target_link_libraries(source_finish_integration PRIVATE mdbg_core)
+  target_compile_options(source_finish_integration PRIVATE -Wall -Wextra -Wpedantic -Werror)
+  add_test(NAME source_finish_integration_pie
+    COMMAND source_finish_integration $<TARGET_FILE:source_next_fixture_pie>)
+  add_test(NAME source_finish_integration_nopie
+    COMMAND source_finish_integration $<TARGET_FILE:source_next_fixture_nopie>)
 
   add_executable(elf_tests tests/elf_tests.cpp)
   target_link_libraries(elf_tests PRIVATE mdbg_core)

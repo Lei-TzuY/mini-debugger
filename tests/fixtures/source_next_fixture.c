@@ -3,6 +3,8 @@ volatile int next_marker = 0;
 __attribute__((noinline)) void next_callee(void) {
 #line 510 "next_source.c"
   next_marker += 1;
+#line 511 "next_source.c"
+  next_marker += 0;
 }
 
 __attribute__((noinline)) void next_caller(void) {

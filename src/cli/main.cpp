@@ -2,6 +2,7 @@
 #include "dwarf/line_table.hpp"
 #include "elf/elf.hpp"
 #include "registers/registers.hpp"
+#include "source/source_finish.hpp"
 #include "source/source_step.hpp"
 #include "unwind/frame_pointer.hpp"
 
@@ -263,6 +264,28 @@ int main(int argc, char** argv) {
           std::cout << (next ? "source next unavailable: " : "source step unavailable: ")
                     << error.what() << '\n';
         }
+      } else if (command == "finish" || command == "fin") {
+        try {
+          const auto result = mdbg::finish_frame(debugger);
+          if (result.reason == mdbg::FinishStopReason::Returned) {
+            if (debugger.state() == mdbg::ProcessState::Stopped) {
+              print_source_location(executable,
+                                    static_cast<std::uintptr_t>(debugger.registers().rip),
+                                    debugger, elf);
+            } else {
+              print_stop(result.stop, elf, debugger.pid());
+            }
+          } else {
+            print_stop(result.stop, elf, debugger.pid());
+            if (debugger.state() == mdbg::ProcessState::Stopped) {
+              print_source_location(executable,
+                                    static_cast<std::uintptr_t>(debugger.registers().rip),
+                                    debugger, elf);
+            }
+          }
+        } catch (const std::exception& error) {
+          std::cout << "finish unavailable: " << error.what() << '\n';
+        }
       } else if (command == "regs") {
         for (const auto& [name, value] : mdbg::general_purpose_registers(debugger.registers())) {
           std::cout << std::setw(6) << name << " 0x" << std::hex << value << std::dec << '\n';
@@ -333,9 +356,10 @@ int main(int argc, char** argv) {
                     << std::dec << ' ' << symbol.name << '\n';
         }
       } else {
-        std::cout << "commands: continue, step, next, stepi, regs, bt, line <addr|symbol>, "
-                     "reg <name>, x <addr|symbol> [len], break <addr|symbol|file:line>, "
-                     "delete <id>, info breakpoints, symbols [filter], detach, quit\n";
+        std::cout << "commands: continue, step, next, finish, stepi, regs, bt, "
+                     "line <addr|symbol>, reg <name>, x <addr|symbol> [len], "
+                     "break <addr|symbol|file:line>, delete <id>, info breakpoints, "
+                     "symbols [filter], detach, quit\n";
       }
     }
   } catch (const std::exception& error) {

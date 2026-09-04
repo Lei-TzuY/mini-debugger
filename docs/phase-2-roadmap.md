@@ -2,20 +2,13 @@
 
 Phase 2 starts only after the `v0.1.0` stabilization gates are satisfied. The goal is to add debugger capabilities that materially change what the project can demonstrate, not to maximize commit count or instruction-encoding coverage.
 
-## Priority 0: decoder architecture gate
+## Priority 0: decoder architecture gate — complete
 
-Before broadening x86 `next` coverage, extract the current bounded call-length recognition from `source_step.cpp` into a small, explicit x86-64 decoding component with direct unit tests.
+The bounded source-`next` near-call recognizer has been extracted from `source_step.cpp` into the explicit `x86/call_decoder` component with direct unit tests that do not launch a tracee. Existing supported call classes retain their behavior, unsupported/truncated inputs remain explicit fallbacks, and the debugger-facing byte reader stays lazy instead of speculatively reading full instructions.
 
-Acceptance criteria:
+This closes the architecture gate for future decoder work without turning the project into a general-purpose disassembler. Evidence and scope boundaries are recorded in `docs/phase-2-p0-decoder.md`.
 
-- existing supported call forms keep identical behavior;
-- call-length decoding can be tested without launching a tracee;
-- unsupported prefixes/opcodes remain explicit fallbacks, not guessed lengths;
-- future instruction support can be added by class rather than one fixture/branch per byte variant.
-
-This is a refactor gate, not a request to immediately implement a general-purpose disassembler.
-
-## Priority 1: dynamic-loader events and deferred breakpoints
+## Priority 1: dynamic-loader events and deferred breakpoints — current frontier
 
 Teach the debugger to handle breakpoints requested for symbols/source locations in modules that are not loaded yet.
 

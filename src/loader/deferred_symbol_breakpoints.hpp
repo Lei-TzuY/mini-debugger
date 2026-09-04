@@ -12,24 +12,33 @@
 
 namespace mdbg {
 
-struct DeferredSymbolBreakpoint {
+enum class DeferredBreakpointTargetKind { Symbol, Source };
+
+struct DeferredBreakpointTarget {
+  DeferredBreakpointTargetKind kind;
+  std::string name;
+  std::uint64_t line{0};
+};
+
+struct DeferredBreakpoint {
   std::size_t request_id;
-  std::string symbol;
+  DeferredBreakpointTarget target;
   std::optional<std::size_t> breakpoint_id;
   std::optional<std::uintptr_t> address;
 };
 
-class DeferredSymbolBreakpoints {
+class DeferredBreakpoints {
  public:
-  DeferredSymbolBreakpoints(Debugger& debugger, const ElfFile& executable);
-  ~DeferredSymbolBreakpoints();
+  DeferredBreakpoints(Debugger& debugger, const ElfFile& executable);
+  ~DeferredBreakpoints();
 
-  DeferredSymbolBreakpoints(const DeferredSymbolBreakpoints&) = delete;
-  DeferredSymbolBreakpoints& operator=(const DeferredSymbolBreakpoints&) = delete;
+  DeferredBreakpoints(const DeferredBreakpoints&) = delete;
+  DeferredBreakpoints& operator=(const DeferredBreakpoints&) = delete;
 
-  std::size_t add(std::string symbol);
+  std::size_t add_symbol(std::string symbol);
+  std::size_t add_source(std::string file, std::uint64_t line);
   bool remove(std::size_t request_id);
-  [[nodiscard]] std::vector<DeferredSymbolBreakpoint> breakpoints() const;
+  [[nodiscard]] std::vector<DeferredBreakpoint> breakpoints() const;
 
   StopInfo continue_execution(SignalPolicy policy = SignalPolicy::Suppress);
 
@@ -47,7 +56,10 @@ class DeferredSymbolBreakpoints {
   [[nodiscard]] std::optional<std::uintptr_t> current_r_debug_address() const;
   [[nodiscard]] std::uintptr_t current_loader_break_address() const;
   [[nodiscard]] bool loader_state_is_consistent() const;
+  [[nodiscard]] std::optional<std::uintptr_t> resolve_target(
+      const DeferredBreakpointTarget& target) const;
 
+  std::size_t add_target(DeferredBreakpointTarget target);
   void ensure_monitoring();
   bool try_install_loader_breakpoint();
   void install_bootstrap_breakpoint();
@@ -62,7 +74,7 @@ class DeferredSymbolBreakpoints {
   Debugger& debugger_;
   const ElfFile& executable_;
   LoaderMetadata metadata_;
-  std::map<std::size_t, DeferredSymbolBreakpoint> requests_;
+  std::map<std::size_t, DeferredBreakpoint> requests_;
   std::size_t next_request_id_{1};
   std::optional<std::uintptr_t> r_debug_address_;
   std::optional<std::size_t> bootstrap_breakpoint_id_;
@@ -70,5 +82,8 @@ class DeferredSymbolBreakpoints {
   std::optional<std::size_t> loader_breakpoint_id_;
   std::optional<std::uintptr_t> loader_breakpoint_address_;
 };
+
+using DeferredSymbolBreakpoints = DeferredBreakpoints;
+using DeferredSymbolBreakpoint = DeferredBreakpoint;
 
 }  // namespace mdbg

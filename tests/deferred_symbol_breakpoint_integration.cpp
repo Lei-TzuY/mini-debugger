@@ -25,7 +25,7 @@ void test_deferred_symbol_across_reload(const std::string& driver,
           "deferred target must not be loaded at the initial exec stop");
   const auto barrier =
       mdbg::find_module_symbol_by_name(debugger.pid(), "reload_barrier", executable);
-  require(barrier, "reload barrier symbol is unavailable");
+  require(barrier.has_value(), "reload barrier symbol is unavailable");
   const auto barrier_breakpoint_id = debugger.add_breakpoint(barrier->address);
 
   const auto request_id = deferred.add("deferred_target");

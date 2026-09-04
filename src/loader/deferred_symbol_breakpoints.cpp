@@ -144,7 +144,7 @@ bool DeferredSymbolBreakpoints::loader_state_is_consistent() const {
   }
   ::r_debug rendezvous{};
   std::memcpy(&rendezvous, bytes.data(), sizeof(rendezvous));
-  return rendezvous.r_state == RT_CONSISTENT;
+  return rendezvous.r_state == ::r_debug::RT_CONSISTENT;
 }
 
 std::size_t DeferredSymbolBreakpoints::add(std::string symbol) {

@@ -51,7 +51,8 @@ class DeferredSymbolBreakpoints {
   void ensure_monitoring();
   bool try_install_loader_breakpoint();
   void install_bootstrap_breakpoint();
-  void resolve_pending();
+  void reconcile_requests();
+  void suspend_monitoring() noexcept;
   void stop_monitoring_if_idle();
   bool is_internal_stop(const StopInfo& stop) const;
   void handle_internal_stop(const StopInfo& stop);

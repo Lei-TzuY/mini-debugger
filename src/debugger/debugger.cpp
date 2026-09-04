@@ -86,6 +86,16 @@ bool Debugger::remove_breakpoint(std::size_t id) {
   return true;
 }
 
+bool Debugger::discard_breakpoint(std::size_t id) noexcept {
+  const auto id_it = breakpoint_ids_.find(id);
+  if (id_it == breakpoint_ids_.end()) return false;
+  const auto address = id_it->second;
+  if (pending_breakpoint_step_ == address) pending_breakpoint_step_.reset();
+  breakpoints_by_address_.erase(address);
+  breakpoint_ids_.erase(id_it);
+  return true;
+}
+
 std::vector<Breakpoint> Debugger::breakpoints() const {
   std::vector<Breakpoint> result;
   result.reserve(breakpoints_by_address_.size());

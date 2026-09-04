@@ -5,7 +5,6 @@
 #include <elf.h>
 #include <link.h>
 
-#include <algorithm>
 #include <cstddef>
 #include <cstring>
 #include <fstream>
@@ -36,11 +35,7 @@ DeferredSymbolBreakpoints::DeferredSymbolBreakpoints(Debugger& debugger,
       executable_(executable),
       metadata_(read_loader_metadata(executable.path())) {}
 
-DeferredSymbolBreakpoints::~DeferredSymbolBreakpoints() {
-  if (debugger_.state() != ProcessState::Stopped) return;
-  remove_internal_breakpoint(loader_breakpoint_id_, loader_breakpoint_address_);
-  remove_internal_breakpoint(bootstrap_breakpoint_id_, bootstrap_breakpoint_address_);
-}
+DeferredSymbolBreakpoints::~DeferredSymbolBreakpoints() { suspend_monitoring(); }
 
 DeferredSymbolBreakpoints::LoaderMetadata DeferredSymbolBreakpoints::read_loader_metadata(
     const std::string& path) {
@@ -204,10 +199,7 @@ std::vector<DeferredSymbolBreakpoint> DeferredSymbolBreakpoints::breakpoints() c
 }
 
 void DeferredSymbolBreakpoints::ensure_monitoring() {
-  const bool pending = std::any_of(requests_.begin(), requests_.end(), [](const auto& entry) {
-    return !entry.second.breakpoint_id.has_value();
-  });
-  if (!pending || loader_breakpoint_id_ || bootstrap_breakpoint_id_) return;
+  if (requests_.empty() || loader_breakpoint_id_ || bootstrap_breakpoint_id_) return;
   if (!try_install_loader_breakpoint()) install_bootstrap_breakpoint();
 }
 
@@ -227,25 +219,38 @@ void DeferredSymbolBreakpoints::install_bootstrap_breakpoint() {
   bootstrap_breakpoint_id_ = debugger_.add_breakpoint(entry);
 }
 
-void DeferredSymbolBreakpoints::resolve_pending() {
+void DeferredSymbolBreakpoints::reconcile_requests() {
   for (auto& [id, request] : requests_) {
     static_cast<void>(id);
-    if (request.breakpoint_id) continue;
     const auto resolved =
         find_module_symbol_by_name(debugger_.pid(), request.symbol, executable_);
+
+    if (request.breakpoint_id) {
+      if (!request.address) {
+        throw std::logic_error("resolved deferred breakpoint has no address");
+      }
+      if (resolved && resolved->address == *request.address) continue;
+      if (!debugger_.discard_breakpoint(*request.breakpoint_id)) {
+        throw std::logic_error("stale deferred breakpoint disappeared from debugger state");
+      }
+      request.breakpoint_id.reset();
+      request.address.reset();
+    }
+
     if (!resolved) continue;
     request.address = resolved->address;
     request.breakpoint_id = debugger_.add_breakpoint(resolved->address);
   }
 }
 
-void DeferredSymbolBreakpoints::stop_monitoring_if_idle() {
-  const bool pending = std::any_of(requests_.begin(), requests_.end(), [](const auto& entry) {
-    return !entry.second.breakpoint_id.has_value();
-  });
-  if (pending) return;
+void DeferredSymbolBreakpoints::suspend_monitoring() noexcept {
   remove_internal_breakpoint(loader_breakpoint_id_, loader_breakpoint_address_);
   remove_internal_breakpoint(bootstrap_breakpoint_id_, bootstrap_breakpoint_address_);
+}
+
+void DeferredSymbolBreakpoints::stop_monitoring_if_idle() {
+  if (!requests_.empty()) return;
+  suspend_monitoring();
   r_debug_address_.reset();
 }
 
@@ -262,16 +267,12 @@ void DeferredSymbolBreakpoints::handle_internal_stop(const StopInfo& stop) {
     if (!try_install_loader_breakpoint()) {
       throw std::runtime_error("DT_DEBUG was not initialized before executable entry");
     }
-    resolve_pending();
-    stop_monitoring_if_idle();
+    if (loader_state_is_consistent()) reconcile_requests();
     return;
   }
 
   if (loader_breakpoint_address_ && stop.breakpoint_address == loader_breakpoint_address_) {
-    if (loader_state_is_consistent()) {
-      resolve_pending();
-      stop_monitoring_if_idle();
-    }
+    if (loader_state_is_consistent()) reconcile_requests();
     return;
   }
 
@@ -283,7 +284,10 @@ StopInfo DeferredSymbolBreakpoints::continue_execution(SignalPolicy policy) {
   for (;;) {
     const auto stop = debugger_.continue_execution(policy);
     policy = SignalPolicy::Suppress;
-    if (!is_internal_stop(stop)) return stop;
+    if (!is_internal_stop(stop)) {
+      suspend_monitoring();
+      return stop;
+    }
     handle_internal_stop(stop);
   }
 }

@@ -12,13 +12,22 @@ This closes the architecture gate for future decoder work without turning the pr
 
 Teach the debugger to handle breakpoints requested for symbols/source locations in modules that are not loaded yet.
 
+Completed slices:
+
+- P1-A: unresolved symbol requests persist across `dlopen()` and resolve from real runtime-linker rendezvous events;
+- P1-B: the CLI exposes one user breakpoint ID namespace across ordinary and deferred symbol breakpoints;
+- P1-C: resolved deferred symbol requests return to pending on `dlclose()`, stale unmapped breakpoint ownership is discarded without a memory restore, and reload installs a fresh managed backend while preserving the user/request identity.
+
+Current slice: P1-D — deferred source-location (`file:line`) requests in modules that are not loaded yet, reusing the same loader lifecycle and ownership rules instead of creating a parallel controller.
+
 Acceptance criteria:
 
 - a breakpoint request can remain pending when its target shared object is absent;
 - loader activity causes a bounded re-resolution attempt;
 - a uniquely resolved target installs through the existing managed breakpoint state machine;
 - ambiguity remains an explicit error;
-- unload/reload behavior has deterministic ownership semantics and regression coverage.
+- unload/reload behavior has deterministic ownership semantics and regression coverage;
+- both symbol and source-location expressions participate in the same deferred lifecycle.
 
 Why first: this closes a real usability gap in the existing module-aware breakpoint model instead of adding another presentation-only feature.
 

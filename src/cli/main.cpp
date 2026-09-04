@@ -377,12 +377,7 @@ int main(int argc, char** argv) {
         if (const auto address = try_parse_address(location)) {
           id = breakpoints.add_address(*address, location);
         } else if (const auto source = try_parse_source_spec(location)) {
-          const auto resolved =
-              mdbg::find_module_source_by_file_line(debugger.pid(), source->file, source->line, elf);
-          if (!resolved) {
-            throw std::invalid_argument("no executable address for source location: " + location);
-          }
-          id = breakpoints.add_address(resolved->address, location);
+          id = breakpoints.add_source(source->file, source->line, location);
         } else {
           id = breakpoints.add_symbol(location);
         }

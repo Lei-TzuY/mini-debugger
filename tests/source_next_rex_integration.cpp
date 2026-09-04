@@ -73,6 +73,25 @@ std::uint64_t rexwb_call_address(const mdbg::Debugger& debugger,
       "REX.W+B source-next fixture does not contain exact 49 ff d0");
 }
 
+std::uint64_t rexw_call_address(const mdbg::Debugger& debugger,
+                                std::uint64_t line620,
+                                std::uint64_t line621) {
+  require(line621 > line620, "REX.W fixture rows are not in executable order");
+  const auto span = line621 - line620;
+  require(span <= 64, "REX.W fixture row unexpectedly grew beyond 64 bytes");
+  const auto bytes = debugger.read_memory(static_cast<std::uintptr_t>(line620),
+                                          static_cast<std::size_t>(span));
+  for (std::size_t i = 0; i + 2 < bytes.size(); ++i) {
+    if (std::to_integer<unsigned>(bytes[i]) == 0x48U &&
+        std::to_integer<unsigned>(bytes[i + 1]) == 0xffU &&
+        std::to_integer<unsigned>(bytes[i + 2]) == 0xd0U) {
+      return line620 + i;
+    }
+  }
+  throw std::runtime_error(
+      "REX.W source-next fixture does not contain exact 48 ff d0");
+}
+
 int marker_value(const mdbg::Debugger& debugger, const mdbg::ElfFile& elf) {
   const auto marker = elf.find_symbol("next_marker");
   require(marker.has_value(), "next_marker symbol is missing");
@@ -211,6 +230,64 @@ void test_rexwb_callee_breakpoint_interrupts_next(const std::string& fixture) {
           "temporary REX.W+B breakpoint leaked after interruption");
 }
 
+void test_rexw_register_call_step_over(const std::string& fixture) {
+  auto debugger = mdbg::Debugger::launch(fixture, {});
+  const mdbg::ElfFile elf(fixture);
+  const mdbg::DwarfLineTable lines(fixture);
+  const auto line620 = source_address(lines, elf, debugger, 620);
+  const auto line621 = source_address(lines, elf, debugger, 621);
+  const auto call = rexw_call_address(debugger, line620, line621);
+
+  const auto start_id = debugger.add_breakpoint(static_cast<std::uintptr_t>(call));
+  const auto hit = debugger.continue_execution();
+  require(hit.reason == mdbg::StopReason::Breakpoint && hit.breakpoint_address == call,
+          "REX.W source-next call breakpoint was not hit");
+  require(lines.find_runtime_address(debugger.pid(), debugger.registers().rip, elf).has_value(),
+          "REX.W call instruction has no source mapping");
+
+  const auto result = mdbg::next_source(debugger, lines, elf, 64);
+  require(result.reason == mdbg::SourceStepStopReason::LineChanged,
+          "REX.W register-indirect call must step over its callee");
+  require_source_line(result.source, 621);
+  require(debugger.registers().rip == line621,
+          "REX.W source next did not stop at caller line 621");
+  require(marker_value(debugger, elf) == 8191,
+          "REX.W callee side effect must complete before next returns");
+  require_breakpoint_installed(debugger, start_id);
+  require(debugger.breakpoints().size() == 1,
+          "temporary REX.W source-next breakpoint leaked into debugger state");
+
+  const auto done = debugger.continue_execution();
+  require(done.reason == mdbg::StopReason::Exited && done.value == 0,
+          "REX.W source-next fixture did not exit cleanly");
+}
+
+void test_rexw_callee_breakpoint_interrupts_next(const std::string& fixture) {
+  auto debugger = mdbg::Debugger::launch(fixture, {});
+  const mdbg::ElfFile elf(fixture);
+  const mdbg::DwarfLineTable lines(fixture);
+  const auto line620 = source_address(lines, elf, debugger, 620);
+  const auto line621 = source_address(lines, elf, debugger, 621);
+  const auto line630 = source_address(lines, elf, debugger, 630);
+  const auto call = rexw_call_address(debugger, line620, line621);
+
+  debugger.add_breakpoint(static_cast<std::uintptr_t>(call));
+  debugger.add_breakpoint(static_cast<std::uintptr_t>(line630));
+  const auto hit = debugger.continue_execution();
+  require(hit.reason == mdbg::StopReason::Breakpoint && hit.breakpoint_address == call,
+          "REX.W interruption call breakpoint was not hit");
+
+  const auto result = mdbg::next_source(debugger, lines, elf, 64);
+  require(result.reason == mdbg::SourceStepStopReason::Interrupted,
+          "REX.W callee user breakpoint must interrupt source next");
+  require(result.stop.reason == mdbg::StopReason::Breakpoint &&
+              result.stop.breakpoint_address == line630,
+          "source next hid the REX.W callee user breakpoint");
+  require_source_line(result.source, 630);
+  require(debugger.breakpoints().size() == 2,
+          "temporary REX.W breakpoint leaked after interruption");
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -220,6 +297,8 @@ int main(int argc, char** argv) {
     test_rex_callee_breakpoint_interrupts_next(argv[1]);
     test_rexwb_register_call_step_over(argv[1]);
     test_rexwb_callee_breakpoint_interrupts_next(argv[1]);
+    test_rexw_register_call_step_over(argv[1]);
+    test_rexw_callee_breakpoint_interrupts_next(argv[1]);
     return 0;
   } catch (const std::exception& error) {
     std::fprintf(stderr, "REX source-next integration failure: %s\n", error.what());

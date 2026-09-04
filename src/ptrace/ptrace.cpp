@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cerrno>
+#include <cstddef>
 #include <cstring>
 #include <sstream>
 
@@ -12,6 +13,11 @@ namespace {
 
 [[noreturn]] void throw_errno(const char* operation) {
   throw PtraceError(operation, errno);
+}
+
+std::size_t debug_register_offset(std::size_t index) {
+  if (index >= 8) throw std::invalid_argument("x86 debug register index is out of range");
+  return offsetof(struct user, u_debugreg) + index * sizeof(unsigned long);
 }
 
 }  // namespace
@@ -77,6 +83,23 @@ void set_registers(pid_t pid, const user_regs_struct& regs) {
   if (::ptrace(PTRACE_SETREGS, pid, nullptr,
                const_cast<user_regs_struct*>(&regs)) == -1) {
     throw_errno("PTRACE_SETREGS");
+  }
+}
+
+std::uint64_t get_debug_register(pid_t pid, std::size_t index) {
+  errno = 0;
+  const auto offset = debug_register_offset(index);
+  const long value = ::ptrace(PTRACE_PEEKUSER, pid,
+                              reinterpret_cast<void*>(offset), nullptr);
+  if (value == -1 && errno != 0) throw_errno("PTRACE_PEEKUSER");
+  return static_cast<std::uint64_t>(static_cast<unsigned long>(value));
+}
+
+void set_debug_register(pid_t pid, std::size_t index, std::uint64_t value) {
+  const auto offset = debug_register_offset(index);
+  if (::ptrace(PTRACE_POKEUSER, pid, reinterpret_cast<void*>(offset),
+               reinterpret_cast<void*>(static_cast<std::uintptr_t>(value))) == -1) {
+    throw_errno("PTRACE_POKEUSER");
   }
 }
 

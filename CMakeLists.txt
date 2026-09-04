@@ -18,6 +18,7 @@ add_library(mdbg_core
   src/registers/registers.cpp
   src/elf/elf.cpp
   src/debugger/debugger.cpp
+  src/loader/deferred_symbol_breakpoints.cpp
   src/unwind/frame_pointer.cpp
   src/unwind/cfi.cpp
   src/dwarf/line_table.cpp
@@ -107,6 +108,19 @@ if(BUILD_TESTING)
   add_library(shared_cfi_fixture SHARED tests/fixtures/shared_cfi_library.c)
   target_compile_options(shared_cfi_fixture PRIVATE -O0 -g -gdwarf-4 -fomit-frame-pointer -fPIC)
 
+  add_library(deferred_symbol_plugin SHARED tests/fixtures/deferred_symbol_plugin.c)
+  target_compile_options(deferred_symbol_plugin PRIVATE -O0 -g -fPIC)
+
+  add_executable(deferred_symbol_driver_pie tests/fixtures/deferred_symbol_driver.c)
+  target_compile_options(deferred_symbol_driver_pie PRIVATE -O0 -g -fPIE)
+  target_link_libraries(deferred_symbol_driver_pie PRIVATE dl)
+  target_link_options(deferred_symbol_driver_pie PRIVATE -pie)
+
+  add_executable(deferred_symbol_driver_nopie tests/fixtures/deferred_symbol_driver.c)
+  target_compile_options(deferred_symbol_driver_nopie PRIVATE -O0 -g -fno-pie)
+  target_link_libraries(deferred_symbol_driver_nopie PRIVATE dl)
+  target_link_options(deferred_symbol_driver_nopie PRIVATE -no-pie)
+
   add_executable(shared_cfi_driver_pie tests/fixtures/shared_cfi_driver.c)
   target_compile_options(shared_cfi_driver_pie PRIVATE
     -O0 -g -gdwarf-4 -fomit-frame-pointer -fPIE)
@@ -178,6 +192,20 @@ if(BUILD_TESTING)
     COMMAND module_symbol_breakpoint_integration
       $<TARGET_FILE:shared_cfi_driver_nopie>
       $<TARGET_FILE:shared_cfi_fixture>)
+
+  add_executable(deferred_symbol_breakpoint_integration
+    tests/deferred_symbol_breakpoint_integration.cpp)
+  target_link_libraries(deferred_symbol_breakpoint_integration PRIVATE mdbg_core)
+  target_compile_options(deferred_symbol_breakpoint_integration PRIVATE
+    -Wall -Wextra -Wpedantic -Werror)
+  add_test(NAME deferred_symbol_breakpoint_integration_pie
+    COMMAND deferred_symbol_breakpoint_integration
+      $<TARGET_FILE:deferred_symbol_driver_pie>
+      $<TARGET_FILE:deferred_symbol_plugin>)
+  add_test(NAME deferred_symbol_breakpoint_integration_nopie
+    COMMAND deferred_symbol_breakpoint_integration
+      $<TARGET_FILE:deferred_symbol_driver_nopie>
+      $<TARGET_FILE:deferred_symbol_plugin>)
 
   add_executable(dwarf_line_integration tests/dwarf_line_integration.cpp)
   target_link_libraries(dwarf_line_integration PRIVATE mdbg_core)

@@ -67,6 +67,17 @@ std::optional<std::uintptr_t> supported_call_return_address(
         instruction_length = 2;
       } else if (mod == 0U && rm == 5U) {
         instruction_length = 6;
+      } else if (mod == 0U && rm == 4U) {
+        if (rip > std::numeric_limits<std::uintptr_t>::max() - 2U) {
+          return std::nullopt;
+        }
+        const auto sib_bytes = debugger.read_memory(rip + 2, 1);
+        if (sib_bytes.empty()) return std::nullopt;
+        const auto sib = std::to_integer<unsigned>(sib_bytes.front());
+        const auto base = sib & 0x7U;
+        if (base != 5U) {
+          instruction_length = 3;
+        }
       } else if (mod == 0U && rm != 4U) {
         instruction_length = 2;
       } else if (mod == 1U && rm != 4U) {

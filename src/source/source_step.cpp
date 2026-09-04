@@ -75,9 +75,7 @@ std::optional<std::uintptr_t> supported_call_return_address(
         if (sib_bytes.empty()) return std::nullopt;
         const auto sib = std::to_integer<unsigned>(sib_bytes.front());
         const auto base = sib & 0x7U;
-        if (base != 5U) {
-          instruction_length = 3;
-        }
+        instruction_length = base == 5U ? 7U : 3U;
       } else if (mod == 0U && rm != 4U) {
         instruction_length = 2;
       } else if (mod == 1U && rm == 4U) {

@@ -48,9 +48,34 @@ __attribute__((noinline)) void next_sib_disp32_caller(void) {
   sib_disp8_marker += 8;
 }
 
+__attribute__((noinline)) void next_sib_nobase_callee(void) {
+#line 690 "next_source.c"
+  sib_disp8_marker += 16;
+#line 691 "next_source.c"
+  sib_disp8_marker += 0;
+}
+
+__attribute__((used)) static void (*next_sib_nobase_target)(void) =
+    next_sib_nobase_callee;
+
+__attribute__((noinline)) void next_sib_nobase_caller(void) {
+  void (**slot)(void);
+#line 679 "next_source.c"
+  __asm__ volatile("leaq next_sib_nobase_target(%%rip), %%rax" : "=a"(slot));
+#line 680 "next_source.c"
+  __asm__ volatile(
+      ".byte 0xff, 0x14, 0x05, 0x00, 0x00, 0x00, 0x00"
+      : "+a"(slot)
+      :
+      : "rcx", "rdx", "rsi", "rdi", "r8", "r9", "r10", "r11", "cc", "memory");
+#line 681 "next_source.c"
+  sib_disp8_marker += 32;
+}
+
 #line 1 "next_sib_disp8_driver.c"
 int main(void) {
   next_sib_disp8_caller();
   next_sib_disp32_caller();
-  return sib_disp8_marker == 15 ? 0 : 1;
+  next_sib_nobase_caller();
+  return sib_disp8_marker == 63 ? 0 : 1;
 }

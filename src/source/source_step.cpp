@@ -80,6 +80,8 @@ std::optional<std::uintptr_t> supported_call_return_address(
         }
       } else if (mod == 0U && rm != 4U) {
         instruction_length = 2;
+      } else if (mod == 1U && rm == 4U) {
+        instruction_length = 4;
       } else if (mod == 1U && rm != 4U) {
         instruction_length = 3;
       } else if (mod == 2U && rm != 4U) {

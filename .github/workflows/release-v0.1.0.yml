@@ -1,0 +1,105 @@
+name: release-v0.1.0
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/release-v0.1.0.yml
+
+permissions:
+  contents: write
+  pull-requests: read
+
+jobs:
+  verify-and-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+      - name: Check release-critical TODOs
+        shell: bash
+        run: |
+          if grep -RInE '\b(TODO|FIXME)\b' src tests CMakeLists.txt; then
+            echo 'Release-critical TODO/FIXME found.' >&2
+            exit 1
+          fi
+
+      - name: Create v0.1.0 tag, release, and clean merged branches
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const tag = 'v0.1.0';
+
+            let releaseExists = false;
+            try {
+              await github.rest.repos.getReleaseByTag({owner, repo, tag});
+              releaseExists = true;
+            } catch (error) {
+              if (error.status !== 404) throw error;
+            }
+
+            if (!releaseExists) {
+              try {
+                await github.rest.git.getRef({owner, repo, ref: `tags/${tag}`});
+              } catch (error) {
+                if (error.status !== 404) throw error;
+                await github.rest.git.createRef({
+                  owner,
+                  repo,
+                  ref: `refs/tags/${tag}`,
+                  sha: context.sha,
+                });
+              }
+
+              const body = fs.readFileSync('docs/release-notes-v0.1.0.md', 'utf8');
+              await github.rest.repos.createRelease({
+                owner,
+                repo,
+                tag_name: tag,
+                target_commitish: context.sha,
+                name: 'mini-debugger v0.1.0',
+                body,
+                draft: false,
+                prerelease: false,
+              });
+            }
+
+            const pulls = await github.paginate(github.rest.pulls.list, {
+              owner,
+              repo,
+              state: 'closed',
+              per_page: 100,
+            });
+
+            const mergedHeads = new Set(
+              pulls
+                .filter(pr => pr.merged_at && pr.head.repo?.full_name === `${owner}/${repo}`)
+                .map(pr => pr.head.ref)
+                .filter(ref => ref && ref !== 'main')
+            );
+
+            for (const ref of ['noop', '__should_not__', 'tmp-noop-source-next-squash']) {
+              mergedHeads.add(ref);
+            }
+
+            for (const ref of mergedHeads) {
+              try {
+                await github.rest.git.deleteRef({owner, repo, ref: `heads/${ref}`});
+                core.info(`Deleted stale branch ${ref}`);
+              } catch (error) {
+                if (error.status !== 404 && error.status !== 422) throw error;
+              }
+            }

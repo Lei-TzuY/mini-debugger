@@ -14,6 +14,8 @@
 
 namespace mdbg {
 
+class DeferredSymbolBreakpoints;
+
 enum class StopReason {
   InitialExec,
   Attached,
@@ -61,6 +63,8 @@ class Debugger {
   [[nodiscard]] std::vector<Breakpoint> breakpoints() const;
 
  private:
+  friend class DeferredSymbolBreakpoints;
+
   Debugger(Process process, StopInfo initial_stop);
 
   StopInfo wait_and_classify(bool expected_single_step = false);
@@ -69,6 +73,7 @@ class Debugger {
   StopInfo step_over_pending_breakpoint(bool expose_single_step);
   void reinsert_breakpoint(std::uintptr_t address);
   void restore_all_breakpoints();
+  bool discard_breakpoint(std::size_t id) noexcept;
 
   Process process_;
   StopInfo stop_info_;

@@ -219,6 +219,15 @@ if(BUILD_TESTING)
     COMMAND source_next_sib_disp8_integration
       $<TARGET_FILE:source_next_sib_disp8_fixture_nopie>)
 
+  add_executable(source_next_rex_integration tests/source_next_rex_integration.cpp)
+  target_link_libraries(source_next_rex_integration PRIVATE mdbg_core)
+  target_compile_options(source_next_rex_integration PRIVATE
+    -Wall -Wextra -Wpedantic -Werror)
+  add_test(NAME source_next_rex_integration_pie
+    COMMAND source_next_rex_integration $<TARGET_FILE:source_next_fixture_pie>)
+  add_test(NAME source_next_rex_integration_nopie
+    COMMAND source_next_rex_integration $<TARGET_FILE:source_next_fixture_nopie>)
+
   add_executable(source_finish_integration tests/source_finish_integration.cpp)
   target_link_libraries(source_finish_integration PRIVATE mdbg_core)
   target_compile_options(source_finish_integration PRIVATE -Wall -Wextra -Wpedantic -Werror)

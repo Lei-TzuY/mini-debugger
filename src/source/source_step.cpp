@@ -52,6 +52,20 @@ std::optional<std::uintptr_t> supported_call_return_address(
   std::size_t instruction_length = 0;
   if (first == 0xe8U) {
     instruction_length = 5;
+  } else if (first == 0x41U) {
+    if (rip > std::numeric_limits<std::uintptr_t>::max() - 2U) {
+      return std::nullopt;
+    }
+    const auto bytes = debugger.read_memory(rip + 1, 2);
+    if (bytes.size() != 2) return std::nullopt;
+    if (std::to_integer<unsigned>(bytes[0]) == 0xffU) {
+      const auto modrm = std::to_integer<unsigned>(bytes[1]);
+      const auto mod = (modrm >> 6U) & 0x3U;
+      const auto reg = (modrm >> 3U) & 0x7U;
+      if (reg == 2U && mod == 3U) {
+        instruction_length = 3;
+      }
+    }
   } else if (first == 0xffU) {
     if (rip == std::numeric_limits<std::uintptr_t>::max()) {
       return std::nullopt;

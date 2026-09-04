@@ -76,11 +76,31 @@ __attribute__((noinline)) void next_base_memory_caller(void) {
   next_marker += 128;
 }
 
+__attribute__((noinline)) void next_rex_callee(void) {
+#line 590 "next_source.c"
+  next_marker += 256;
+#line 591 "next_source.c"
+  next_marker += 0;
+}
+
+__attribute__((noinline)) void next_rex_caller(void) {
+#line 580 "next_source.c"
+  __asm__ volatile(
+      "leaq next_rex_callee(%%rip), %%r8\n\t"
+      "call *%%r8"
+      :
+      :
+      : "rax", "rcx", "rdx", "rsi", "rdi", "r8", "r9", "r10", "r11", "cc", "memory");
+#line 581 "next_source.c"
+  next_marker += 512;
+}
+
 #line 1 "next_driver.c"
 int main(void) {
   next_caller();
   next_indirect_caller();
   next_memory_caller();
   next_base_memory_caller();
-  return next_marker == 255 ? 0 : 1;
+  next_rex_caller();
+  return next_marker == 1023 ? 0 : 1;
 }

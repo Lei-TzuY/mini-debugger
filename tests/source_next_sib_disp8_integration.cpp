@@ -21,7 +21,7 @@ std::uint64_t source_address(const mdbg::DwarfLineTable& lines, const mdbg::ElfF
                              const mdbg::Debugger& debugger, std::uint64_t line) {
   const auto address =
       lines.find_runtime_source(debugger.pid(), "next_source.c", line, elf);
-  require(address.has_value(), "SIB disp8 fixture is missing line " +
+  require(address.has_value(), "SIB source-next fixture is missing line " +
                                    std::to_string(line));
   return *address;
 }
@@ -67,6 +67,29 @@ std::uint64_t sib_disp8_call_address(const mdbg::Debugger& debugger,
       "SIB disp8 source-next fixture does not contain unprefixed ff 54 20 08");
 }
 
+std::uint64_t sib_disp32_call_address(const mdbg::Debugger& debugger,
+                                      std::uint64_t line660,
+                                      std::uint64_t line661) {
+  require(line661 > line660, "SIB disp32 fixture rows are not in executable order");
+  const auto span = line661 - line660;
+  require(span <= 64, "SIB disp32 fixture row unexpectedly grew beyond 64 bytes");
+  const auto bytes = debugger.read_memory(static_cast<std::uintptr_t>(line660),
+                                          static_cast<std::size_t>(span));
+  constexpr unsigned expected[] = {0xffU, 0x94U, 0x20U, 0x08U, 0x00U, 0x00U, 0x00U};
+  for (std::size_t i = 0; i + 6 < bytes.size(); ++i) {
+    bool match = true;
+    for (std::size_t j = 0; j < 7; ++j) {
+      if (std::to_integer<unsigned>(bytes[i + j]) != expected[j]) {
+        match = false;
+        break;
+      }
+    }
+    if (match) return line660 + i;
+  }
+  throw std::runtime_error(
+      "SIB disp32 source-next fixture does not contain unprefixed ff 94 20 08 00 00 00");
+}
+
 void require_breakpoint_installed(const mdbg::Debugger& debugger, std::size_t id) {
   for (const auto& breakpoint : debugger.breakpoints()) {
     if (breakpoint.id == id) {
@@ -107,7 +130,7 @@ void test_sib_disp8_call_step_over(const std::string& fixture) {
 
   const auto done = debugger.continue_execution();
   require(done.reason == mdbg::StopReason::Exited && done.value == 0,
-          "SIB disp8 source-next fixture did not exit cleanly after next");
+          "SIB source-next fixture did not exit cleanly after disp8 next");
 }
 
 void test_sib_disp8_callee_breakpoint_interrupts_next(const std::string& fixture) {
@@ -136,6 +159,66 @@ void test_sib_disp8_callee_breakpoint_interrupts_next(const std::string& fixture
           "temporary SIB disp8 source-next breakpoint leaked after interruption");
 }
 
+void test_sib_disp32_call_step_over(const std::string& fixture) {
+  auto debugger = mdbg::Debugger::launch(fixture, {});
+  const mdbg::ElfFile elf(fixture);
+  const mdbg::DwarfLineTable lines(fixture);
+  const auto line660 = source_address(lines, elf, debugger, 660);
+  const auto line661 = source_address(lines, elf, debugger, 661);
+  const auto call = sib_disp32_call_address(debugger, line660, line661);
+
+  const auto start_id = debugger.add_breakpoint(static_cast<std::uintptr_t>(call));
+  const auto hit = debugger.continue_execution();
+  require(hit.reason == mdbg::StopReason::Breakpoint && hit.breakpoint_address == call,
+          "SIB disp32 source-next call breakpoint was not hit");
+  require(lines.find_runtime_address(debugger.pid(), debugger.registers().rip, elf).has_value(),
+          "SIB disp32 call instruction has no source mapping");
+  require(marker_value(debugger, elf) == 3,
+          "SIB disp32 call should be reached after the disp8 caller completed");
+
+  const auto result = mdbg::next_source(debugger, lines, elf, 64);
+  require(result.reason == mdbg::SourceStepStopReason::LineChanged,
+          "SIB disp32 memory-indirect call must step over its callee");
+  require_source_line(result.source, 661);
+  require(debugger.registers().rip == line661,
+          "SIB disp32 source next did not stop at line 661");
+  require(marker_value(debugger, elf) == 7,
+          "SIB disp32 callee side effect must complete before next returns");
+  require_breakpoint_installed(debugger, start_id);
+  require(debugger.breakpoints().size() == 1,
+          "temporary SIB disp32 source-next breakpoint leaked into debugger state");
+
+  const auto done = debugger.continue_execution();
+  require(done.reason == mdbg::StopReason::Exited && done.value == 0,
+          "SIB source-next fixture did not exit cleanly after disp32 next");
+}
+
+void test_sib_disp32_callee_breakpoint_interrupts_next(const std::string& fixture) {
+  auto debugger = mdbg::Debugger::launch(fixture, {});
+  const mdbg::ElfFile elf(fixture);
+  const mdbg::DwarfLineTable lines(fixture);
+  const auto line660 = source_address(lines, elf, debugger, 660);
+  const auto line661 = source_address(lines, elf, debugger, 661);
+  const auto line670 = source_address(lines, elf, debugger, 670);
+  const auto call = sib_disp32_call_address(debugger, line660, line661);
+
+  debugger.add_breakpoint(static_cast<std::uintptr_t>(call));
+  debugger.add_breakpoint(static_cast<std::uintptr_t>(line670));
+  const auto hit = debugger.continue_execution();
+  require(hit.reason == mdbg::StopReason::Breakpoint && hit.breakpoint_address == call,
+          "SIB disp32 interruption call breakpoint was not hit");
+
+  const auto result = mdbg::next_source(debugger, lines, elf, 64);
+  require(result.reason == mdbg::SourceStepStopReason::Interrupted,
+          "SIB disp32 callee breakpoint must interrupt source next");
+  require(result.stop.reason == mdbg::StopReason::Breakpoint &&
+              result.stop.breakpoint_address == line670,
+          "source next hid the SIB disp32 callee breakpoint");
+  require_source_line(result.source, 670);
+  require(debugger.breakpoints().size() == 2,
+          "temporary SIB disp32 source-next breakpoint leaked after interruption");
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -143,9 +226,11 @@ int main(int argc, char** argv) {
   try {
     test_sib_disp8_call_step_over(argv[1]);
     test_sib_disp8_callee_breakpoint_interrupts_next(argv[1]);
+    test_sib_disp32_call_step_over(argv[1]);
+    test_sib_disp32_callee_breakpoint_interrupts_next(argv[1]);
     return 0;
   } catch (const std::exception& error) {
-    std::fprintf(stderr, "SIB disp8 source-next integration failure: %s\n", error.what());
+    std::fprintf(stderr, "SIB source-next integration failure: %s\n", error.what());
     return 1;
   }
 }

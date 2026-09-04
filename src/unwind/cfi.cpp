@@ -95,6 +95,31 @@ std::vector<std::string> mapped_module_paths(pid_t pid) {
   return paths;
 }
 
+std::optional<ModuleResolvedSymbolAddress> symbol_address_in_module(
+    pid_t pid, std::string_view name, const std::string& path,
+    const ElfFile& preferred_elf) {
+  const ElfFile* elf = &preferred_elf;
+  std::unique_ptr<ElfFile> owned_elf;
+  if (!same_file(path, preferred_elf.path())) {
+    try {
+      owned_elf = std::make_unique<ElfFile>(path);
+      elf = owned_elf.get();
+    } catch (const std::exception&) {
+      return std::nullopt;
+    }
+  }
+
+  const auto symbol = elf->find_symbol(name);
+  if (!symbol) return std::nullopt;
+  try {
+    return ModuleResolvedSymbolAddress{
+        path, symbol->name,
+        static_cast<std::uintptr_t>(elf->runtime_address(pid, *symbol))};
+  } catch (const std::exception&) {
+    return std::nullopt;
+  }
+}
+
 std::optional<ModuleResolvedSourceAddress> source_address_in_module(
     pid_t pid, std::string_view file, std::uint64_t line, const std::string& path,
     const ElfFile& preferred_elf) {
@@ -176,6 +201,23 @@ std::optional<ModuleResolvedSymbol> find_module_symbol_by_runtime_address(
   if (same_file(*path, preferred_elf.path())) return resolve(preferred_elf);
   const ElfFile module(*path);
   return resolve(module);
+}
+
+std::optional<ModuleResolvedSymbolAddress> find_module_symbol_by_name(
+    pid_t pid, std::string_view name, const ElfFile& preferred_elf) {
+  if (name.empty()) return std::nullopt;
+
+  std::optional<ModuleResolvedSymbolAddress> result;
+  for (const auto& path : mapped_module_paths(pid)) {
+    const auto candidate = symbol_address_in_module(pid, name, path, preferred_elf);
+    if (!candidate) continue;
+    if (result) {
+      throw std::runtime_error("ambiguous symbol across loaded modules: " +
+                               std::string(name));
+    }
+    result = candidate;
+  }
+  return result;
 }
 
 std::optional<ModuleResolvedSource> find_module_source_by_runtime_address(

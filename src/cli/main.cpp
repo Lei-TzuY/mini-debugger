@@ -75,8 +75,8 @@ std::uintptr_t resolve_location(const std::string& text, const mdbg::ElfFile& el
 std::uintptr_t resolve_break_location(const std::string& text, const mdbg::ElfFile& elf,
                                       pid_t pid) {
   if (const auto address = try_parse_address(text)) return *address;
-  if (const auto symbol = elf.find_symbol(text)) {
-    return static_cast<std::uintptr_t>(elf.runtime_address(pid, *symbol));
+  if (const auto symbol = mdbg::find_module_symbol_by_name(pid, text, elf)) {
+    return symbol->address;
   }
   if (const auto source = try_parse_source_spec(text)) {
     const auto resolved =

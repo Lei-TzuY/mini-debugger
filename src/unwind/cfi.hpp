@@ -38,6 +38,12 @@ struct ModuleResolvedSymbol {
   std::uint64_t offset;
 };
 
+struct ModuleResolvedSymbolAddress {
+  std::string module_path;
+  std::string name;
+  std::uintptr_t address;
+};
+
 struct ModuleResolvedSource {
   std::string module_path;
   std::string file;
@@ -54,6 +60,8 @@ struct ModuleResolvedSourceAddress {
 
 std::optional<ModuleResolvedSymbol> find_module_symbol_by_runtime_address(
     pid_t pid, std::uintptr_t address, const ElfFile& preferred_elf);
+std::optional<ModuleResolvedSymbolAddress> find_module_symbol_by_name(
+    pid_t pid, std::string_view name, const ElfFile& preferred_elf);
 std::optional<ModuleResolvedSource> find_module_source_by_runtime_address(
     pid_t pid, std::uintptr_t address, const ElfFile& preferred_elf);
 std::optional<ModuleResolvedSourceAddress> find_module_source_by_file_line(

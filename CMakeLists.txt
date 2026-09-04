@@ -164,6 +164,20 @@ if(BUILD_TESTING)
       $<TARGET_FILE:shared_cfi_fixture>
       $<TARGET_FILE:debug_line_fixture_v5>)
 
+  add_executable(module_symbol_breakpoint_integration
+    tests/module_symbol_breakpoint_integration.cpp)
+  target_link_libraries(module_symbol_breakpoint_integration PRIVATE mdbg_core)
+  target_compile_options(module_symbol_breakpoint_integration PRIVATE
+    -Wall -Wextra -Wpedantic -Werror)
+  add_test(NAME module_symbol_breakpoint_integration_pie
+    COMMAND module_symbol_breakpoint_integration
+      $<TARGET_FILE:shared_cfi_driver_pie>
+      $<TARGET_FILE:shared_cfi_fixture>)
+  add_test(NAME module_symbol_breakpoint_integration_nopie
+    COMMAND module_symbol_breakpoint_integration
+      $<TARGET_FILE:shared_cfi_driver_nopie>
+      $<TARGET_FILE:shared_cfi_fixture>)
+
   add_executable(dwarf_line_integration tests/dwarf_line_integration.cpp)
   target_link_libraries(dwarf_line_integration PRIVATE mdbg_core)
   target_compile_options(dwarf_line_integration PRIVATE -Wall -Wextra -Wpedantic -Werror)

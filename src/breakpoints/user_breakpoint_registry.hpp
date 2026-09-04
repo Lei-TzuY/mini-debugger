@@ -29,7 +29,7 @@ struct UserBreakpoint {
 class UserBreakpointRegistry {
  public:
   UserBreakpointRegistry(Debugger& debugger, const ElfFile& executable)
-      : debugger_(debugger), executable_(executable), deferred_(debugger, executable) {}
+      : debugger_(debugger), executable_(executable) {}
 
   std::size_t add_address(std::uintptr_t address, std::string expression) {
     const auto backend_id = debugger_.add_breakpoint(address);
@@ -45,7 +45,8 @@ class UserBreakpointRegistry {
       return add_address(resolved->address, std::move(symbol));
     }
 
-    const auto backend_id = deferred_.add(symbol);
+    if (!deferred_) deferred_.emplace(debugger_, executable_);
+    const auto backend_id = deferred_->add(symbol);
     const auto id = next_id_++;
     entries_.emplace(id, Entry{std::move(symbol), BackendKind::Deferred, backend_id});
     return id;
@@ -55,9 +56,15 @@ class UserBreakpointRegistry {
     const auto it = entries_.find(id);
     if (it == entries_.end()) return false;
 
-    const bool removed = it->second.kind == BackendKind::Managed
-                             ? debugger_.remove_breakpoint(it->second.backend_id)
-                             : deferred_.remove(it->second.backend_id);
+    bool removed = false;
+    if (it->second.kind == BackendKind::Managed) {
+      removed = debugger_.remove_breakpoint(it->second.backend_id);
+    } else {
+      if (!deferred_) {
+        throw std::logic_error("deferred user breakpoint has no loader controller");
+      }
+      removed = deferred_->remove(it->second.backend_id);
+    }
     if (!removed) {
       throw std::logic_error("user breakpoint backend disappeared from registry ownership");
     }
@@ -86,7 +93,8 @@ class UserBreakpointRegistry {
   }
 
   StopInfo continue_execution(SignalPolicy policy = SignalPolicy::Suppress) {
-    return deferred_.continue_execution(policy);
+    if (deferred_) return deferred_->continue_execution(policy);
+    return debugger_.continue_execution(policy);
   }
 
  private:
@@ -113,7 +121,8 @@ class UserBreakpointRegistry {
                             : UserBreakpointState::TemporarilyRestored};
     }
 
-    const auto deferred = deferred_.breakpoints();
+    if (!deferred_) throw std::logic_error("deferred user breakpoint has no loader controller");
+    const auto deferred = deferred_->breakpoints();
     const auto request = std::find_if(
         deferred.begin(), deferred.end(), [&](const DeferredSymbolBreakpoint& breakpoint) {
           return breakpoint.request_id == entry.backend_id;
@@ -140,7 +149,7 @@ class UserBreakpointRegistry {
 
   Debugger& debugger_;
   const ElfFile& executable_;
-  DeferredSymbolBreakpoints deferred_;
+  std::optional<DeferredSymbolBreakpoints> deferred_;
   std::map<std::size_t, Entry> entries_;
   std::size_t next_id_{1};
 };

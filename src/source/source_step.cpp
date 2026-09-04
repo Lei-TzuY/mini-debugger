@@ -1,6 +1,7 @@
 #include "source/source_step.hpp"
 
 #include "unwind/cfi.hpp"
+#include "x86/call_decoder.hpp"
 
 #include <limits>
 #include <stdexcept>
@@ -45,70 +46,22 @@ std::optional<SourceLocation> source_only(
 std::optional<std::uintptr_t> supported_call_return_address(
     const Debugger& debugger) {
   const auto rip = static_cast<std::uintptr_t>(debugger.registers().rip);
-  const auto opcode = debugger.read_memory(rip, 1);
-  if (opcode.empty()) return std::nullopt;
-
-  const auto first = std::to_integer<unsigned>(opcode.front());
-  std::size_t instruction_length = 0;
-  if (first == 0xe8U) {
-    instruction_length = 5;
-  } else if (first == 0x41U || first == 0x48U || first == 0x49U) {
-    if (rip > std::numeric_limits<std::uintptr_t>::max() - 2U) {
-      return std::nullopt;
-    }
-    const auto bytes = debugger.read_memory(rip + 1, 2);
-    if (bytes.size() != 2) return std::nullopt;
-    if (std::to_integer<unsigned>(bytes[0]) == 0xffU) {
-      const auto modrm = std::to_integer<unsigned>(bytes[1]);
-      const auto mod = (modrm >> 6U) & 0x3U;
-      const auto reg = (modrm >> 3U) & 0x7U;
-      if (reg == 2U && mod == 3U) {
-        instruction_length = 3;
-      }
-    }
-  } else if (first == 0xffU) {
-    if (rip == std::numeric_limits<std::uintptr_t>::max()) {
-      return std::nullopt;
-    }
-    const auto modrm_bytes = debugger.read_memory(rip + 1, 1);
-    if (modrm_bytes.empty()) return std::nullopt;
-    const auto modrm = std::to_integer<unsigned>(modrm_bytes.front());
-    const auto mod = (modrm >> 6U) & 0x3U;
-    const auto reg = (modrm >> 3U) & 0x7U;
-    const auto rm = modrm & 0x7U;
-    if (reg == 2U) {
-      if (mod == 3U) {
-        instruction_length = 2;
-      } else if (mod == 0U && rm == 5U) {
-        instruction_length = 6;
-      } else if (mod == 0U && rm == 4U) {
-        if (rip > std::numeric_limits<std::uintptr_t>::max() - 2U) {
+  const auto instruction_length = x86::decode_supported_near_call_length(
+      [&](std::size_t offset) -> std::optional<unsigned char> {
+        if (offset > std::numeric_limits<std::uintptr_t>::max() - rip) {
           return std::nullopt;
         }
-        const auto sib_bytes = debugger.read_memory(rip + 2, 1);
-        if (sib_bytes.empty()) return std::nullopt;
-        const auto sib = std::to_integer<unsigned>(sib_bytes.front());
-        const auto base = sib & 0x7U;
-        instruction_length = base == 5U ? 7U : 3U;
-      } else if (mod == 0U && rm != 4U) {
-        instruction_length = 2;
-      } else if (mod == 1U && rm == 4U) {
-        instruction_length = 4;
-      } else if (mod == 1U && rm != 4U) {
-        instruction_length = 3;
-      } else if (mod == 2U && rm == 4U) {
-        instruction_length = 7;
-      } else if (mod == 2U && rm != 4U) {
-        instruction_length = 6;
-      }
-    }
-  }
+        const auto bytes = debugger.read_memory(rip + offset, 1);
+        if (bytes.empty()) return std::nullopt;
+        return static_cast<unsigned char>(
+            std::to_integer<unsigned>(bytes.front()));
+      });
 
-  if (instruction_length == 0) return std::nullopt;
-  if (rip > std::numeric_limits<std::uintptr_t>::max() - instruction_length) {
+  if (!instruction_length) return std::nullopt;
+  if (rip > std::numeric_limits<std::uintptr_t>::max() - *instruction_length) {
     throw std::runtime_error("call return address overflows address space");
   }
-  return rip + instruction_length;
+  return rip + *instruction_length;
 }
 
 bool has_breakpoint_at(const Debugger& debugger, std::uintptr_t address) {

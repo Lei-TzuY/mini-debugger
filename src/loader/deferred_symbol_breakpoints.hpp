@@ -35,6 +35,7 @@ class DeferredBreakpoints {
   DeferredBreakpoints(const DeferredBreakpoints&) = delete;
   DeferredBreakpoints& operator=(const DeferredBreakpoints&) = delete;
 
+  std::size_t add(std::string symbol) { return add_symbol(std::move(symbol)); }
   std::size_t add_symbol(std::string symbol);
   std::size_t add_source(std::string file, std::uint64_t line);
   bool remove(std::size_t request_id);

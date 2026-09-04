@@ -1,6 +1,7 @@
 #include "debugger/debugger.hpp"
 #include "elf/elf.hpp"
 #include "loader/deferred_symbol_breakpoints.hpp"
+#include "unwind/cfi.hpp"
 
 #include <cstdio>
 #include <stdexcept>

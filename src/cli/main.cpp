@@ -1,3 +1,4 @@
+#include "breakpoints/user_breakpoint_registry.hpp"
 #include "debugger/debugger.hpp"
 #include "dwarf/eh_frame.hpp"
 #include "dwarf/line_table.hpp"
@@ -72,23 +73,6 @@ std::uintptr_t resolve_location(const std::string& text, const mdbg::ElfFile& el
   return static_cast<std::uintptr_t>(elf.runtime_address(pid, *symbol));
 }
 
-std::uintptr_t resolve_break_location(const std::string& text, const mdbg::ElfFile& elf,
-                                      pid_t pid) {
-  if (const auto address = try_parse_address(text)) return *address;
-  if (const auto symbol = mdbg::find_module_symbol_by_name(pid, text, elf)) {
-    return symbol->address;
-  }
-  if (const auto source = try_parse_source_spec(text)) {
-    const auto resolved =
-        mdbg::find_module_source_by_file_line(pid, source->file, source->line, elf);
-    if (!resolved) {
-      throw std::invalid_argument("no executable address for source location: " + text);
-    }
-    return resolved->address;
-  }
-  throw std::invalid_argument("unknown symbol or source location: " + text);
-}
-
 void print_stop(const mdbg::StopInfo& info, const mdbg::ElfFile& elf, pid_t pid) {
   using mdbg::StopReason;
   switch (info.reason) {
@@ -100,10 +84,14 @@ void print_stop(const mdbg::StopInfo& info, const mdbg::ElfFile& elf, pid_t pid)
       break;
     case StopReason::Breakpoint: {
       std::cout << "breakpoint at 0x" << std::hex << *info.breakpoint_address << std::dec;
-      if (const auto symbol = elf.find_symbol_by_runtime_address(pid, *info.breakpoint_address)) {
-        std::cout << " (" << symbol->symbol.name;
-        if (symbol->offset != 0) std::cout << "+0x" << std::hex << symbol->offset << std::dec;
-        std::cout << ')';
+      try {
+        if (const auto symbol =
+                mdbg::find_module_symbol_by_runtime_address(pid, *info.breakpoint_address, elf)) {
+          std::cout << " (" << symbol->name;
+          if (symbol->offset != 0) std::cout << "+0x" << std::hex << symbol->offset << std::dec;
+          std::cout << ')';
+        }
+      } catch (const std::exception&) {
       }
       std::cout << '\n';
       break;
@@ -230,6 +218,25 @@ void print_source_location(std::uintptr_t address, const mdbg::Debugger& debugge
   }
 }
 
+void print_user_breakpoint(const mdbg::UserBreakpoint& breakpoint) {
+  std::cout << breakpoint.id << ' ';
+  if (breakpoint.state == mdbg::UserBreakpointState::Pending) {
+    std::cout << "pending";
+  } else {
+    std::cout << "0x" << std::hex << *breakpoint.address << std::dec << ' '
+              << mdbg::user_breakpoint_state_name(breakpoint.state);
+  }
+  if (!breakpoint.expression.empty()) std::cout << ' ' << breakpoint.expression;
+  std::cout << '\n';
+}
+
+bool reject_motion_with_pending_breakpoints(const mdbg::UserBreakpointRegistry& breakpoints) {
+  if (!breakpoints.has_pending()) return false;
+  std::cout << "stepping is unavailable while deferred breakpoints are pending; "
+               "use continue or delete the pending breakpoint\n";
+  return true;
+}
+
 void print_usage() {
   std::cerr << "usage: mdbg <program> [args...]\n"
                "       mdbg --attach <pid>\n";
@@ -261,6 +268,7 @@ int main(int argc, char** argv) {
     }();
 
     const mdbg::ElfFile elf(executable);
+    mdbg::UserBreakpointRegistry breakpoints(debugger, elf);
     print_stop(debugger.stop_info(), elf, debugger.pid());
 
     std::string line;
@@ -287,10 +295,12 @@ int main(int argc, char** argv) {
         break;
       }
       if (command == "continue" || command == "c") {
-        print_stop(debugger.continue_execution(), elf, debugger.pid());
+        print_stop(breakpoints.continue_execution(), elf, debugger.pid());
       } else if (command == "stepi" || command == "si") {
+        if (reject_motion_with_pending_breakpoints(breakpoints)) continue;
         print_stop(debugger.single_step(), elf, debugger.pid());
       } else if (command == "step" || command == "s" || command == "next" || command == "n") {
+        if (reject_motion_with_pending_breakpoints(breakpoints)) continue;
         const bool next = command == "next" || command == "n";
         try {
           const auto result = next ? mdbg::next_source(debugger, elf)
@@ -302,6 +312,7 @@ int main(int argc, char** argv) {
                     << error.what() << '\n';
         }
       } else if (command == "finish" || command == "fin") {
+        if (reject_motion_with_pending_breakpoints(breakpoints)) continue;
         try {
           const auto result = mdbg::finish_frame(debugger);
           if (result.reason == mdbg::FinishStopReason::Returned) {
@@ -361,15 +372,34 @@ int main(int argc, char** argv) {
           std::cout << "usage: break <address|symbol|file:line>\n";
           continue;
         }
-        const auto address = resolve_break_location(location, elf, debugger.pid());
-        const auto id = debugger.add_breakpoint(address);
-        std::cout << "Breakpoint " << id << " at 0x" << std::hex << address << std::dec;
-        if (!try_parse_address(location)) std::cout << " (" << location << ')';
-        std::cout << '\n';
+
+        std::size_t id = 0;
+        if (const auto address = try_parse_address(location)) {
+          id = breakpoints.add_address(*address, location);
+        } else if (const auto source = try_parse_source_spec(location)) {
+          const auto resolved =
+              mdbg::find_module_source_by_file_line(debugger.pid(), source->file, source->line, elf);
+          if (!resolved) {
+            throw std::invalid_argument("no executable address for source location: " + location);
+          }
+          id = breakpoints.add_address(resolved->address, location);
+        } else {
+          id = breakpoints.add_symbol(location);
+        }
+
+        const auto breakpoint = breakpoints.breakpoint(id);
+        if (!breakpoint) throw std::logic_error("new user breakpoint disappeared");
+        std::cout << "Breakpoint " << id;
+        if (breakpoint->state == mdbg::UserBreakpointState::Pending) {
+          std::cout << " pending";
+        } else {
+          std::cout << " at 0x" << std::hex << *breakpoint->address << std::dec;
+        }
+        std::cout << " (" << location << ")\n";
       } else if (command == "delete") {
         std::size_t id = 0;
         input >> id;
-        if (!debugger.remove_breakpoint(id)) std::cout << "no such breakpoint\n";
+        if (!breakpoints.remove(id)) std::cout << "no such breakpoint\n";
       } else if (command == "info") {
         std::string topic;
         input >> topic;
@@ -377,9 +407,8 @@ int main(int argc, char** argv) {
           std::cout << "usage: info breakpoints\n";
           continue;
         }
-        for (const auto& bp : debugger.breakpoints()) {
-          std::cout << bp.id << " 0x" << std::hex << bp.address << std::dec
-                    << (bp.installed ? " enabled" : " temporarily-restored") << '\n';
+        for (const auto& breakpoint : breakpoints.breakpoints()) {
+          print_user_breakpoint(breakpoint);
         }
       } else if (command == "symbols") {
         std::string filter;

@@ -52,7 +52,7 @@ std::optional<std::uintptr_t> supported_call_return_address(
   std::size_t instruction_length = 0;
   if (first == 0xe8U) {
     instruction_length = 5;
-  } else if (first == 0x41U) {
+  } else if (first == 0x41U || first == 0x49U) {
     if (rip > std::numeric_limits<std::uintptr_t>::max() - 2U) {
       return std::nullopt;
     }

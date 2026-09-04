@@ -23,6 +23,7 @@ add_library(mdbg_core
   src/dwarf/line_table.cpp
   src/dwarf/source_lookup.cpp
   src/dwarf/eh_frame.cpp
+  src/x86/call_decoder.cpp
   src/source/source_step.cpp
   src/source/source_finish.cpp
 )
@@ -253,6 +254,11 @@ if(BUILD_TESTING)
     COMMAND source_finish_integration
       $<TARGET_FILE:source_next_fixture_nopie>
       $<TARGET_FILE:source_finish_omit_fixture_nopie>)
+
+  add_executable(x86_call_decoder_tests tests/x86_call_decoder_tests.cpp)
+  target_link_libraries(x86_call_decoder_tests PRIVATE mdbg_core)
+  target_compile_options(x86_call_decoder_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+  add_test(NAME x86_call_decoder_tests COMMAND x86_call_decoder_tests)
 
   add_executable(elf_tests tests/elf_tests.cpp)
   target_link_libraries(elf_tests PRIVATE mdbg_core)

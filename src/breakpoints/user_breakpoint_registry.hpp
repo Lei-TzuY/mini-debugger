@@ -45,10 +45,26 @@ class UserBreakpointRegistry {
       return add_address(resolved->address, std::move(symbol));
     }
 
-    if (!deferred_) deferred_.emplace(debugger_, executable_);
-    const auto backend_id = deferred_->add(symbol);
+    ensure_deferred();
+    const auto backend_id = deferred_->add_symbol(symbol);
     const auto id = next_id_++;
     entries_.emplace(id, Entry{std::move(symbol), BackendKind::Deferred, backend_id});
+    return id;
+  }
+
+  std::size_t add_source(std::string file, std::uint64_t line, std::string expression) {
+    if (file.empty()) throw std::invalid_argument("breakpoint source file must not be empty");
+    if (line == 0) throw std::invalid_argument("breakpoint source line must be non-zero");
+
+    if (const auto resolved =
+            find_module_source_by_file_line(debugger_.pid(), file, line, executable_)) {
+      return add_address(resolved->address, std::move(expression));
+    }
+
+    ensure_deferred();
+    const auto backend_id = deferred_->add_source(std::move(file), line);
+    const auto id = next_id_++;
+    entries_.emplace(id, Entry{std::move(expression), BackendKind::Deferred, backend_id});
     return id;
   }
 
@@ -106,6 +122,10 @@ class UserBreakpointRegistry {
     std::size_t backend_id;
   };
 
+  void ensure_deferred() {
+    if (!deferred_) deferred_.emplace(debugger_, executable_);
+  }
+
   [[nodiscard]] UserBreakpoint snapshot(std::size_t id, const Entry& entry) const {
     if (entry.kind == BackendKind::Managed) {
       const auto managed = debugger_.breakpoints();
@@ -124,7 +144,7 @@ class UserBreakpointRegistry {
     if (!deferred_) throw std::logic_error("deferred user breakpoint has no loader controller");
     const auto deferred = deferred_->breakpoints();
     const auto request = std::find_if(
-        deferred.begin(), deferred.end(), [&](const DeferredSymbolBreakpoint& breakpoint) {
+        deferred.begin(), deferred.end(), [&](const DeferredBreakpoint& breakpoint) {
           return breakpoint.request_id == entry.backend_id;
         });
     if (request == deferred.end()) {
@@ -149,7 +169,7 @@ class UserBreakpointRegistry {
 
   Debugger& debugger_;
   const ElfFile& executable_;
-  std::optional<DeferredSymbolBreakpoints> deferred_;
+  std::optional<DeferredBreakpoints> deferred_;
   std::map<std::size_t, Entry> entries_;
   std::size_t next_id_{1};
 };

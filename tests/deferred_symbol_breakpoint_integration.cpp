@@ -11,6 +11,9 @@
 
 namespace {
 
+constexpr const char* kDeferredSourceFile = "deferred_plugin_source.c";
+constexpr std::uint64_t kDeferredSourceLine = 700;
+
 void require(bool condition, const std::string& message) {
   if (!condition) throw std::runtime_error(message);
 }
@@ -19,7 +22,7 @@ void test_deferred_symbol_across_reload(const std::string& driver,
                                         const std::string& plugin) {
   auto debugger = mdbg::Debugger::launch(driver, {plugin});
   const mdbg::ElfFile executable(driver);
-  mdbg::DeferredSymbolBreakpoints deferred(debugger, executable);
+  mdbg::DeferredBreakpoints deferred(debugger, executable);
 
   require(!mdbg::find_module_symbol_by_name(debugger.pid(), "deferred_target", executable),
           "deferred target must not be loaded at the initial exec stop");
@@ -28,7 +31,7 @@ void test_deferred_symbol_across_reload(const std::string& driver,
   require(barrier.has_value(), "reload barrier symbol is unavailable");
   const auto barrier_breakpoint_id = debugger.add_breakpoint(barrier->address);
 
-  const auto request_id = deferred.add("deferred_target");
+  const auto request_id = deferred.add_symbol("deferred_target");
   auto requests = deferred.breakpoints();
   require(requests.size() == 1 && requests.front().request_id == request_id,
           "deferred request was not recorded");
@@ -165,6 +168,70 @@ void test_user_breakpoint_registry_reload(const std::string& driver,
           "tracee did not exit cleanly after deleting the re-armed user breakpoint");
 }
 
+void test_user_source_breakpoint_reload(const std::string& driver,
+                                        const std::string& plugin) {
+  auto debugger = mdbg::Debugger::launch(driver, {plugin});
+  const mdbg::ElfFile executable(driver);
+  mdbg::UserBreakpointRegistry breakpoints(debugger, executable);
+
+  require(!mdbg::find_module_source_by_file_line(debugger.pid(), kDeferredSourceFile,
+                                                  kDeferredSourceLine, executable),
+          "plugin source location must be absent before dlopen");
+
+  const std::string expression =
+      std::string(kDeferredSourceFile) + ':' + std::to_string(kDeferredSourceLine);
+  const auto source_id =
+      breakpoints.add_source(kDeferredSourceFile, kDeferredSourceLine, expression);
+  require(source_id == 1, "deferred source breakpoint must use the user id namespace");
+  const auto initial = breakpoints.breakpoint(source_id);
+  require(initial && !initial->address && initial->state == mdbg::UserBreakpointState::Pending,
+          "unloaded source location must begin pending");
+
+  const auto barrier_id = breakpoints.add_symbol("reload_barrier");
+  const auto barrier = breakpoints.breakpoint(barrier_id);
+  require(barrier && barrier->address, "source reload barrier did not resolve immediately");
+
+  const auto first_hit = breakpoints.continue_execution();
+  require(first_hit.reason == mdbg::StopReason::Breakpoint && first_hit.breakpoint_address,
+          "deferred source location did not stop after first dlopen");
+  const auto first_source = mdbg::find_module_source_by_runtime_address(
+      debugger.pid(), *first_hit.breakpoint_address, executable);
+  require(first_source && first_source->line == kDeferredSourceLine,
+          "first deferred source stop does not map back to the requested line");
+  const auto first_resolved = breakpoints.breakpoint(source_id);
+  require(first_resolved && first_resolved->address == first_hit.breakpoint_address &&
+              first_resolved->state == mdbg::UserBreakpointState::TemporarilyRestored,
+          "source request did not resolve into managed breakpoint ownership");
+
+  const auto barrier_hit = breakpoints.continue_execution();
+  require(barrier_hit.reason == mdbg::StopReason::Breakpoint &&
+              barrier_hit.breakpoint_address == barrier->address,
+          "source test did not reach the post-dlclose reload barrier");
+  const auto pending_again = breakpoints.breakpoint(source_id);
+  require(pending_again && !pending_again->address &&
+              pending_again->state == mdbg::UserBreakpointState::Pending,
+          "source request did not return to pending after unload");
+  require(!mdbg::find_module_source_by_file_line(debugger.pid(), kDeferredSourceFile,
+                                                  kDeferredSourceLine, executable),
+          "plugin source remained resolvable after dlclose");
+  require(breakpoints.remove(barrier_id), "source reload barrier could not be removed");
+
+  const auto second_hit = breakpoints.continue_execution();
+  require(second_hit.reason == mdbg::StopReason::Breakpoint && second_hit.breakpoint_address,
+          "deferred source breakpoint did not re-arm after reload");
+  const auto second_resolved = breakpoints.breakpoint(source_id);
+  require(second_resolved && second_resolved->id == source_id &&
+              second_resolved->address == second_hit.breakpoint_address &&
+              second_resolved->state == mdbg::UserBreakpointState::TemporarilyRestored,
+          "source breakpoint identity was not preserved across reload");
+
+  require(breakpoints.remove(source_id), "re-armed source breakpoint could not be removed");
+  require(debugger.breakpoints().empty(), "source breakpoint backend leaked after deletion");
+  const auto done = breakpoints.continue_execution();
+  require(done.reason == mdbg::StopReason::Exited && done.value == 0,
+          "source reload fixture did not exit cleanly");
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -172,9 +239,10 @@ int main(int argc, char** argv) {
   try {
     test_deferred_symbol_across_reload(argv[1], argv[2]);
     test_user_breakpoint_registry_reload(argv[1], argv[2]);
+    test_user_source_breakpoint_reload(argv[1], argv[2]);
     return 0;
   } catch (const std::exception& error) {
-    std::fprintf(stderr, "deferred symbol breakpoint integration failure: %s\n", error.what());
+    std::fprintf(stderr, "deferred breakpoint integration failure: %s\n", error.what());
     return 1;
   }
 }

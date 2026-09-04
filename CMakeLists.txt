@@ -109,7 +109,7 @@ if(BUILD_TESTING)
   target_compile_options(shared_cfi_fixture PRIVATE -O0 -g -gdwarf-4 -fomit-frame-pointer -fPIC)
 
   add_library(deferred_symbol_plugin SHARED tests/fixtures/deferred_symbol_plugin.c)
-  target_compile_options(deferred_symbol_plugin PRIVATE -O0 -g -fPIC)
+  target_compile_options(deferred_symbol_plugin PRIVATE -O0 -g -gdwarf-4 -fPIC)
 
   add_executable(deferred_symbol_driver_pie tests/fixtures/deferred_symbol_driver.c)
   target_compile_options(deferred_symbol_driver_pie PRIVATE -O0 -g -fPIE)

@@ -14,7 +14,7 @@
 
 namespace mdbg {
 
-class DeferredSymbolBreakpoints;
+class DeferredBreakpoints;
 
 enum class StopReason {
   InitialExec,
@@ -63,7 +63,7 @@ class Debugger {
   [[nodiscard]] std::vector<Breakpoint> breakpoints() const;
 
  private:
-  friend class DeferredSymbolBreakpoints;
+  friend class DeferredBreakpoints;
 
   Debugger(Process process, StopInfo initial_stop);
 

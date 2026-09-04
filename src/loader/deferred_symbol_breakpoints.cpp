@@ -27,17 +27,21 @@ T read_file_struct(std::ifstream& input, std::uint64_t offset, const char* what)
   return value;
 }
 
+bool same_target(const DeferredBreakpointTarget& left,
+                 const DeferredBreakpointTarget& right) {
+  return left.kind == right.kind && left.name == right.name && left.line == right.line;
+}
+
 }  // namespace
 
-DeferredSymbolBreakpoints::DeferredSymbolBreakpoints(Debugger& debugger,
-                                                     const ElfFile& executable)
+DeferredBreakpoints::DeferredBreakpoints(Debugger& debugger, const ElfFile& executable)
     : debugger_(debugger),
       executable_(executable),
       metadata_(read_loader_metadata(executable.path())) {}
 
-DeferredSymbolBreakpoints::~DeferredSymbolBreakpoints() { suspend_monitoring(); }
+DeferredBreakpoints::~DeferredBreakpoints() { suspend_monitoring(); }
 
-DeferredSymbolBreakpoints::LoaderMetadata DeferredSymbolBreakpoints::read_loader_metadata(
+DeferredBreakpoints::LoaderMetadata DeferredBreakpoints::read_loader_metadata(
     const std::string& path) {
   std::ifstream input(path, std::ios::binary);
   if (!input) throw std::runtime_error("failed to open executable for loader metadata: " + path);
@@ -81,11 +85,11 @@ DeferredSymbolBreakpoints::LoaderMetadata DeferredSymbolBreakpoints::read_loader
   return {header.e_entry, *dt_debug_value_virtual_address};
 }
 
-std::uint64_t DeferredSymbolBreakpoints::load_bias() const {
+std::uint64_t DeferredBreakpoints::load_bias() const {
   return executable_.load_bias(debugger_.pid());
 }
 
-std::uintptr_t DeferredSymbolBreakpoints::runtime_address(std::uint64_t virtual_address) const {
+std::uintptr_t DeferredBreakpoints::runtime_address(std::uint64_t virtual_address) const {
   const auto bias = load_bias();
   if (virtual_address > std::numeric_limits<std::uint64_t>::max() - bias) {
     throw std::runtime_error("loader runtime address overflows address space");
@@ -97,7 +101,7 @@ std::uintptr_t DeferredSymbolBreakpoints::runtime_address(std::uint64_t virtual_
   return static_cast<std::uintptr_t>(address);
 }
 
-std::uint64_t DeferredSymbolBreakpoints::read_u64(std::uintptr_t address) const {
+std::uint64_t DeferredBreakpoints::read_u64(std::uintptr_t address) const {
   const auto bytes = debugger_.read_memory(address, sizeof(std::uint64_t));
   if (bytes.size() != sizeof(std::uint64_t)) {
     throw std::runtime_error("failed to read loader pointer from tracee");
@@ -107,7 +111,7 @@ std::uint64_t DeferredSymbolBreakpoints::read_u64(std::uintptr_t address) const 
   return value;
 }
 
-std::optional<std::uintptr_t> DeferredSymbolBreakpoints::current_r_debug_address() const {
+std::optional<std::uintptr_t> DeferredBreakpoints::current_r_debug_address() const {
   const auto slot = runtime_address(metadata_.dt_debug_value_virtual_address);
   const auto value = read_u64(slot);
   if (value == 0) return std::nullopt;
@@ -117,7 +121,7 @@ std::optional<std::uintptr_t> DeferredSymbolBreakpoints::current_r_debug_address
   return static_cast<std::uintptr_t>(value);
 }
 
-std::uintptr_t DeferredSymbolBreakpoints::current_loader_break_address() const {
+std::uintptr_t DeferredBreakpoints::current_loader_break_address() const {
   if (!r_debug_address_) throw std::logic_error("r_debug address is not initialized");
   const auto bytes = debugger_.read_memory(*r_debug_address_, sizeof(::r_debug));
   if (bytes.size() != sizeof(::r_debug)) {
@@ -131,7 +135,7 @@ std::uintptr_t DeferredSymbolBreakpoints::current_loader_break_address() const {
   return static_cast<std::uintptr_t>(rendezvous.r_brk);
 }
 
-bool DeferredSymbolBreakpoints::loader_state_is_consistent() const {
+bool DeferredBreakpoints::loader_state_is_consistent() const {
   if (!r_debug_address_) return false;
   const auto bytes = debugger_.read_memory(*r_debug_address_, sizeof(::r_debug));
   if (bytes.size() != sizeof(::r_debug)) {
@@ -142,24 +146,45 @@ bool DeferredSymbolBreakpoints::loader_state_is_consistent() const {
   return rendezvous.r_state == ::r_debug::RT_CONSISTENT;
 }
 
-std::size_t DeferredSymbolBreakpoints::add(std::string symbol) {
+std::optional<std::uintptr_t> DeferredBreakpoints::resolve_target(
+    const DeferredBreakpointTarget& target) const {
+  if (target.kind == DeferredBreakpointTargetKind::Symbol) {
+    const auto resolved = find_module_symbol_by_name(debugger_.pid(), target.name, executable_);
+    if (!resolved) return std::nullopt;
+    return resolved->address;
+  }
+  const auto resolved =
+      find_module_source_by_file_line(debugger_.pid(), target.name, target.line, executable_);
+  if (!resolved) return std::nullopt;
+  return resolved->address;
+}
+
+std::size_t DeferredBreakpoints::add_symbol(std::string symbol) {
+  if (symbol.empty()) throw std::invalid_argument("deferred symbol must not be empty");
+  return add_target({DeferredBreakpointTargetKind::Symbol, std::move(symbol), 0});
+}
+
+std::size_t DeferredBreakpoints::add_source(std::string file, std::uint64_t line) {
+  if (file.empty()) throw std::invalid_argument("deferred source file must not be empty");
+  if (line == 0) throw std::invalid_argument("deferred source line must be non-zero");
+  return add_target({DeferredBreakpointTargetKind::Source, std::move(file), line});
+}
+
+std::size_t DeferredBreakpoints::add_target(DeferredBreakpointTarget target) {
   if (debugger_.state() != ProcessState::Stopped) {
     throw std::logic_error("deferred breakpoints can only be modified while stopped");
   }
-  if (symbol.empty()) throw std::invalid_argument("deferred symbol must not be empty");
   for (const auto& [id, request] : requests_) {
     static_cast<void>(id);
-    if (request.symbol == symbol) {
-      throw std::invalid_argument("a deferred breakpoint request already exists for that symbol");
+    if (same_target(request.target, target)) {
+      throw std::invalid_argument("a deferred breakpoint request already exists for that target");
     }
   }
 
-  DeferredSymbolBreakpoint request{next_request_id_++, std::move(symbol), std::nullopt,
-                                   std::nullopt};
-  if (const auto resolved =
-          find_module_symbol_by_name(debugger_.pid(), request.symbol, executable_)) {
-    request.address = resolved->address;
-    request.breakpoint_id = debugger_.add_breakpoint(resolved->address);
+  DeferredBreakpoint request{next_request_id_++, std::move(target), std::nullopt, std::nullopt};
+  if (const auto resolved = resolve_target(request.target)) {
+    request.address = *resolved;
+    request.breakpoint_id = debugger_.add_breakpoint(*resolved);
   }
 
   const auto request_id = request.request_id;
@@ -177,7 +202,7 @@ std::size_t DeferredSymbolBreakpoints::add(std::string symbol) {
   return request_id;
 }
 
-bool DeferredSymbolBreakpoints::remove(std::size_t request_id) {
+bool DeferredBreakpoints::remove(std::size_t request_id) {
   const auto it = requests_.find(request_id);
   if (it == requests_.end()) return false;
   if (it->second.breakpoint_id && !debugger_.remove_breakpoint(*it->second.breakpoint_id)) {
@@ -188,8 +213,8 @@ bool DeferredSymbolBreakpoints::remove(std::size_t request_id) {
   return true;
 }
 
-std::vector<DeferredSymbolBreakpoint> DeferredSymbolBreakpoints::breakpoints() const {
-  std::vector<DeferredSymbolBreakpoint> result;
+std::vector<DeferredBreakpoint> DeferredBreakpoints::breakpoints() const {
+  std::vector<DeferredBreakpoint> result;
   result.reserve(requests_.size());
   for (const auto& [id, request] : requests_) {
     static_cast<void>(id);
@@ -198,12 +223,12 @@ std::vector<DeferredSymbolBreakpoint> DeferredSymbolBreakpoints::breakpoints() c
   return result;
 }
 
-void DeferredSymbolBreakpoints::ensure_monitoring() {
+void DeferredBreakpoints::ensure_monitoring() {
   if (requests_.empty() || loader_breakpoint_id_ || bootstrap_breakpoint_id_) return;
   if (!try_install_loader_breakpoint()) install_bootstrap_breakpoint();
 }
 
-bool DeferredSymbolBreakpoints::try_install_loader_breakpoint() {
+bool DeferredBreakpoints::try_install_loader_breakpoint() {
   const auto address = current_r_debug_address();
   if (!address) return false;
   r_debug_address_ = *address;
@@ -213,23 +238,22 @@ bool DeferredSymbolBreakpoints::try_install_loader_breakpoint() {
   return true;
 }
 
-void DeferredSymbolBreakpoints::install_bootstrap_breakpoint() {
+void DeferredBreakpoints::install_bootstrap_breakpoint() {
   const auto entry = runtime_address(metadata_.entry_virtual_address);
   bootstrap_breakpoint_address_ = entry;
   bootstrap_breakpoint_id_ = debugger_.add_breakpoint(entry);
 }
 
-void DeferredSymbolBreakpoints::reconcile_requests() {
+void DeferredBreakpoints::reconcile_requests() {
   for (auto& [id, request] : requests_) {
     static_cast<void>(id);
-    const auto resolved =
-        find_module_symbol_by_name(debugger_.pid(), request.symbol, executable_);
+    const auto resolved = resolve_target(request.target);
 
     if (request.breakpoint_id) {
       if (!request.address) {
         throw std::logic_error("resolved deferred breakpoint has no address");
       }
-      if (resolved && resolved->address == *request.address) continue;
+      if (resolved && *resolved == *request.address) continue;
       if (!debugger_.discard_breakpoint(*request.breakpoint_id)) {
         throw std::logic_error("stale deferred breakpoint disappeared from debugger state");
       }
@@ -238,30 +262,30 @@ void DeferredSymbolBreakpoints::reconcile_requests() {
     }
 
     if (!resolved) continue;
-    request.address = resolved->address;
-    request.breakpoint_id = debugger_.add_breakpoint(resolved->address);
+    request.address = *resolved;
+    request.breakpoint_id = debugger_.add_breakpoint(*resolved);
   }
 }
 
-void DeferredSymbolBreakpoints::suspend_monitoring() noexcept {
+void DeferredBreakpoints::suspend_monitoring() noexcept {
   remove_internal_breakpoint(loader_breakpoint_id_, loader_breakpoint_address_);
   remove_internal_breakpoint(bootstrap_breakpoint_id_, bootstrap_breakpoint_address_);
 }
 
-void DeferredSymbolBreakpoints::stop_monitoring_if_idle() {
+void DeferredBreakpoints::stop_monitoring_if_idle() {
   if (!requests_.empty()) return;
   suspend_monitoring();
   r_debug_address_.reset();
 }
 
-bool DeferredSymbolBreakpoints::is_internal_stop(const StopInfo& stop) const {
+bool DeferredBreakpoints::is_internal_stop(const StopInfo& stop) const {
   if (stop.reason != StopReason::Breakpoint || !stop.breakpoint_address) return false;
   return (bootstrap_breakpoint_address_ &&
           stop.breakpoint_address == bootstrap_breakpoint_address_) ||
          (loader_breakpoint_address_ && stop.breakpoint_address == loader_breakpoint_address_);
 }
 
-void DeferredSymbolBreakpoints::handle_internal_stop(const StopInfo& stop) {
+void DeferredBreakpoints::handle_internal_stop(const StopInfo& stop) {
   if (bootstrap_breakpoint_address_ && stop.breakpoint_address == bootstrap_breakpoint_address_) {
     remove_internal_breakpoint(bootstrap_breakpoint_id_, bootstrap_breakpoint_address_);
     if (!try_install_loader_breakpoint()) {
@@ -279,7 +303,7 @@ void DeferredSymbolBreakpoints::handle_internal_stop(const StopInfo& stop) {
   throw std::logic_error("attempted to handle a non-internal breakpoint stop");
 }
 
-StopInfo DeferredSymbolBreakpoints::continue_execution(SignalPolicy policy) {
+StopInfo DeferredBreakpoints::continue_execution(SignalPolicy policy) {
   ensure_monitoring();
   for (;;) {
     const auto stop = debugger_.continue_execution(policy);
@@ -292,7 +316,7 @@ StopInfo DeferredSymbolBreakpoints::continue_execution(SignalPolicy policy) {
   }
 }
 
-void DeferredSymbolBreakpoints::remove_internal_breakpoint(
+void DeferredBreakpoints::remove_internal_breakpoint(
     std::optional<std::size_t>& id, std::optional<std::uintptr_t>& address) noexcept {
   if (!id) {
     address.reset();

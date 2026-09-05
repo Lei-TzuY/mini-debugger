@@ -56,6 +56,9 @@ void run_nested_registry_api(const std::string& driver) {
   require(probe.has_value(), "nested-fork shared probe symbol is unavailable");
   const auto probe_address =
       static_cast<std::uintptr_t>(image.runtime_address(parent, *probe));
+  const auto original_probe_byte = byte_at(debugger, probe_address);
+  require(original_probe_byte != 0xccU,
+          "fixture probe unexpectedly begins with an INT3 before debugger ownership");
 
   debugger.set_fork_follow_policy(mdbg::ForkFollowPolicy::Both);
   auto info = debugger.continue_execution();
@@ -65,7 +68,13 @@ void run_nested_registry_api(const std::string& driver) {
   const auto child = *info.child_pid;
   require(child != parent, "first nested fork did not create a distinct child");
 
+  const auto parent_breakpoint = debugger.add_breakpoint(probe_address);
+  require(byte_at(debugger, probe_address) == 0xccU,
+          "parent process-scoped breakpoint was not physically installed");
+
   debugger.select_process(child);
+  require(byte_at(debugger, probe_address) == original_probe_byte,
+          "parent breakpoint rewrote the retained child copy-on-write domain");
   info = debugger.continue_execution();
   require(info.process_event == mdbg::ProcessEventKind::Fork && info.retains_child &&
               info.parent_pid == child && info.child_pid.has_value(),
@@ -84,9 +93,8 @@ void run_nested_registry_api(const std::string& driver) {
   require(unknown_rejected, "unknown process selection was not rejected deterministically");
 
   debugger.select_process(grandchild);
-  const auto original_probe_byte = byte_at(debugger, probe_address);
-  require(original_probe_byte != 0xccU,
-          "fixture probe unexpectedly begins with an INT3 before debugger ownership");
+  require(byte_at(debugger, probe_address) == original_probe_byte,
+          "grandchild inherited the retained parent's debugger-inserted INT3");
   const auto grandchild_breakpoint = debugger.add_breakpoint(probe_address);
   require(byte_at(debugger, probe_address) == 0xccU,
           "grandchild managed breakpoint was not physically installed");
@@ -95,8 +103,8 @@ void run_nested_registry_api(const std::string& driver) {
   require(byte_at(debugger, probe_address) == original_probe_byte,
           "grandchild breakpoint rewrote the child copy-on-write domain");
   debugger.select_process(parent);
-  require(byte_at(debugger, probe_address) == original_probe_byte,
-          "grandchild breakpoint rewrote the parent copy-on-write domain");
+  require(byte_at(debugger, probe_address) == 0xccU,
+          "grandchild breakpoint corrupted the parent's independent breakpoint ownership");
   debugger.select_process(grandchild);
 
   info = debugger.continue_execution();
@@ -126,8 +134,8 @@ void run_nested_registry_api(const std::string& driver) {
   debugger.select_process(child);
   const auto child_breakpoint = debugger.add_breakpoint(probe_address);
   debugger.select_process(parent);
-  require(byte_at(debugger, probe_address) == original_probe_byte,
-          "child breakpoint rewrote the retained parent domain");
+  require(byte_at(debugger, probe_address) == 0xccU,
+          "child breakpoint corrupted the parent's independent breakpoint ownership");
   debugger.select_process(child);
   info = debugger.continue_execution();
   require(info.reason == mdbg::StopReason::Breakpoint && info.tid == child,
@@ -141,11 +149,12 @@ void run_nested_registry_api(const std::string& driver) {
   require(info.reason == mdbg::StopReason::ProcessExited && info.tid == child && info.value == 0,
           "child exit was not surfaced independently");
   require(debugger.pid() == parent, "parent was not retained after child exit");
+  require(byte_at(debugger, probe_address) == 0xccU,
+          "parent breakpoint ownership was lost after nested child domains exited");
 
-  const auto parent_breakpoint = debugger.add_breakpoint(probe_address);
   info = debugger.continue_execution();
   require(info.reason == mdbg::StopReason::Breakpoint && info.tid == parent,
-          "parent did not hit its independent managed breakpoint");
+          "parent did not hit its independently retained managed breakpoint");
   require(debugger.remove_breakpoint(parent_breakpoint),
           "parent breakpoint could not be removed");
   info = debugger.continue_execution();

@@ -20,7 +20,8 @@ void require(bool condition, const std::string& message) {
   if (!condition) throw std::runtime_error(message);
 }
 
-std::string run_cli(const std::string& integration_path, const std::string& fixture) {
+std::string run_cli(const std::string& integration_path, const std::string& fixture,
+                    const std::string& script, const std::string& context) {
   const auto mdbg =
       (std::filesystem::absolute(integration_path).parent_path() / "mdbg").string();
   require(std::filesystem::exists(mdbg), "mdbg executable is missing beside integration test");
@@ -48,16 +49,11 @@ std::string run_cli(const std::string& integration_path, const std::string& fixt
 
   ::close(input_pipe[0]);
   ::close(output_pipe[1]);
-  const std::string script =
-      "break local_pointer_probe\n"
-      "continue\n"
-      "print local_pointer\n"
-      "continue\n";
   std::size_t written = 0;
   while (written < script.size()) {
     const auto count = ::write(input_pipe[1], script.data() + written, script.size() - written);
     if (count == -1 && errno == EINTR) continue;
-    if (count <= 0) throw std::runtime_error("failed to write pointer CLI script");
+    if (count <= 0) throw std::runtime_error("failed to write " + context + " CLI script");
     written += static_cast<std::size_t>(count);
   }
   ::close(input_pipe[1]);
@@ -69,19 +65,19 @@ std::string run_cli(const std::string& integration_path, const std::string& fixt
     if (now >= deadline) {
       ::kill(-child, SIGKILL);
       ::kill(child, SIGKILL);
-      throw std::runtime_error("timed out waiting for pointer CLI");
+      throw std::runtime_error("timed out waiting for " + context + " CLI");
     }
     const auto remaining =
         std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now).count();
     pollfd descriptor{output_pipe[0], POLLIN | POLLHUP, 0};
     const int polled = ::poll(&descriptor, 1, static_cast<int>(remaining));
     if (polled == -1 && errno == EINTR) continue;
-    if (polled <= 0) throw std::runtime_error("timed out reading pointer CLI output");
+    if (polled <= 0) throw std::runtime_error("timed out reading " + context + " CLI output");
 
     char buffer[512];
     const auto count = ::read(output_pipe[0], buffer, sizeof(buffer));
     if (count == -1 && errno == EINTR) continue;
-    if (count < 0) throw std::runtime_error("failed to read pointer CLI output");
+    if (count < 0) throw std::runtime_error("failed to read " + context + " CLI output");
     if (count == 0) break;
     output.append(buffer, static_cast<std::size_t>(count));
   }
@@ -93,7 +89,7 @@ std::string run_cli(const std::string& integration_path, const std::string& fixt
     waited = ::waitpid(child, &status, 0);
   } while (waited == -1 && errno == EINTR);
   require(waited == child && WIFEXITED(status) && WEXITSTATUS(status) == 0,
-          "pointer CLI tracee did not exit cleanly\n" + output);
+          context + " CLI tracee did not exit cleanly\n" + output);
   return output;
 }
 
@@ -122,6 +118,7 @@ void test_pointer_api(const std::string& fixture) {
           "pointer lookup did not recover the live pointee address");
   require(value.byte_size == sizeof(std::uint64_t) && !value.is_signed,
           "pointer lookup returned the wrong pointer width/sign metadata");
+  require(value.members.empty(), "pointer lookup unexpectedly returned aggregate members");
   require(std::filesystem::equivalent(value.module_path, fixture),
           "pointer lookup lost owning module identity");
 
@@ -130,10 +127,69 @@ void test_pointer_api(const std::string& fixture) {
           "pointer fixture did not exit cleanly after inspection");
 }
 
+void test_struct_api(const std::string& fixture) {
+  auto debugger = mdbg::Debugger::launch(fixture, {});
+  const mdbg::ElfFile elf(fixture);
+  const auto probe = elf.find_symbol("local_struct_probe");
+  require(probe.has_value(), "struct fixture probe symbol is unavailable");
+  const auto probe_address =
+      static_cast<std::uintptr_t>(elf.runtime_address(debugger.pid(), *probe));
+  debugger.add_breakpoint(probe_address);
+  const auto stop = debugger.continue_execution();
+  require(stop.reason == mdbg::StopReason::Breakpoint &&
+              stop.breakpoint_address == probe_address,
+          "struct fixture did not stop while local_struct was live");
+
+  const auto value = mdbg::inspect_local_value(debugger, elf, "local_struct");
+  require(value.name == "local_struct" && value.kind == mdbg::LocalValueKind::Structure,
+          "struct lookup did not preserve aggregate type metadata");
+  require(value.byte_size == 16 && !value.is_signed && value.raw_value == 0,
+          "struct lookup returned the wrong aggregate size/scalar metadata");
+  require(value.members.size() == 2, "struct lookup did not return two direct members");
+  require(value.members[0].name == "count" && value.members[0].raw_value == 0x11223344ULL &&
+              value.members[0].byte_size == 4 && !value.members[0].is_signed,
+          "struct lookup decoded count incorrectly");
+  require(value.members[1].name == "delta" &&
+              value.members[1].raw_value == static_cast<std::uint64_t>(INT64_C(-123456789)) &&
+              value.members[1].byte_size == 8 && value.members[1].is_signed,
+          "struct lookup decoded delta incorrectly");
+  require(std::filesystem::equivalent(value.module_path, fixture),
+          "struct lookup lost owning module identity");
+
+  bool integer_rejected = false;
+  try {
+    (void)mdbg::inspect_local_integer(debugger, elf, "local_struct");
+  } catch (const std::runtime_error&) {
+    integer_rejected = true;
+  }
+  require(integer_rejected, "integer-only compatibility API accepted a struct aggregate");
+
+  const auto exit = debugger.continue_execution();
+  require(exit.reason == mdbg::StopReason::Exited && exit.value == 0,
+          "struct fixture did not exit cleanly after inspection");
+}
+
 void test_pointer_cli(const std::string& integration_path, const std::string& fixture) {
-  const auto output = run_cli(integration_path, fixture);
+  const auto output = run_cli(integration_path, fixture,
+                              "break local_pointer_probe\n"
+                              "continue\n"
+                              "print local_pointer\n"
+                              "continue\n",
+                              "pointer");
   require(output.find("local_pointer = 0x") != std::string::npos,
           "CLI did not render the pointer scalar in hexadecimal\n" + output);
+}
+
+void test_struct_cli(const std::string& integration_path, const std::string& fixture) {
+  const auto output = run_cli(integration_path, fixture,
+                              "break local_struct_probe\n"
+                              "continue\n"
+                              "print local_struct\n"
+                              "continue\n",
+                              "struct");
+  require(output.find("local_struct = { count = 287454020, delta = -123456789 }") !=
+              std::string::npos,
+          "CLI did not render the bounded struct aggregate\n" + output);
 }
 
 }  // namespace
@@ -145,8 +201,10 @@ int main(int argc, char** argv) {
   }
   try {
     test_pointer_api(argv[1]);
+    test_struct_api(argv[1]);
     test_pointer_cli(argv[0], argv[1]);
-    std::cout << "pointer value integration passed\n";
+    test_struct_cli(argv[0], argv[1]);
+    std::cout << "pointer and struct value integration passed\n";
   } catch (const std::exception& error) {
     std::cerr << "pointer value integration failure: " << error.what() << '\n';
     return 1;

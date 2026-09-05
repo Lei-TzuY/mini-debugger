@@ -71,7 +71,8 @@ pid_t parse_pid(const std::string& text) {
   return static_cast<pid_t>(value);
 }
 
-std::int64_t signed_local_value(const mdbg::LocalIntegerValue& value) {
+template <typename Value>
+std::int64_t signed_local_value(const Value& value) {
   if (value.byte_size == 0 || value.byte_size > sizeof(std::uint64_t)) {
     throw std::invalid_argument("invalid local integer byte width");
   }
@@ -553,7 +554,20 @@ int main(int argc, char** argv) {
         try {
           const auto value = mdbg::inspect_local_value(debugger, elf, name);
           std::cout << value.name << " = ";
-          if (value.kind == mdbg::LocalValueKind::Pointer) {
+          if (value.kind == mdbg::LocalValueKind::Structure) {
+            std::cout << "{ ";
+            for (std::size_t index = 0; index < value.members.size(); ++index) {
+              if (index != 0) std::cout << ", ";
+              const auto& member = value.members[index];
+              std::cout << member.name << " = ";
+              if (member.is_signed) {
+                std::cout << signed_local_value(member);
+              } else {
+                std::cout << member.raw_value;
+              }
+            }
+            std::cout << " }";
+          } else if (value.kind == mdbg::LocalValueKind::Pointer) {
             std::cout << "0x" << std::hex << value.raw_value << std::dec;
           } else if (value.is_signed) {
             std::cout << signed_local_value(value);

@@ -26,6 +26,10 @@ __attribute__((noinline)) uint64_t clobber_argument_registers(
   const uint64_t result = parameter_seed ^ first ^ (second << 8U) ^
                           (third << 16U) ^ (fourth << 24U) ^
                           (fifth << 32U) ^ (sixth << 40U);
+  __asm__ volatile(".globl composite_local_probe\n"
+                   "composite_local_probe:\n"
+                   "nop\n"
+                   ::: "memory");
   __asm__ volatile("movabsq $0x777788889999aaaa, %%rdi\n" ::: "rdi", "memory");
   return result;
 }

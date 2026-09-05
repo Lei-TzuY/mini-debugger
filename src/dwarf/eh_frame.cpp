@@ -22,7 +22,9 @@ namespace mdbg {
 namespace {
 
 constexpr std::uint8_t kPcrelSdata4 = 0x1b;
+constexpr std::uint8_t kPcrelSdata8 = 0x1c;
 constexpr std::uint8_t kPcrelIndirectSdata4 = 0x9b;
+constexpr std::uint8_t kPcrelIndirectSdata8 = 0x9c;
 constexpr std::uint64_t kDwarfRbp = 6;
 constexpr std::uint64_t kDwarfRsp = 7;
 constexpr std::uint64_t kDwarfRip = 16;
@@ -72,6 +74,29 @@ T read_scalar(const std::vector<std::byte>& bytes, std::size_t& cursor,
   const auto value = read_at<T>(bytes, cursor, what);
   cursor += sizeof(T);
   return value;
+}
+
+bool is_pcrel_signed_encoding(std::uint8_t encoding) {
+  return encoding == kPcrelSdata4 || encoding == kPcrelSdata8;
+}
+
+bool is_pcrel_indirect_signed_encoding(std::uint8_t encoding) {
+  return encoding == kPcrelIndirectSdata4 || encoding == kPcrelIndirectSdata8;
+}
+
+std::int64_t read_signed_encoded_value(const std::vector<std::byte>& bytes,
+                                       std::size_t& cursor, std::size_t limit,
+                                       std::uint8_t encoding, const char* what) {
+  switch (encoding) {
+    case kPcrelSdata4:
+    case kPcrelIndirectSdata4:
+      return read_scalar<std::int32_t>(bytes, cursor, limit, what);
+    case kPcrelSdata8:
+    case kPcrelIndirectSdata8:
+      return read_scalar<std::int64_t>(bytes, cursor, limit, what);
+    default:
+      throw std::runtime_error("unsupported signed PC-relative CFI pointer encoding");
+  }
 }
 
 std::uint64_t read_uleb(const std::vector<std::byte>& bytes, std::size_t& cursor,
@@ -234,17 +259,17 @@ Cie parse_cie(const std::vector<std::byte>& bytes, std::size_t cursor, std::size
       case 'P': {
         const auto encoding =
             read_scalar<std::uint8_t>(bytes, cursor, augmentation_end, "personality encoding");
-        if (encoding != kPcrelIndirectSdata4) {
+        if (!is_pcrel_indirect_signed_encoding(encoding)) {
           throw std::runtime_error("unsupported .eh_frame personality pointer encoding");
         }
-        static_cast<void>(read_scalar<std::int32_t>(bytes, cursor, augmentation_end,
+        static_cast<void>(read_signed_encoded_value(bytes, cursor, augmentation_end, encoding,
                                                     "personality pointer"));
         break;
       }
       case 'L': {
         const auto encoding =
             read_scalar<std::uint8_t>(bytes, cursor, augmentation_end, "LSDA encoding");
-        if (encoding != kPcrelSdata4) {
+        if (!is_pcrel_signed_encoding(encoding)) {
           throw std::runtime_error("unsupported .eh_frame LSDA pointer encoding");
         }
         break;
@@ -252,8 +277,8 @@ Cie parse_cie(const std::vector<std::byte>& bytes, std::size_t cursor, std::size
       case 'R':
         cie.fde_encoding =
             read_scalar<std::uint8_t>(bytes, cursor, augmentation_end, "FDE encoding");
-        if (cie.fde_encoding != kPcrelSdata4) {
-          throw std::runtime_error("only pcrel/sdata4 FDE pointers are supported");
+        if (!is_pcrel_signed_encoding(cie.fde_encoding)) {
+          throw std::runtime_error("unsupported .eh_frame FDE pointer encoding");
         }
         has_fde_encoding = true;
         break;
@@ -480,9 +505,11 @@ std::optional<EvaluatedFrame> evaluate_frame(const std::vector<std::byte>& secti
     const auto& cie = cie_it->second;
 
     const auto field_virtual_address = section_virtual_address + cursor;
-    const auto relative = read_scalar<std::int32_t>(section, cursor, end, "FDE initial location");
+    const auto relative = read_signed_encoded_value(section, cursor, end, cie.fde_encoding,
+                                                    "FDE initial location");
     const auto initial_location = add_signed(field_virtual_address, relative, "FDE start");
-    const auto signed_range = read_scalar<std::int32_t>(section, cursor, end, "FDE address range");
+    const auto signed_range = read_signed_encoded_value(section, cursor, end, cie.fde_encoding,
+                                                        "FDE address range");
     if (signed_range < 0) throw std::runtime_error("negative FDE address range");
     const auto range = static_cast<std::uint64_t>(signed_range);
     if (range > std::numeric_limits<std::uint64_t>::max() - initial_location) {

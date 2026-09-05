@@ -1,17 +1,23 @@
 #include "debugger/debugger.hpp"
 #include "elf/elf.hpp"
+#include "process/process.hpp"
 #include "ptrace/ptrace.hpp"
 
+#include <sys/ptrace.h>
+
+#include <algorithm>
 #include <csignal>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
+#include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <string>
 #include <unistd.h>
+#include <vector>
 
 namespace {
 
@@ -42,6 +48,92 @@ FixtureAddresses read_addresses(const std::string& path) {
   return {static_cast<std::uintptr_t>(std::stoull(one, nullptr, 0)),
           static_cast<std::uintptr_t>(std::stoull(two, nullptr, 0)),
           static_cast<std::uintptr_t>(std::stoull(value, nullptr, 0))};
+}
+
+bool contains_tid(const std::vector<pid_t>& tids, pid_t tid) {
+  return std::find(tids.begin(), tids.end(), tid) != tids.end();
+}
+
+void resume_task(mdbg::Process& process, pid_t tid) {
+  mdbg::lowlevel::continue_process(tid);
+  process.mark_running(tid);
+}
+
+void test_multithread_process_lifecycle(const std::string& fixture) {
+  auto process = mdbg::Process::launch(fixture, {"thread-lifecycle"});
+  const auto leader = process.pid();
+
+  require(process.current_tid() == leader,
+          "initial exec stop must identify the thread-group leader");
+  require(process.task_state(leader) == mdbg::ProcessState::Stopped,
+          "leader must be tracked as stopped after exec");
+  require(process.tids().size() == 1 && process.tids().front() == leader,
+          "initial traced-task registry must contain only the leader");
+
+  resume_task(process, leader);
+
+  std::optional<pid_t> worker_tid;
+  bool saw_clone = false;
+  bool saw_worker_stop = false;
+  bool saw_worker_exit = false;
+  bool saw_leader_exit = false;
+
+  for (int events = 0; events < 16 && !saw_leader_exit; ++events) {
+    const auto event = process.wait();
+    require(event.tid > 0, "wait event must identify a concrete TID");
+
+    if (event.kind == mdbg::WaitEvent::Kind::Stopped) {
+      require(process.current_tid() == event.tid,
+              "current TID must follow the most recent stop event");
+      require(process.task_state(event.tid) == mdbg::ProcessState::Stopped,
+              "stopped TID must be tracked as stopped");
+
+      if (event.ptrace_event == PTRACE_EVENT_CLONE) {
+        require(!saw_clone, "fixture must create exactly one traced worker");
+        require(event.new_tid.has_value(),
+                "clone stop must expose the kernel-reported new TID");
+        require(*event.new_tid != leader,
+                "clone event must report a distinct worker TID");
+        require(contains_tid(process.tids(), *event.new_tid),
+                "new TID must enter the traced-task registry at clone stop");
+        worker_tid = *event.new_tid;
+        saw_clone = true;
+      } else if (worker_tid && event.tid == *worker_tid) {
+        saw_worker_stop = true;
+      }
+
+      resume_task(process, event.tid);
+      continue;
+    }
+
+    if (event.kind == mdbg::WaitEvent::Kind::Exited) {
+      if (worker_tid && event.tid == *worker_tid) {
+        require(event.value == 0, "worker thread must exit cleanly");
+        require(!contains_tid(process.tids(), *worker_tid),
+                "exited worker TID must leave the traced-task registry");
+        saw_worker_exit = true;
+        continue;
+      }
+      if (event.tid == leader) {
+        require(event.value == 0, "thread-group leader must exit cleanly");
+        saw_leader_exit = true;
+        continue;
+      }
+      throw std::runtime_error("unexpected traced task exited");
+    }
+
+    throw std::runtime_error("multithread fixture terminated by signal");
+  }
+
+  require(saw_clone, "PTRACE_O_TRACECLONE did not surface pthread creation");
+  require(worker_tid.has_value(), "worker TID was never discovered");
+  require(saw_worker_stop, "new worker TID never produced its initial ptrace stop");
+  require(saw_worker_exit, "worker thread exit was not observed");
+  require(saw_leader_exit, "leader exit was not observed");
+  require(process.tids().empty(),
+          "traced-task registry must be empty after the thread group exits");
+  require(process.state() == mdbg::ProcessState::Exited,
+          "process state must converge to exited after all traced tasks leave");
 }
 
 struct Session {
@@ -308,6 +400,7 @@ int main(int argc, char** argv) {
   }
   try {
     const std::string fixture = argv[1];
+    test_multithread_process_lifecycle(fixture);
     test_normal_exit(fixture);
     test_elf_runtime_symbol_resolution(fixture);
     test_registers_and_memory(fixture);

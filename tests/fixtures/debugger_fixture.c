@@ -1,3 +1,4 @@
+#include <pthread.h>
 #include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -7,6 +8,7 @@
 
 volatile uint64_t fixture_value = 0x1122334455667788ULL;
 static volatile sig_atomic_t keep_running = 1;
+static volatile sig_atomic_t worker_marker = 0;
 
 __attribute__((noinline)) void breakpoint_one(void) {
   __asm__ volatile("nop" ::: "memory");
@@ -56,7 +58,24 @@ static void stop_attach_loop(int signal_number) {
   keep_running = 0;
 }
 
+static void* lifecycle_worker(void* argument) {
+  (void)argument;
+  worker_marker = 1;
+  return NULL;
+}
+
+static int run_thread_lifecycle(void) {
+  pthread_t thread;
+  if (pthread_create(&thread, NULL, lifecycle_worker, NULL) != 0) return 86;
+  if (pthread_join(thread, NULL) != 0) return 87;
+  return worker_marker == 1 ? 0 : 88;
+}
+
 int main(int argc, char** argv) {
+  if (argc == 2 && strcmp(argv[1], "thread-lifecycle") == 0) {
+    return run_thread_lifecycle();
+  }
+
   if (argc < 3) return 82;
   publish_addresses(argv[1]);
 

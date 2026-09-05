@@ -24,6 +24,7 @@ void traceme();
 void attach(pid_t pid);
 void detach(pid_t pid, int signal = 0);
 void set_options(pid_t pid, unsigned long options);
+std::uint64_t get_event_message(pid_t pid);
 void continue_process(pid_t pid, int signal = 0);
 void single_step(pid_t pid, int signal = 0);
 user_regs_struct get_registers(pid_t pid);

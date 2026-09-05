@@ -55,6 +55,12 @@ This closes the major source-level interoperability gap without claiming support
 
 Move from one traced thread to a deliberate thread model.
 
+Completed slices:
+
+- P4-A: launched tracees enable `PTRACE_O_TRACECLONE`; `Process` waits across traced tasks with `__WALL`, records the TID on every wait event, reads the kernel-reported child TID from `PTRACE_GETEVENTMSG`, tracks per-TID stopped/running state, and removes exited tasks from the registry. A real pthread fixture exercises clone discovery, the worker's initial ptrace stop, worker exit, leader exit, and empty-registry convergence in both PIE and non-PIE integration runs.
+
+Current slice: P4-B — connect the task-aware process layer to debugger execution semantics. Register access, resume, and single-step must target the active stopped TID; clone-child initial stops and thread exits need deterministic user-visible handling; process-wide software-breakpoint ownership must remain singular while displaced execution is bound to the correct TID.
+
 Acceptance criteria:
 
 - tracee state is tracked per TID where required;
@@ -63,7 +69,7 @@ Acceptance criteria:
 - thread creation/exit and signal routing have regression coverage;
 - detach/teardown leaves no traced thread behind.
 
-First architectural slice should establish a real two-thread tracee lifecycle and per-TID stop identity before broadening CLI presentation. It must not fake thread support by merely listing `/proc/<pid>/task` while continuing to wait/resume only the original PID.
+P4-A establishes the real two-thread tracee lifecycle and per-TID stop identity before CLI presentation. P4 is not complete yet: debugger-facing execution policy, per-thread displaced execution, signal routing, and teardown still have to cross the same boundary before promotion.
 
 ## Priority 5: broader CFI recovery
 

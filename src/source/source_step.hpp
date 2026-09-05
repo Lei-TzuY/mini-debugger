@@ -6,6 +6,7 @@
 
 #include <cstddef>
 #include <optional>
+#include <string>
 
 namespace mdbg {
 
@@ -16,6 +17,7 @@ struct SourceStepResult {
   StopInfo stop;
   std::optional<SourceLocation> source;
   std::size_t instructions;
+  std::optional<std::string> source_module_path;
 };
 
 SourceStepResult step_source(Debugger& debugger, const ElfFile& elf,

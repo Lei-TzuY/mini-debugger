@@ -191,6 +191,20 @@ Process Process::attach(pid_t pid) {
   }
 }
 
+Process Process::adopt_stopped(pid_t pid, ProcessOrigin origin) {
+  if (pid <= 0) {
+    throw std::invalid_argument("stopped process adoption requires a positive pid");
+  }
+  Process process(pid, origin);
+  process.task_states_.clear();
+  process.task_states_.emplace(pid, ProcessState::Stopped);
+  process.current_tid_ = pid;
+  process.state_ = ProcessState::Stopped;
+  process.exit_code_.reset();
+  process.termination_signal_.reset();
+  return process;
+}
+
 std::vector<pid_t> Process::tids() const {
   std::vector<pid_t> result;
   result.reserve(task_states_.size());
@@ -208,6 +222,13 @@ std::optional<ProcessState> Process::task_state(pid_t tid) const noexcept {
 }
 
 WaitEvent Process::wait() { return wait_for(-1); }
+
+WaitEvent Process::wait_current() {
+  if (current_tid_ <= 0) {
+    throw std::logic_error("cannot wait without an active tracee task");
+  }
+  return wait_for(current_tid_);
+}
 
 WaitEvent Process::wait_for(pid_t requested_tid) {
   int status = 0;
@@ -300,6 +321,17 @@ void Process::select_tid(pid_t tid) {
     throw std::logic_error("cannot select a running thread");
   }
   current_tid_ = tid;
+}
+
+void Process::swap(Process& other) noexcept {
+  using std::swap;
+  swap(pid_, other.pid_);
+  swap(current_tid_, other.current_tid_);
+  swap(state_, other.state_);
+  swap(origin_, other.origin_);
+  swap(task_states_, other.task_states_);
+  swap(exit_code_, other.exit_code_);
+  swap(termination_signal_, other.termination_signal_);
 }
 
 void Process::update_aggregate_state() noexcept {

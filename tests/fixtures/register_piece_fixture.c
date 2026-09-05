@@ -11,15 +11,13 @@ struct RegisterPair {
 volatile uint64_t register_pair_sink;
 
 __attribute__((noinline)) uint64_t inspect_register_pair(struct RegisterPair pair) {
-  __asm__ volatile(".globl register_pair_probe\n"
-                   "register_pair_probe:\n"
-                   "nop\n"
-                   :
-                   : "r"(pair.first), "r"(pair.second)
-                   : "memory");
+  __asm__ volatile("nop" : : "r"(pair.first), "r"(pair.second) : "memory");
   register_pair_sink = pair.first;
   return pair.first ^ pair.second;
 }
+
+extern __typeof__(inspect_register_pair) register_pair_probe
+    __attribute__((alias("inspect_register_pair")));
 
 int main(void) {
   const struct RegisterPair pair = {REGISTER_PAIR_FIRST, REGISTER_PAIR_SECOND};

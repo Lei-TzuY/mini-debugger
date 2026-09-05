@@ -61,11 +61,27 @@ Completed Priority 3 contract:
 
 Priority 3 still does not claim a general DWARF virtual machine. The bounded stack exists only because a real current-PC GCC expression required composition; pieces, dereference, arbitrary literals/registers, alternate arithmetic, and historical/cross-frame operations still require independent executable compiler evidence.
 
+## Priority 4: compiler register-piece aggregate ownership — complete
+
+The fifth Phase 5 slice is selected from a real by-value aggregate ABI case rather than by enumerating `DW_OP_piece`. A dedicated `-O1 -g -gdwarf-5` fixture passes a 16-byte `struct RegisterPair { uint64_t first; uint64_t second; }` by value and pins the debugger stop to the callee function entry. GCC 13.3 and Clang 18.1.3 both select the same active current-PC ownership expression there: `DW_OP_reg5 (rdi); DW_OP_piece 8; DW_OP_reg4 (rsi); DW_OP_piece 8`.
+
+Completed Priority 4 contract:
+
+- test-first PIE and non-PIE sessions under both permanent compiler lanes reach the real function-entry probe and fail only because structures were previously restricted to `DW_OP_fbreg` memory ownership; every pre-existing test remains green;
+- the evaluator accepts only the compiler-proven 16-byte structure shape composed of exactly two 8-byte pieces, first from RDI and second from RSI, with no additional pieces or trailing operations;
+- both registers are read from the currently selected stopped TID and serialized as little-endian owned aggregate bytes, then decoded through the same existing structure-member/type metadata used by memory-backed structures rather than introducing a second aggregate representation;
+- direct API coverage verifies structure kind, 16-byte size, module identity, the exact `first == 0x1122334455667788` and `second == 0x99aabbccddeeff00` member values, and continued rejection by the integer-only API;
+- real CLI coverage renders the same reconstructed `pair` through the existing structure printer, and PIE/non-PIE sessions exit cleanly under both GCC and Clang-large;
+- the fixture exports the probe as an alias of the callee entry so the tested current PC is stable across compiler register-motion choices. A post-entry GCC range that moves the first piece from RDI to RAX is deliberately not used to broaden the supported family;
+- arbitrary piece counts, alternate registers, non-8-byte pieces, `DW_OP_bit_piece`, mixed memory/register pieces, malformed ULEB sizes, and trailing operations remain fail-closed.
+
+Priority 4 does not create a general piece assembler. It extends the existing typed aggregate ownership model only for the exact System V x86-64 register-pair shape independently emitted by both permanent compilers at the selected current PC.
+
 ## Current frontier: next compiler-produced expression failure
 
 Do not select the next opcode family from the DWARF specification by enumeration. First find a real GCC or Clang current-PC location expression that the existing evaluator rejects in an otherwise valid source-value workflow, preserve the exact compiler evidence, and then add only the minimum semantics and ownership state required by that failure.
 
-Potential surfaces such as pieces, dereference chains, inlined-scope ownership, richer stack-value combinations, or additional entry-value registers remain candidates only when real compiler output makes one independently necessary. A candidate that only appears in an inactive location-list range is not sufficient evidence.
+Potential surfaces such as dereference chains, inlined-scope ownership, richer stack-value combinations, additional piece layouts, or additional entry-value registers remain candidates only when real compiler output makes one independently necessary. A candidate that only appears in an inactive location-list range is not sufficient evidence.
 
 ## Selection rule
 

@@ -1,6 +1,8 @@
 # Phase 4 roadmap
 
-Phase 4 starts after the Phase 3 process-domain registry removes the remaining one-image/one-process-topology assumption. The next architectural objective is to make source-level debug data executable: the debugger should be able to identify a variable in the current source scope, evaluate the compiler-produced DWARF location that owns its value, read that value from the selected process/TID, and present it without bypassing the existing module, register, memory, CFI, or process-domain ownership models.
+Phase 4 starts after the Phase 3 process-domain registry removes the remaining one-image/one-process-topology assumption. The architectural objective is to make source-level debug data executable: the debugger should be able to identify a variable in the current source scope, evaluate the compiler-produced DWARF location that owns its value, read that value from the selected process/TID, and present it without bypassing the existing module, register, memory, CFI, or process-domain ownership models.
+
+Phase 4 is complete for its bounded source-value ownership milestone. Priorities 0–6 now cover real GCC and Clang output from stack-backed integers through optimized DWARF5 location ownership. Broader DWARF expression semantics are promoted to Phase 5 rather than being accumulated here as speculative opcode variants.
 
 ## Priority 0: bounded local integer value inspection — complete
 
@@ -87,24 +89,34 @@ The sixth source-value slice closes the first compiler-produced aggregate shapin
 
 Priority 5 therefore completes the bounded aggregate milestone without using struct support as a pretext for speculative aggregate recursion or a general DWARF VM.
 
-## Priority 6: DWARF5 optimized source-value location ownership — current frontier
+## Priority 6: DWARF5 optimized source-value location ownership — complete
 
-The next architectural gap is debug-format generation rather than another scalar or aggregate variant. The source-value evaluator still rejects every compilation unit whose header version is not 4, and the optimized source-value fixtures are therefore deliberately pinned to `-gdwarf-4` even though the repository already has bounded DWARF5 line-table support.
+The seventh source-value slice crosses the existing optimized-value ownership model into real DWARF5 compiler output without introducing a parallel evaluator:
 
-Current Priority 6 acceptance:
+- a separate `-O1 -g -gdwarf-5` build of the already-proven `formal_parameter_fixture.c` supplies independent PIE and non-PIE fixtures, while all earlier DWARF4 artifacts remain unchanged;
+- test-first CI #625 was exact: GCC and Clang both configured and built successfully, 44/46 tests stayed green, and only the new `dwarf5_local_value_integration_{pie,nopie}` failed with `only DWARF4 local-value units are supported`, proving the rejection was the format-generation boundary rather than breakpoint, module, type, or location-expression ownership;
+- the shared parser now accepts bounded DWARF5 compile-unit headers with 8-byte addresses while preserving the DWARF4 header path and DWARF32-only contract;
+- GCC 13.3 evidence requires `DW_FORM_line_strp`, `DW_FORM_implicit_const`, a direct `DW_FORM_sec_offset` into `.debug_loclists`, `DW_LLE_base_address`, and `DW_LLE_offset_pair`; at the exported optimized-local probe the selected location expression remains the already-supported `DW_OP_reg0 (rax)`;
+- Clang 18.1 large-model evidence additionally requires `DW_FORM_strx1` with `DW_AT_str_offsets_base` / `.debug_str_offsets`, `DW_FORM_addrx` with `DW_AT_addr_base` / `.debug_addr`, and `DW_FORM_loclistx` with `DW_AT_loclists_base` plus the contribution offset table; the active probe range likewise resolves to the existing `DW_OP_reg0` expression;
+- every indexed contribution validates version, address/segment width where applicable, offset-table bounds, resolved section bounds, and overflow before any address, string, or location is consumed;
+- the DWARF5 location selector intentionally accepts only the compiler-proven `DW_LLE_base_address` and `DW_LLE_offset_pair` entries. Unknown LLE kinds still fail explicitly, and no new expression opcode is added;
+- Clang emits `DW_OP_entry_value` in a different, non-selected formal-parameter range in the same real fixture. Priority 6 deliberately does not interpret it: only the location description selected by the current PC is evaluated, preserving fail-closed expression semantics rather than claiming a general DWARF VM;
+- direct API and real `mdbg print optimized_local` subprocess integration recover `0x1e3c1e781e3c1ef0`, preserve module/type ownership, reject a missing optimized local explicitly, and continue to clean exit in PIE and non-PIE under both permanent compiler lanes;
+- exact production head `afbf5cee...` passes all 46 tests under both GCC and Clang-large after the test-first failure and one construction-only unused-helper fix.
 
-- add one separate real `-O1 -g -gdwarf-5` source-value fixture based on an already-proven optimized value workflow, and first demonstrate that the current evaluator reaches the DWARF5 compilation-unit/location-list boundary while the permanent GCC and Clang-large lanes keep all earlier source-value and debugger tests green;
-- extend the existing source-value parser rather than introducing a DWARF5-only evaluator: preserve module ownership, lexical lookup, selected process/TID register and memory access, the typed integer/pointer/structure model, and existing expression evaluation;
-- accept only the concrete DWARF5 unit header, attribute forms, `.debug_loclists` contribution/header, address-index/base-address, range selection, and location expression shape emitted by that compiler fixture; malformed offsets, unsupported index forms, uncovered PCs, and unknown expression opcodes remain deterministic failures;
-- route the selected current PC through the same load-bias and active-scope ownership model before choosing the DWARF5 location description, and continue to read register/memory state only through the existing Debugger API;
-- prove the optimized value through direct API and real CLI presentation in PIE and non-PIE under both permanent compiler lanes, then continue to clean exit without regressing the DWARF4 location-list, formal-parameter, lexical-shadowing, pointer, or struct workflows.
+Priority 6 therefore closes the bounded DWARF4→DWARF5 source-value ownership gap. It does not imply support for arbitrary indexed forms, arbitrary `.debug_loclists` entries, `DW_OP_entry_value`, `DW_OP_stack_value`, inlined-scope ownership, or a general expression machine.
 
-Priority 6 is not a mandate to implement all DWARF5 forms or a general loclists VM. The first slice must be driven by one exact GCC/Clang compiler-produced failure, and production may add only the forms/indexing/location semantics required by that evidence.
+## Phase 4 closure
 
-## Later priorities
+Phase 4 is sealed at the bounded source-value ownership layer:
 
-After Priority 6, richer expression evaluation, inlined-scope ownership, and broader aggregate/type presentation remain candidates. They must continue to be ordered by concrete compiler-produced failures rather than surface-area breadth.
+- current source-scope name ownership, typed scalar/pointer/struct shaping, selected process/TID state, module/load-bias routing, DWARF4 location lists, and the compiler-proven DWARF5 indexed/location-list metadata now compose through one evaluator;
+- GCC and Clang-large both prove the same optimized value through direct API and real CLI under PIE and non-PIE;
+- unsupported metadata and expression semantics remain explicit failures instead of being silently skipped;
+- further opcode-by-opcode work is not a Phase 4 strategy. A richer expression capability must start from a new exact compiler-produced failure whose current PC selects that expression.
+
+The next architectural frontier is Phase 5: bounded DWARF expression/value semantics. The first candidate is the compiler-produced `DW_OP_entry_value` already observed in Clang DWARF5 output, but it is not implementation-ready until a dedicated probe makes that range active and demonstrates the exact current failure.
 
 ## Selection rule
 
-Priority 6 is the current frontier. Select the smallest existing optimized source-value workflow that becomes a real DWARF5 `.debug_info` / `.debug_loclists` consumer when compiled with `-gdwarf-5`, prove the exact unsupported boundary first under GCC and Clang-large, then extend only the shared parser and current-PC location ownership needed by that compiler output. Do not return to struct-member variants, add speculative DWARF5 forms, or broaden the expression VM without independent executable evidence.
+Phase 4 is complete. Do not add more source-value forms, type variants, or location-list opcodes here without a new compiler-produced acceptance scenario. Continue in `docs/phase-5-roadmap.md`, beginning with an exact active-range failure before adding any expression semantics.

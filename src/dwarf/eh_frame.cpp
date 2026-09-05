@@ -22,6 +22,7 @@ namespace mdbg {
 namespace {
 
 constexpr std::uint8_t kPcrelSdata4 = 0x1b;
+constexpr std::uint8_t kPcrelIndirectSdata4 = 0x9b;
 constexpr std::uint64_t kDwarfRbp = 6;
 constexpr std::uint64_t kDwarfRsp = 7;
 constexpr std::uint64_t kDwarfRip = 16;
@@ -212,8 +213,9 @@ std::uint64_t add_signed(std::uint64_t base, std::int64_t offset, const char* wh
 Cie parse_cie(const std::vector<std::byte>& bytes, std::size_t cursor, std::size_t end) {
   const auto version = read_scalar<std::uint8_t>(bytes, cursor, end, "CIE version");
   if (version != 1) throw std::runtime_error("only .eh_frame CIE version 1 is supported");
-  if (read_c_string(bytes, cursor, end, "CIE augmentation") != "zR") {
-    throw std::runtime_error("only zR .eh_frame augmentation is supported");
+  const auto augmentation = read_c_string(bytes, cursor, end, "CIE augmentation");
+  if (augmentation.empty() || augmentation.front() != 'z') {
+    throw std::runtime_error("only z-prefixed .eh_frame augmentation is supported");
   }
 
   Cie cie;
@@ -221,12 +223,49 @@ Cie parse_cie(const std::vector<std::byte>& bytes, std::size_t cursor, std::size
   cie.data_alignment = read_sleb(bytes, cursor, end);
   cie.return_register = read_scalar<std::uint8_t>(bytes, cursor, end, "CIE return register");
   const auto augmentation_size = read_uleb(bytes, cursor, end);
-  if (augmentation_size != 1 || cursor >= end) {
-    throw std::runtime_error("unsupported zR CIE augmentation data");
+  if (augmentation_size > end - cursor) {
+    throw std::runtime_error("CIE augmentation extends past entry boundary");
   }
-  cie.fde_encoding = read_scalar<std::uint8_t>(bytes, cursor, end, "FDE encoding");
-  if (cie.fde_encoding != kPcrelSdata4) {
-    throw std::runtime_error("only pcrel/sdata4 FDE pointers are supported");
+  const auto augmentation_end = cursor + static_cast<std::size_t>(augmentation_size);
+
+  bool has_fde_encoding = false;
+  for (std::size_t index = 1; index < augmentation.size(); ++index) {
+    switch (augmentation[index]) {
+      case 'P': {
+        const auto encoding =
+            read_scalar<std::uint8_t>(bytes, cursor, augmentation_end, "personality encoding");
+        if (encoding != kPcrelIndirectSdata4) {
+          throw std::runtime_error("unsupported .eh_frame personality pointer encoding");
+        }
+        static_cast<void>(read_scalar<std::int32_t>(bytes, cursor, augmentation_end,
+                                                    "personality pointer"));
+        break;
+      }
+      case 'L': {
+        const auto encoding =
+            read_scalar<std::uint8_t>(bytes, cursor, augmentation_end, "LSDA encoding");
+        if (encoding != kPcrelSdata4) {
+          throw std::runtime_error("unsupported .eh_frame LSDA pointer encoding");
+        }
+        break;
+      }
+      case 'R':
+        cie.fde_encoding =
+            read_scalar<std::uint8_t>(bytes, cursor, augmentation_end, "FDE encoding");
+        if (cie.fde_encoding != kPcrelSdata4) {
+          throw std::runtime_error("only pcrel/sdata4 FDE pointers are supported");
+        }
+        has_fde_encoding = true;
+        break;
+      default:
+        throw std::runtime_error("unsupported .eh_frame CIE augmentation descriptor");
+    }
+  }
+  if (!has_fde_encoding) {
+    throw std::runtime_error("CIE augmentation does not define an FDE pointer encoding");
+  }
+  if (cursor != augmentation_end) {
+    throw std::runtime_error("unexpected trailing CIE augmentation data");
   }
   cie.instructions_begin = cursor;
   cie.instructions_end = end;

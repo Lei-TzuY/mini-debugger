@@ -1,53 +1,32 @@
-name: apply register-relative memory patch
+name: apply-register-relative-memory-patch
 
 on:
   push:
-    branches:
-      - feat/dwarf-register-relative-memory-local
+    branches: [feat/dwarf-register-relative-memory-local]
 
 permissions:
   contents: write
 
 jobs:
   patch:
-    if: github.actor != 'github-actions[bot]'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           ref: feat/dwarf-register-relative-memory-local
-      - name: Apply bounded source-value patch
-        shell: bash
+      - name: Patch source lookup
         run: |
           python3 - <<'PY'
           from pathlib import Path
-
-          path = Path('src/dwarf/source_lookup.cpp')
-          text = path.read_text()
-
-          old_helper = '''std::uint64_t evaluate_breg5_stack_value(const std::vector<std::byte>& expression,
-                                         const Debugger& debugger) {
-  if (expression.empty() ||
-      std::to_integer<std::uint8_t>(expression.front()) != kDwOpBreg5) {
-    throw std::runtime_error(
-        "local value location is not the compiler-proven DW_OP_breg5 form");
-  }
-  std::size_t cursor = 1;
-  const auto offset =
-      read_sleb(expression, cursor, expression.size(), "DW_OP_breg5 offset");
-  if (cursor >= expression.size() ||
-      std::to_integer<std::uint8_t>(expression[cursor]) != kDwOpStackValue) {
-    throw std::runtime_error(
-        "DW_OP_breg5 value requires the compiler-proven trailing DW_OP_stack_value");
-  }
-  ++cursor;
-  if (cursor != expression.size()) {
-    throw std::runtime_error("unsupported trailing operations after DW_OP_breg5 value");
-  }
-  return add_signed(debugger.registers().rdi, offset, "DW_OP_breg5 value");
+          p = Path('src/dwarf/source_lookup.cpp')
+          s = p.read_text()
+          marker = '''  return add_signed(debugger.registers().rdi, offset, "DW_OP_breg5 value");
 }
-'''
-          new_helper = old_helper + '''
+
+std::uint64_t evaluate_entry_rdi('''
+          replacement = '''  return add_signed(debugger.registers().rdi, offset, "DW_OP_breg5 value");
+}
+
 std::uint64_t evaluate_breg5_memory_address(
     const std::vector<std::byte>& expression, const Debugger& debugger) {
   if (expression.empty() ||
@@ -65,9 +44,9 @@ std::uint64_t evaluate_breg5_memory_address(
   return add_signed(debugger.registers().rdi, offset,
                     "DW_OP_breg5 memory address");
 }
-'''
 
-          old_dispatch = '''  if (value_type.kind != LocalValueKind::Structure && !location_expression.empty() &&
+std::uint64_t evaluate_entry_rdi('''
+          old = '''  if (value_type.kind != LocalValueKind::Structure && !location_expression.empty() &&
       std::to_integer<std::uint8_t>(location_expression.front()) == kDwOpBreg5) {
     const auto raw = truncate_integer(
         evaluate_breg5_stack_value(location_expression, debugger),
@@ -77,7 +56,7 @@ std::uint64_t evaluate_breg5_memory_address(
                             value_type.kind};
   }
 '''
-          new_dispatch = '''  if (value_type.kind != LocalValueKind::Structure && !location_expression.empty() &&
+          new = '''  if (value_type.kind != LocalValueKind::Structure && !location_expression.empty() &&
       std::to_integer<std::uint8_t>(location_expression.front()) == kDwOpBreg5) {
     const bool stack_value =
         std::to_integer<std::uint8_t>(location_expression.back()) == kDwOpStackValue;
@@ -94,23 +73,19 @@ std::uint64_t evaluate_breg5_memory_address(
                             value_type.kind};
   }
 '''
-
-          if text.count(old_helper) != 1:
-              raise SystemExit('expected exactly one DW_OP_breg5 helper')
-          if text.count(old_dispatch) != 1:
-              raise SystemExit('expected exactly one DW_OP_breg5 dispatch')
-          text = text.replace(old_helper, new_helper, 1)
-          text = text.replace(old_dispatch, new_dispatch, 1)
-          path.write_text(text)
+          if marker in s:
+              if s.count(marker) != 1 or s.count(old) != 1:
+                  raise SystemExit('patch anchors are not unique')
+              s = s.replace(marker, replacement, 1).replace(old, new, 1)
+              p.write_text(s)
+          elif 'evaluate_breg5_memory_address' not in s:
+              raise SystemExit('patch anchor not found')
           PY
           git diff --check
-          git diff -- src/dwarf/source_lookup.cpp
-      - name: Commit production patch
-        shell: bash
+      - name: Commit if changed
         run: |
           if git diff --quiet -- src/dwarf/source_lookup.cpp; then
-            echo 'No source patch produced' >&2
-            exit 1
+            exit 0
           fi
           git config user.name 'LeiZ'
           git config user.email '52287354+Lei-TzuY@users.noreply.github.com'

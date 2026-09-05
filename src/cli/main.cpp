@@ -5,6 +5,7 @@
 #include "elf/elf.hpp"
 #include "registers/registers.hpp"
 #include "source/source_finish.hpp"
+#include "source/source_path.hpp"
 #include "source/source_step.hpp"
 #include "unwind/cfi.hpp"
 #include "unwind/frame_pointer.hpp"
@@ -26,6 +27,7 @@
 namespace {
 
 constexpr std::uint64_t kSourceContextRadius = 4;
+mdbg::SourcePathResolver source_paths;
 
 struct SourceSpec {
   std::string file;
@@ -225,17 +227,7 @@ void print_backtrace(const mdbg::Debugger& debugger, const mdbg::ElfFile& elf) {
 
 std::optional<std::filesystem::path> resolve_source_path(const std::string& file,
                                                          const std::string& module_path) {
-  if (file.empty()) return std::nullopt;
-
-  std::filesystem::path candidate(file);
-  std::error_code error;
-  if (std::filesystem::is_regular_file(candidate, error)) return candidate;
-
-  if (candidate.is_absolute() || module_path.empty()) return std::nullopt;
-  error.clear();
-  candidate = std::filesystem::path(module_path).parent_path() / candidate;
-  if (std::filesystem::is_regular_file(candidate, error)) return candidate;
-  return std::nullopt;
+  return source_paths.resolve(file, module_path);
 }
 
 void print_source_excerpt(const std::string& file, std::uint64_t line,
@@ -465,6 +457,28 @@ int main(int argc, char** argv) {
         print_source_location(address, debugger, elf);
       } else if (command == "list" || command == "l") {
         print_source_location(static_cast<std::uintptr_t>(debugger.registers().rip), debugger, elf);
+      } else if (command == "set") {
+        std::string topic;
+        input >> topic;
+        if (topic != "substitute-path") {
+          std::cout << "usage: set substitute-path <recorded-prefix> <local-prefix>\n";
+          continue;
+        }
+
+        std::string recorded_prefix;
+        std::string local_prefix;
+        input >> std::quoted(recorded_prefix) >> std::quoted(local_prefix);
+        if (recorded_prefix.empty() || local_prefix.empty()) {
+          std::cout << "usage: set substitute-path <recorded-prefix> <local-prefix>\n";
+          continue;
+        }
+        try {
+          source_paths.add_substitution(recorded_prefix, local_prefix);
+          std::cout << "source path substitution " << recorded_prefix << " -> " << local_prefix
+                    << '\n';
+        } catch (const std::exception& error) {
+          std::cout << "source path substitution failed: " << error.what() << '\n';
+        }
       } else if (command == "reg") {
         std::string name;
         input >> name;
@@ -550,7 +564,8 @@ int main(int argc, char** argv) {
         }
       } else {
         std::cout << "commands: continue, step, next, finish, stepi, regs, bt, list, "
-                     "line <addr|symbol>, reg <name>, x <addr|symbol> [len], "
+                     "line <addr|symbol>, set substitute-path <from> <to>, "
+                     "reg <name>, x <addr|symbol> [len], "
                      "break <addr|symbol|file:line>, delete <id>, thread <tid>, "
                      "info <breakpoints|threads>, symbols [filter], detach, quit\n";
       }

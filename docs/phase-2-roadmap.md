@@ -79,23 +79,33 @@ The milestone remains deliberately bounded: this is not general `DW_EH_PE`, arbi
 
 Future CFI work is allowed when a new reproducible compiler-produced `.eh_frame` sequence breaks a real `bt`/`finish` workflow. In the absence of such evidence, adding encoding/opcode variants would be speculative enumeration and is not a continuation of this milestone.
 
-## Priority 6: source display and CLI productization — current frontier
+## Priority 6: source display and CLI productization — complete for the current interactive milestone
 
-Improve presentation now that the underlying execution, loader, thread, source, and bounded unwind semantics are stable.
+The stable execution, loader, thread, source, and bounded unwind semantics are now exposed through a coherent interactive debugging surface rather than isolated library APIs.
 
 Completed slices:
 
 - P6-A: the completed P4 scheduling contract is exposed to users through `info threads` and `thread <tid>`. Thread listing reports each tracked TID and state with an explicit active marker; selection delegates to the existing single-runner debugger API rather than duplicating scheduling policy in the CLI. A real CLI subprocess integration drives a pthread tracee through thread creation, leader/worker selection, selected-thread register access, worker execution/exit, active ownership returning to the leader, and clean process exit in both PIE and non-PIE runs.
-- P6-B: source locations now render a bounded real-file excerpt with an explicit current-line marker while preserving the existing address and `file:line[:column]` output. The `list`/`l` command re-renders the active RIP, and source `step`, `next`, `finish`, plus explicit `line` lookup share the same rendering path. Missing or synthetic source paths remain non-fatal and produce a deterministic unavailable message. A real `mdbg` subprocess regression drives both PIE and non-PIE tracees through a managed breakpoint, manual listing, and source stepping against the repository's actual fixture source file.
-- P6-C: module ownership now survives the product boundary instead of being discarded after module-aware resolution. Breakpoint stops render `module!symbol`, backtrace frames independently qualify both symbol and source ownership, and `list`/`line`/`finish` render `module!file:line`. Source `step`/`next` preserve the resolved module path in `SourceStepResult`, so source motion uses the same qualification without re-resolving or duplicating routing policy in the CLI. The shared-object PIE/non-PIE integration drives a real `mdbg` subprocess through a shared-library breakpoint, `bt`, `list`, and source `step`, while the existing direct source-step/next checks verify the result API carries the owning ELF image.
+- P6-B: source locations render a bounded real-file excerpt with an explicit current-line marker while preserving the existing address and `file:line[:column]` output. The `list`/`l` command re-renders the active RIP, and source `step`, `next`, `finish`, plus explicit `line` lookup share the same rendering path. Missing or synthetic source paths remain non-fatal and produce a deterministic unavailable message. A real `mdbg` subprocess regression drives both PIE and non-PIE tracees through a managed breakpoint, manual listing, and source stepping against the repository's actual fixture source file.
+- P6-C: module ownership survives the product boundary instead of being discarded after module-aware resolution. Breakpoint stops render `module!symbol`, backtrace frames independently qualify both symbol and source ownership, and `list`/`line`/`finish` render `module!file:line`. Source `step`/`next` preserve the resolved module path in `SourceStepResult`, so source motion uses the same qualification without re-resolving or duplicating routing policy in the CLI. The shared-object PIE/non-PIE integration drives a real `mdbg` subprocess through a shared-library breakpoint, `bt`, `list`, and source `step`, while the existing direct source-step/next checks verify the result API carries the owning ELF image.
+- P6-D: source display can recover relocated source trees through explicit `set substitute-path <recorded-prefix> <local-prefix>` rules without changing the DWARF-recorded source identity or guessing filesystem locations. Prefix matching is path-component aware, repeated rules replace the same recorded prefix, and the most specific matching rule wins. The same source-display path is shared by `list`, `line`, `finish`, `step`, and `next`. A real shared-object workflow first proves the build-tree source path is unavailable, then installs an explicit substitution and reads the repository's actual `shared_cfi_library.c` context through both `list` and source motion.
 
-Next productization candidates:
+Help wording and release packaging remain useful maintenance/product work, but they are no longer the highest-value architecture frontier and should not keep Priority 6 artificially open.
 
-- source-path remapping for debug information whose recorded build path no longer contains the source file; the current deterministic `source unavailable` behavior is correct but a real shared-library workflow demonstrates the usability gap;
-- CLI help/usage consistency beyond the commands already exercised by integration;
-- release packaging and examples after the interactive workflows are coherent.
+## Priority 7: thread-scoped hardware watchpoints — current frontier
 
-The next slice should again be executable and user-visible. Prefer closing a complete interactive workflow over adding isolated presentation helpers.
+Extend the existing single-slot x86-64 write-watchpoint capability across the explicit P4 thread model without pretending x86 debug registers are process-global. The current implementation intentionally rejects `add_write_watchpoint()` as soon as more than one traced TID exists, so this is a concrete executable capability gap rather than speculative feature enumeration.
+
+Acceptance for the first bounded slice:
+
+- a write watchpoint is owned by one explicitly selected stopped TID, and DR0/DR6/DR7 are programmed only on that owner;
+- selecting or running another traced TID does not silently inherit or trigger the owner's watchpoint;
+- a real pthread tracee can select a worker, arm a watchpoint on that worker, observe a classified watchpoint stop from the worker's write, and continue the other thread under the existing single-runner policy;
+- removal, owner-thread exit, explicit detach, and debugger teardown restore only debugger-owned debug-register state and never leave stale hardware state on another TID;
+- coexistence with process-wide managed software breakpoints remains deterministic, including displaced-step classification on the watchpoint-owning TID;
+- the one-slot/write-only bound remains explicit. DR1-DR3 allocation and read/read-write mode matrices stay out of scope unless a later concrete scenario requires them.
+
+The implementation should build on the existing per-TID stop/scheduling contract and debug-register snapshot logic rather than cloning a second thread scheduler inside the watchpoint subsystem.
 
 ## Selection rule
 

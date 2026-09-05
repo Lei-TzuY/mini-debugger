@@ -43,15 +43,17 @@ void test_direct_api(const std::string& fixture) {
   require(stop.reason == mdbg::StopReason::Breakpoint &&
               stop.breakpoint_address == entry_address,
           "DWARF5 fixture did not stop in the entry-value parameter range");
-  require(debugger.registers().rdi == 0,
-          "entry-value probe must differ from the current RDI register value");
+  const auto current_rdi = debugger.registers().rdi;
+  require(current_rdi != kExpectedEntryParameter,
+          "entry-value probe did not separate the current RDI from the entry parameter");
 
   const auto entry_value =
       mdbg::inspect_local_integer(debugger, elf, "entry_parameter");
   require(entry_value.name == "entry_parameter",
           "DWARF5 entry-value lookup returned wrong name");
   require(entry_value.raw_value == kExpectedEntryParameter,
-          "DWARF5 entry-value lookup returned wrong historical parameter value");
+          "DWARF5 entry-value lookup returned " + std::to_string(entry_value.raw_value) +
+              " while current RDI is " + std::to_string(current_rdi));
   require(entry_value.byte_size == sizeof(std::uint64_t) && !entry_value.is_signed,
           "DWARF5 entry-value lookup returned wrong uint64_t type metadata");
   require(std::filesystem::equivalent(entry_value.module_path, fixture),

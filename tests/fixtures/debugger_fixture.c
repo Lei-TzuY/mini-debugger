@@ -48,8 +48,10 @@ __attribute__((noinline)) void backtrace_leaf(void) {
 }
 
 __attribute__((noinline)) void backtrace_inner(void) {
-  volatile uint64_t caller_frame_local = CALLER_FRAME_LOCAL_EXPECTED;
+  uint64_t caller_frame_local = CALLER_FRAME_LOCAL_EXPECTED;
+  __asm__ volatile("" : "+m"(caller_frame_local) : : "memory");
   backtrace_leaf();
+  __asm__ volatile("" : "+m"(caller_frame_local) : : "memory");
   if (caller_frame_local == CALLER_FRAME_LOCAL_EXPECTED) fixture_value += 1;
 }
 

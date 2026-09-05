@@ -159,7 +159,7 @@ std::size_t Debugger::add_write_watchpoint(std::uintptr_t address, std::size_t l
                                        lowlevel::get_debug_register(tid, 6),
                                        lowlevel::get_debug_register(tid, 7)};
   if ((snapshot.dr7 & kDr7Slot0EnableMask) != 0) {
-    throw std::runtime_error("hardware debug-register slot 0 is already in use");
+    throw std::runtime_error("hardwar debug-register slot 0 is already in use");
   }
 
   const auto disabled_dr7 =
@@ -207,6 +207,9 @@ std::vector<Watchpoint> Debugger::watchpoints() const {
 int Debugger::resume_signal(SignalPolicy policy) const {
   if (policy != SignalPolicy::Forward || stop_info_.reason != StopReason::Signal) {
     return 0;
+  }
+  if (stop_info_.tid != stopped_tid()) {
+    throw std::logic_error("forwarded signal belongs to a different stopped thread");
   }
   return stop_info_.value;
 }
@@ -339,7 +342,7 @@ void Debugger::reinsert_breakpoint(std::uintptr_t address, pid_t tid) {
 }
 
 StopInfo Debugger::wait_and_classify(bool expected_single_step) {
-  for (;;) {
+  for (; ;) {
     const auto event = process_.wait();
     if (event.kind == WaitEvent::Kind::Exited) {
       pending_thread_starts_.erase(event.tid);

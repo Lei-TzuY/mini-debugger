@@ -60,6 +60,7 @@ class Process {
     task_states_.emplace(pid, ProcessState::Running);
   }
 
+  WaitEvent wait_for(pid_t tid);
   void update_aggregate_state() noexcept;
   void select_current_task() noexcept;
   void cleanup() noexcept;

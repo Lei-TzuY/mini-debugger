@@ -6,9 +6,11 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <cerrno>
 #include <csignal>
 #include <cstring>
+#include <exception>
 #include <filesystem>
 #include <limits>
 #include <stdexcept>
@@ -16,6 +18,8 @@
 
 namespace mdbg {
 namespace {
+constexpr std::size_t kMaxAttachDiscoveryPasses = 64;
+constexpr std::size_t kMaxAttachTasks = 4096;
 
 std::runtime_error system_error(const char* operation) {
   return std::runtime_error(std::string(operation) + " failed: " + std::strerror(errno));
@@ -26,6 +30,37 @@ bool is_tracee_task(pid_t leader, pid_t tid) noexcept {
   const auto task_path = std::filesystem::path("/proc") / std::to_string(leader) /
                          "task" / std::to_string(tid);
   return std::filesystem::exists(task_path, error) && !error;
+}
+
+std::vector<pid_t> thread_ids(pid_t leader) {
+  std::vector<pid_t> result;
+  std::error_code error;
+  const auto task_path =
+      std::filesystem::path("/proc") / std::to_string(leader) / "task";
+  std::filesystem::directory_iterator it(task_path, error);
+  if (error) {
+    throw std::runtime_error("cannot enumerate tracee threads: " + error.message());
+  }
+  const std::filesystem::directory_iterator end;
+  for (; it != end; it.increment(error)) {
+    if (error) {
+      throw std::runtime_error("cannot enumerate tracee threads: " + error.message());
+    }
+    const auto name = it->path().filename().string();
+    try {
+      std::size_t consumed = 0;
+      const auto value = std::stoll(name, &consumed, 10);
+      if (consumed != name.size() || value <= 0 ||
+          value > static_cast<long long>(std::numeric_limits<pid_t>::max())) {
+        continue;
+      }
+      result.push_back(static_cast<pid_t>(value));
+    } catch (const std::exception&) {
+    }
+  }
+  std::sort(result.begin(), result.end());
+  result.erase(std::unique(result.begin(), result.end()), result.end());
+  return result;
 }
 
 }  // namespace
@@ -95,19 +130,65 @@ Process Process::attach(pid_t pid) {
     throw std::invalid_argument("attach requires a positive pid");
   }
 
-  lowlevel::attach(pid);
   Process process(pid, ProcessOrigin::Attached);
+  process.task_states_.clear();
+  process.current_tid_ = -1;
+  process.state_ = ProcessState::Running;
+
   try {
-    const auto initial = process.wait();
-    if (initial.kind != WaitEvent::Kind::Stopped || initial.value != SIGSTOP ||
-        initial.tid != pid) {
-      throw std::runtime_error("attached tracee did not stop with SIGSTOP");
+    for (std::size_t pass = 0; pass < kMaxAttachDiscoveryPasses; ++pass) {
+      const auto observed = thread_ids(pid);
+      if (observed.empty()) {
+        throw std::runtime_error("attach target has no live threads");
+      }
+
+      for (const auto tid : observed) {
+        if (process.task_states_.count(tid) != 0) continue;
+        if (process.task_states_.size() >= kMaxAttachTasks) {
+          throw std::runtime_error("attach thread count exceeds supported bound");
+        }
+
+        try {
+          lowlevel::attach(tid);
+        } catch (const lowlevel::PtraceError& error) {
+          if (error.error_number() == ESRCH) continue;
+          throw;
+        }
+        process.task_states_.emplace(tid, ProcessState::Running);
+
+        const auto initial = process.wait_for(tid);
+        if (initial.kind != WaitEvent::Kind::Stopped || initial.value != SIGSTOP ||
+            initial.tid != tid) {
+          throw std::runtime_error("attached tracee thread did not stop with SIGSTOP");
+        }
+        lowlevel::set_options(tid, PTRACE_O_TRACECLONE);
+      }
+
+      const auto after = thread_ids(pid);
+      bool complete = !after.empty();
+      for (const auto tid : after) {
+        if (process.task_states_.count(tid) == 0) {
+          complete = false;
+          break;
+        }
+      }
+      if (!complete) continue;
+      if (process.task_states_.count(pid) == 0) {
+        throw std::runtime_error("thread-group leader exited during attach");
+      }
+
+      process.current_tid_ = pid;
+      process.update_aggregate_state();
+      if (process.state_ != ProcessState::Stopped) {
+        throw std::runtime_error("attach did not stop every traced thread");
+      }
+      return process;
     }
+    throw std::runtime_error("attach thread discovery did not converge");
   } catch (...) {
     process.cleanup();
     throw;
   }
-  return process;
 }
 
 std::vector<pid_t> Process::tids() const {
@@ -126,11 +207,13 @@ std::optional<ProcessState> Process::task_state(pid_t tid) const noexcept {
   return it->second;
 }
 
-WaitEvent Process::wait() {
+WaitEvent Process::wait() { return wait_for(-1); }
+
+WaitEvent Process::wait_for(pid_t requested_tid) {
   int status = 0;
   pid_t result;
   do {
-    result = ::waitpid(-1, &status, __WALL);
+    result = ::waitpid(requested_tid, &status, __WALL);
   } while (result == -1 && errno == EINTR);
   if (result == -1) {
     throw system_error("waitpid");
@@ -167,7 +250,7 @@ WaitEvent Process::wait() {
       current_tid_ = -1;
       state_ = ProcessState::Signaled;
     } else {
-      update_aggregate_state();
+      update_agregate_state();
       select_current_task();
     }
     return {WaitEvent::Kind::Signaled, signal, result};
@@ -229,11 +312,47 @@ void Process::detach(int signal) {
   if (state_ != ProcessState::Stopped) {
     throw std::logic_error("detach requires a stopped process");
   }
-  lowlevel::detach(pid_, signal);
-  state_ = ProcessState::Detached;
-  task_states_.clear();
-  current_tid_ = -1;
-  pid_ = -1;
+  for (const auto& [tid, task_state] : task_states_) {
+    static_cast<void>(tid);
+    if (task_state != ProcessState::Stopped) {
+      throw std::logic_error("detach requires every traced thread to be stopped");
+    }
+  }
+
+  const auto signal_tid = current_tid_;
+  std::vector<pid_t> order;
+  order.reserve(task_states_.size());
+  for (const auto& [tid, task_state] : task_states_) {
+    static_cast<void>(task_state);
+    if (tid != signal_tid) order.push_back(tid);
+  }
+  if (task_states_.count(signal_tid) != 0) order.push_back(signal_tid);
+
+  std::exception_ptr first_error;
+  for (const auto tid : order) {
+    try {
+      lowlevel::detach(tid, tid == signal_tid ? signal : 0);
+      task_states_.erase(tid);
+    } catch (const lowlevel::PtraceError& error) {
+      if (error.error_number() == ESRCH) {
+        task_states_.erase(tid);
+        continue;
+      }
+      if (!first_error) first_error = std::current_exception();
+    } catch (...) {
+      if (!first_error) first_error = std::current_exception();
+    }
+  }
+
+  if (task_states_.empty()) {
+    state_ = ProcessState::Detached;
+    current_tid_ = -1;
+    pid_ = -1;
+  } else {
+    update_aggregate_state();
+    select_current_task();
+  }
+  if (first_error) std::rethrow_exception(first_error);
 }
 
 void Process::cleanup() noexcept {
@@ -245,30 +364,6 @@ void Process::cleanup() noexcept {
   if (origin_ == ProcessOrigin::Attached) {
     if (state_ == ProcessState::Stopped) {
       try {
-        lowlevel::detach(pid_);
+        detach();
       } catch (...) {
-      }
-    }
-    task_states_.clear();
-    current_tid_ = -1;
-    pid_ = -1;
-    state_ = ProcessState::Detached;
-    return;
-  }
-
-  ::kill(pid_, SIGKILL);
-  int status = 0;
-  while (!task_states_.empty()) {
-    pid_t result;
-    do {
-      result = ::waitpid(-1, &status, __WALL);
-    } while (result == -1 && errno == EINTR);
-    if (result == -1) break;
-    task_states_.erase(result);
-  }
-  current_tid_ = -1;
-  pid_ = -1;
-  state_ = ProcessState::Exited;
-}
-
-}  // namespace mdbg
+        for (auto it = task_states_.begin(); it != task_states_.end();

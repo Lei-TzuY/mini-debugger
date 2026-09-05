@@ -4,11 +4,15 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/syscall.h>
 #include <unistd.h>
 
 volatile uint64_t fixture_value = 0x1122334455667788ULL;
 static volatile sig_atomic_t keep_running = 1;
 static volatile sig_atomic_t worker_marker = 0;
+static volatile sig_atomic_t signal_handler_count = 0;
+static volatile sig_atomic_t signal_handler_tid = 0;
+static volatile sig_atomic_t signal_worker_tid = 0;
 
 __attribute__((noinline)) void breakpoint_one(void) {
   __asm__ volatile("nop" ::: "memory");
@@ -58,6 +62,12 @@ static void stop_attach_loop(int signal_number) {
   keep_running = 0;
 }
 
+static void worker_signal_handler(int signal_number) {
+  (void)signal_number;
+  signal_handler_count += 1;
+  signal_handler_tid = (sig_atomic_t)syscall(SYS_gettid);
+}
+
 static void* lifecycle_worker(void* argument) {
   (void)argument;
   worker_marker = 1;
@@ -86,12 +96,66 @@ static int run_thread_breakpoint(void) {
   return worker_marker == 2 && fixture_value == 0x112233445566778aULL ? 0 : 91;
 }
 
+static void* signal_worker(void* argument) {
+  (void)argument;
+  signal_worker_tid = (sig_atomic_t)syscall(SYS_gettid);
+  raise(SIGUSR1);
+  raise(SIGUSR1);
+  worker_marker = 3;
+  return NULL;
+}
+
+static int run_thread_signal(void) {
+  struct sigaction action;
+  memset(&action, 0, sizeof(action));
+  action.sa_handler = worker_signal_handler;
+  sigemptyset(&action.sa_mask);
+  if (sigaction(SIGUSR1, &action, NULL) != 0) return 92;
+
+  pthread_t thread;
+  if (pthread_create(&thread, NULL, signal_worker, NULL) != 0) return 93;
+  if (pthread_join(thread, NULL) != 0) return 94;
+  return worker_marker == 3 && signal_handler_count == 1 &&
+                 signal_handler_tid == signal_worker_tid
+             ? 0
+             : 95;
+}
+
+static void* blocking_worker(void* argument) {
+  (void)argument;
+  worker_marker = 4;
+  while (keep_running) usleep(1000);
+  return NULL;
+}
+
+static int run_thread_cleanup(void) {
+  pthread_t thread;
+  if (pthread_create(&thread, NULL, blocking_worker, NULL) != 0) return 96;
+  if (pthread_join(thread, NULL) != 0) return 97;
+  return 98;
+}
+
+static int run_threaded_attach(const char* path) {
+  signal(SIGUSR1, stop_attach_loop);
+  pthread_t thread;
+  if (pthread_create(&thread, NULL, blocking_worker, NULL) != 0) return 99;
+  while (worker_marker != 4) usleep(1000);
+  publish_addresses(path);
+  while (keep_running) usleep(1000);
+  if (pthread_join(thread, NULL) != 0) return 100;
+  breakpoint_two();
+  return 0;
+}
+
 int main(int argc, char** argv) {
   if (argc == 2 && strcmp(argv[1], "thread-lifecycle") == 0) {
     return run_thread_lifecycle();
   }
 
   if (argc < 3) return 82;
+  if (strcmp(argv[2], "attach-threaded") == 0) {
+    return run_threaded_attach(argv[1]);
+  }
   publish_addresses(argv[1]);
 
   if (strcmp(argv[2], "attach") == 0) {
@@ -130,6 +194,12 @@ int main(int argc, char** argv) {
   }
   if (strcmp(argv[2], "thread-breakpoint") == 0) {
     return run_thread_breakpoint();
+  }
+  if (strcmp(argv[2], "thread-signal") == 0) {
+    return run_thread_signal();
+  }
+  if (strcmp(argv[2], "thread-cleanup") == 0) {
+    return run_thread_cleanup();
   }
 
   breakpoint_one();

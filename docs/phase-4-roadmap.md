@@ -26,29 +26,40 @@ The second source-value slice extends the same evaluator to a real optimized for
 - name resolution now also accepts an unambiguous direct-child `DW_TAG_formal_parameter`, while nested lexical locals, ambiguous names, unsupported types, and missing values continue to fail explicitly;
 - the only new register-location expression accepted is the compiler-proven `DW_OP_reg5 (rdi)`, read from the existing selected-TID register snapshot and truncated through the same 1–8 byte integer type metadata used by Priority 0;
 - initial compiler evidence corrected the original sequencing assumption: normal optimized GCC 13.3 and Clang 18.1 encode the formal parameter's `DW_AT_location` as a DWARF4 `.debug_loc` section offset rather than an inline expression, even though the active PC range itself evaluates to exactly `DW_OP_reg5`;
-- to support that real output without claiming general location-list evaluation, the evaluator now has a bounded formal-parameter-only DWARF4 location selector: it honors the compilation unit's `DW_AT_low_pc` as the initial base address, honors explicit base-address-selection entries, selects the range containing the current virtual PC, and returns only that range's expression;
-- ordinary optimized `DW_TAG_variable` location lists remain explicitly rejected, and `DW_OP_GNU_entry_value`, `DW_OP_stack_value`, other register numbers, aggregate values, and broader expression evaluation remain outside this milestone;
+- to support that real output without claiming general location-list evaluation, the evaluator gained a bounded DWARF4 location selector: it honors the compilation unit's `DW_AT_low_pc` as the initial base address, honors explicit base-address-selection entries, selects the range containing the current virtual PC, and returns only that range's expression;
+- ordinary optimized `DW_TAG_variable` location lists remained explicitly rejected at this milestone, and `DW_OP_GNU_entry_value`, `DW_OP_stack_value`, other register numbers, aggregate values, and broader expression evaluation remained outside scope;
 - direct API and real `mdbg` subprocess integration observe `parameter = 1161981756646125696`, reject a missing parameter explicitly, and continue to clean exit in PIE and non-PIE under both GCC and Clang-large.
 
-The bounded `.debug_loc` selector here exists only because both permanent compiler lanes required it for the formal-parameter workflow. It is not a claim that optimized-local location-list ownership is complete.
+## Priority 2: optimized local location-list ownership — complete
 
-## Priority 2: optimized local location-list ownership — current frontier
+The third source-value slice extends that same current-PC ownership model to one real optimized ordinary local:
 
-The same optimized compiler evidence now leaves one distinct executable gap: ordinary local variables can use `DW_FORM_sec_offset` location lists whose active ranges contain expressions more complex than the Priority 1 formal-parameter `DW_OP_reg5` case. GCC may emit GNU location views and stack-value expressions; Clang may move a value between argument/result registers or use entry-value expressions as the PC advances.
+- the existing `-O1 -g -gdwarf-4` fixture now derives a non-constant `uint64_t optimized_local` from the volatile runtime seed, constrains the same local through RDI and then through RAX, and stops at the exported `optimized_local_probe` while the value is live;
+- test-first GCC 13.3 and Clang 18.1 evidence was identical: both PIE and non-PIE builds reached the existing `optimized local-variable location lists are outside this milestone` rejection while every other integration test remained green, proving the ordinary `DW_TAG_variable` really owns a `DW_FORM_sec_offset` `.debug_loc` list rather than an inline fixed location;
+- ordinary locals now reuse the Priority 1 DWARF4 current-PC selector directly, including compilation-unit initial-base semantics, explicit base-address-selection entries, range validation, and deterministic no-location/out-of-range failures; no second location-list parser was introduced;
+- the only new expression opcode is the compiler-proven `DW_OP_reg0 (rax)` used by the active probe range; it is read from the selected TID's existing register snapshot and truncated through the same bounded integer type metadata as the earlier `DW_OP_reg5` path;
+- `DW_OP_reg5` and `DW_OP_fbreg` retain their existing behavior, while other register numbers, compound stack-machine expressions, entry-value/stack-value operations, pointer/aggregate values, and DWARF5 loclists remain rejected;
+- direct API and real `mdbg` subprocess integration observe `optimized_local = 2178649820992642800`, reject a missing optimized local explicitly, preserve module ownership, and continue to clean exit in PIE and non-PIE under both permanent compiler lanes.
 
-Current Priority 2 acceptance:
+Priority 2 therefore closes the first bounded optimized-local ownership gap without turning the source-value evaluator into a speculative general DWARF VM.
 
-- add or reuse one deterministic optimized local whose non-constant runtime value is available at a probe through a compiler-produced `.debug_loc` range, and prove the current evaluator rejects that ordinary local before adding support;
-- reuse the Priority 1 current-PC range selector rather than creating a second location-list parser, while preserving compilation-unit/base-address semantics and explicit malformed-range rejection;
-- implement only the smallest compiler-proven expression needed by that concrete fixture and CI lane; do not enumerate `DW_OP_*` broadly;
-- preserve selected process/TID register and memory ownership, existing integer type resolution, module identity, explicit missing/out-of-range failure behavior, and `print <name>` presentation;
-- prove PIE/non-PIE and GCC/Clang-large end to end, including a clean exit and a PC position where the value is deliberately unavailable if the compiler output provides such a range boundary;
-- do not expand into lexical shadowing, pointers, aggregates, arbitrary stack-machine evaluation, or DWARF5 loclists unless separate executable evidence requires them.
+## Priority 3: lexical-scope local ownership — current frontier
+
+The next architectural gap is name ownership rather than another register opcode. The evaluator currently accepts only unambiguous variables that are direct children of the active subprogram and explicitly rejects nested lexical-scope locals. That bound becomes incorrect once a real source block owns a live local or shadows an outer name at the stopped PC.
+
+Current Priority 3 acceptance:
+
+- add one deterministic compiler-produced nested lexical block, preferably with an outer and inner integer sharing a name, and first prove the current evaluator reaches its explicit nested-scope rejection or ambiguous-name boundary at the inner probe;
+- parse and honor only the lexical-scope DIE/range structure emitted by that concrete GCC/Clang fixture so lookup chooses the innermost scope that actually contains the current virtual PC;
+- keep value evaluation delegated to the already proven location machinery (`DW_OP_fbreg`, `DW_OP_reg0`, `DW_OP_reg5`, and DWARF4 `.debug_loc` selection) unless the fixture independently proves a new expression is required;
+- preserve selected process/TID ownership, module identity, integer type resolution, explicit missing/out-of-scope failure behavior, and `print <name>` presentation;
+- prove outer-versus-inner ownership at distinct PCs, PIE/non-PIE behavior, GCC/Clang-large compatibility, and clean exit;
+- do not expand into pointers, aggregates, arbitrary expression evaluation, inlined-subroutine scope ownership, or DWARF5 loclists without separate executable evidence.
 
 ## Later priorities
 
-After Priority 2, lexical shadowing, pointer/aggregate type presentation, richer expression evaluation, and DWARF5 location-list ownership remain candidates. They must continue to be ordered by concrete compiler-produced failures rather than surface-area breadth.
+After Priority 3, pointer/aggregate type presentation, richer expression evaluation, inlined-scope ownership, and DWARF5 location-list ownership remain candidates. They must continue to be ordered by concrete compiler-produced failures rather than surface-area breadth.
 
 ## Selection rule
 
-Priority 2 is the current frontier. Select the smallest real optimized-local workflow whose `.debug_loc` entry is already PC-selectable by the Priority 1 machinery but whose expression is still unsupported, prove that failure first, and implement only the expression/location ownership required to make that workflow correct under the permanent GCC and Clang-large gates.
+Priority 3 is the current frontier. Select the smallest real nested/shadowed-local workflow that the current direct-child name ownership model rejects, prove that failure first under the permanent GCC and Clang-large gates, and implement only the lexical DIE/range ownership needed to make that workflow correct. Do not use Priority 3 as a reason to broaden location-expression support unless the chosen compiler output independently requires it.

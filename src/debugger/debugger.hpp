@@ -21,6 +21,7 @@ class DeferredBreakpoints;
 enum class StopReason {
   InitialExec,
   Attached,
+  Exec,
   ThreadCreated,
   ThreadExited,
   ThreadSignaled,
@@ -42,6 +43,7 @@ struct StopInfo {
   std::optional<std::uintptr_t> watchpoint_address{};
   pid_t tid{-1};
   std::optional<pid_t> new_tid{};
+  std::optional<pid_t> former_tid{};
 };
 
 struct Watchpoint {
@@ -73,6 +75,7 @@ class Debugger {
   [[nodiscard]] ProcessState state() const noexcept { return process_.state(); }
   [[nodiscard]] ProcessOrigin origin() const noexcept { return process_.origin(); }
   [[nodiscard]] const StopInfo& stop_info() const noexcept { return stop_info_; }
+  [[nodiscard]] const std::string& executable_path() const noexcept { return executable_path_; }
   [[nodiscard]] std::vector<ThreadInfo> threads() const;
   void select_thread(pid_t tid);
 
@@ -108,7 +111,7 @@ class Debugger {
 
   friend class DeferredBreakpoints;
 
-  Debugger(Process process, StopInfo initial_stop);
+  Debugger(Process process, StopInfo initial_stop, std::string executable_path);
 
   [[nodiscard]] pid_t stopped_tid() const;
   StopInfo wait_and_classify(bool expected_single_step = false);
@@ -118,11 +121,13 @@ class Debugger {
   void reinsert_breakpoint(std::uintptr_t address, pid_t tid);
   void restore_all_breakpoints();
   void restore_watchpoint_registers();
+  void discard_image_state() noexcept;
   [[nodiscard]] std::optional<StopInfo> classify_watchpoint_stop(pid_t tid);
   bool discard_breakpoint(std::size_t id) noexcept;
 
   Process process_;
   StopInfo stop_info_;
+  std::string executable_path_;
   std::map<std::uintptr_t, Breakpoint> breakpoints_by_address_;
   std::map<std::size_t, std::uintptr_t> breakpoint_ids_;
   std::size_t next_breakpoint_id_{1};

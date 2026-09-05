@@ -5,6 +5,8 @@
 #include <sys/ptrace.h>
 
 #include <csignal>
+#include <filesystem>
+#include <limits>
 #include <stdexcept>
 #include <utility>
 
@@ -35,23 +37,40 @@ StopInfo make_stop(StopReason reason, int value, pid_t tid) {
   info.tid = tid;
   return info;
 }
+
+std::string process_executable(pid_t pid) {
+  return std::filesystem::read_symlink("/proc/" + std::to_string(pid) + "/exe").string();
+}
+
+unsigned long tracing_options(ProcessOrigin origin) {
+  unsigned long options = PTRACE_O_TRACECLONE | PTRACE_O_TRACEEXEC;
+  if (origin == ProcessOrigin::Launched) options |= PTRACE_O_EXITKILL;
+  return options;
+}
 }  // namespace
 
 Debugger Debugger::launch(const std::string& executable,
                           const std::vector<std::string>& arguments) {
   auto process = Process::launch(executable, arguments);
+  lowlevel::set_options(process.current_tid(), tracing_options(ProcessOrigin::Launched));
   auto initial = make_stop(StopReason::InitialExec, SIGTRAP, process.current_tid());
-  return Debugger(std::move(process), std::move(initial));
+  const auto executable_path = process_executable(process.pid());
+  return Debugger(std::move(process), std::move(initial), executable_path);
 }
 
 Debugger Debugger::attach(pid_t pid) {
   auto process = Process::attach(pid);
+  for (const auto tid : process.tids()) {
+    lowlevel::set_options(tid, tracing_options(ProcessOrigin::Attached));
+  }
   auto initial = make_stop(StopReason::Attached, SIGSTOP, process.current_tid());
-  return Debugger(std::move(process), std::move(initial));
+  return Debugger(std::move(process), std::move(initial), process_executable(pid));
 }
 
-Debugger::Debugger(Process process, StopInfo initial_stop)
-    : process_(std::move(process)), stop_info_(std::move(initial_stop)) {}
+Debugger::Debugger(Process process, StopInfo initial_stop, std::string executable_path)
+    : process_(std::move(process)),
+      stop_info_(std::move(initial_stop)),
+      executable_path_(std::move(executable_path)) {}
 
 Debugger::~Debugger() {
   if (process_.origin() != ProcessOrigin::Attached ||
@@ -312,6 +331,16 @@ void Debugger::restore_watchpoint_registers() {
   lowlevel::set_debug_register(tid, 7, watchpoint_register_snapshot_->dr7);
 }
 
+void Debugger::discard_image_state() noexcept {
+  breakpoints_by_address_.clear();
+  breakpoint_ids_.clear();
+  pending_breakpoint_step_.reset();
+  watchpoint_.reset();
+  watchpoint_register_snapshot_.reset();
+  pending_thread_starts_.clear();
+  pending_signals_.clear();
+}
+
 std::optional<StopInfo> Debugger::classify_watchpoint_stop(pid_t tid) {
   if (!watchpoint_ || !watchpoint_register_snapshot_ ||
       watchpoint_register_snapshot_->tid != tid) {
@@ -331,6 +360,7 @@ StopInfo Debugger::step_over_pending_breakpoint(bool expose_single_step) {
   lowlevel::single_step(pending.tid, 0);
   process_.mark_running(pending.tid);
   auto info = wait_and_classify(true);
+  if (info.reason == StopReason::Exec) return info;
 
   pid_t reinsert_tid = -1;
   if (process_.task_state(pending.tid) == ProcessState::Stopped) {
@@ -387,6 +417,25 @@ StopInfo Debugger::wait_and_classify(bool expected_single_step) {
       }
       if (process_.state() != ProcessState::Stopped) continue;
       stop_info_ = make_stop(StopReason::ThreadSignaled, event.value, event.tid);
+      return stop_info_;
+    }
+
+    if (event.ptrace_event == PTRACE_EVENT_EXEC) {
+      const auto message = lowlevel::get_event_message(event.tid);
+      std::optional<pid_t> former_tid;
+      if (message != 0) {
+        if (message > static_cast<std::uint64_t>(std::numeric_limits<pid_t>::max())) {
+          throw std::runtime_error("PTRACE_EVENT_EXEC returned an invalid former task id");
+        }
+        former_tid = static_cast<pid_t>(message);
+      }
+
+      process_.collapse_after_exec(event.tid);
+      discard_image_state();
+      lowlevel::set_options(event.tid, tracing_options(process_.origin()));
+      executable_path_ = process_executable(process_.pid());
+      stop_info_ = make_stop(StopReason::Exec, SIGTRAP, event.tid);
+      stop_info_.former_tid = former_tid;
       return stop_info_;
     }
 

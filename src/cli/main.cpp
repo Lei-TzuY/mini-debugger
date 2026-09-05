@@ -111,6 +111,15 @@ void print_stop(const mdbg::StopInfo& info, const mdbg::ElfFile& elf, pid_t pid)
     case StopReason::Attached:
       std::cout << "attached to process " << pid << '\n';
       break;
+    case StopReason::Exec:
+      std::cout << "image replaced by " << elf.path();
+      if (info.former_tid && *info.former_tid != info.tid) {
+        std::cout << " [former tid " << *info.former_tid << ", current tid " << info.tid << ']';
+      } else if (info.tid > 0) {
+        std::cout << " [tid " << info.tid << ']';
+      }
+      std::cout << '\n';
+      break;
     case StopReason::ThreadCreated:
       std::cout << "thread " << info.tid << " created and stopped\n";
       break;
@@ -297,6 +306,7 @@ void print_source_motion_result(const char* operation, const mdbg::SourceStepRes
   }
   if (result.reason == mdbg::SourceStepStopReason::Interrupted) {
     print_stop(result.stop, elf, debugger.pid());
+    if (result.stop.reason == mdbg::StopReason::Exec) return;
     if (debugger.state() == mdbg::ProcessState::Stopped && result.source) {
       print_source_position(static_cast<std::uintptr_t>(debugger.registers().rip), *result.source,
                             result.source_module_path);
@@ -376,9 +386,21 @@ int main(int argc, char** argv) {
       return mdbg::Debugger::launch(executable, args);
     }();
 
-    const mdbg::ElfFile elf(executable);
+    mdbg::ElfFile elf(executable);
     mdbg::UserBreakpointRegistry breakpoints(debugger, elf);
-    print_stop(debugger.stop_info(), elf, debugger.pid());
+
+    auto refresh_image = [&](const mdbg::StopInfo& info) {
+      if (info.reason != mdbg::StopReason::Exec) return;
+      breakpoints.on_image_replaced();
+      executable = debugger.executable_path();
+      elf = mdbg::ElfFile(executable);
+    };
+    auto report_stop = [&](const mdbg::StopInfo& info) {
+      refresh_image(info);
+      print_stop(info, elf, debugger.pid());
+    };
+
+    report_stop(debugger.stop_info());
 
     std::string line;
     while (debugger.state() == mdbg::ProcessState::Stopped &&
@@ -404,16 +426,19 @@ int main(int argc, char** argv) {
         break;
       }
       if (command == "continue" || command == "c") {
-        print_stop(breakpoints.continue_execution(), elf, debugger.pid());
+        report_stop(breakpoints.continue_execution());
       } else if (command == "stepi" || command == "si") {
         if (reject_motion_with_pending_breakpoints(breakpoints)) continue;
-        print_stop(debugger.single_step(), elf, debugger.pid());
+        report_stop(debugger.single_step());
       } else if (command == "step" || command == "s" || command == "next" || command == "n") {
         if (reject_motion_with_pending_breakpoints(breakpoints)) continue;
         const bool next = command == "next" || command == "n";
         try {
           const auto result = next ? mdbg::next_source(debugger, elf)
                                    : mdbg::step_source(debugger, elf);
+          if (result.reason == mdbg::SourceStepStopReason::Interrupted) {
+            refresh_image(result.stop);
+          }
           print_source_motion_result(next ? "source next" : "source step", result,
                                      debugger, elf);
         } catch (const std::exception& error) {
@@ -424,6 +449,7 @@ int main(int argc, char** argv) {
         if (reject_motion_with_pending_breakpoints(breakpoints)) continue;
         try {
           const auto result = mdbg::finish_frame(debugger);
+          refresh_image(result.stop);
           if (result.reason == mdbg::FinishStopReason::Returned) {
             if (debugger.state() == mdbg::ProcessState::Stopped) {
               print_source_location(static_cast<std::uintptr_t>(debugger.registers().rip),
@@ -433,7 +459,8 @@ int main(int argc, char** argv) {
             }
           } else {
             print_stop(result.stop, elf, debugger.pid());
-            if (debugger.state() == mdbg::ProcessState::Stopped) {
+            if (result.stop.reason != mdbg::StopReason::Exec &&
+                debugger.state() == mdbg::ProcessState::Stopped) {
               print_source_location(static_cast<std::uintptr_t>(debugger.registers().rip),
                                     debugger, elf);
             }

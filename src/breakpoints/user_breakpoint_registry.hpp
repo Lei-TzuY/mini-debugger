@@ -88,6 +88,11 @@ class UserBreakpointRegistry {
     return true;
   }
 
+  void on_image_replaced() noexcept {
+    deferred_.reset();
+    entries_.clear();
+  }
+
   [[nodiscard]] std::optional<UserBreakpoint> breakpoint(std::size_t id) const {
     const auto it = entries_.find(id);
     if (it == entries_.end()) return std::nullopt;

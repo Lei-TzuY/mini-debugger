@@ -172,6 +172,16 @@ if(BUILD_TESTING)
   add_test(NAME multithread_attach_teardown_integration_nopie
     COMMAND multithread_attach_teardown_integration $<TARGET_FILE:debugger_fixture_nopie>)
 
+  add_executable(multithread_watchpoint_integration
+    tests/multithread_watchpoint_integration.cpp)
+  target_link_libraries(multithread_watchpoint_integration PRIVATE mdbg_core)
+  target_compile_options(multithread_watchpoint_integration PRIVATE
+    -Wall -Wextra -Wpedantic -Werror)
+  add_test(NAME multithread_watchpoint_integration_pie
+    COMMAND multithread_watchpoint_integration $<TARGET_FILE:debugger_fixture_pie>)
+  add_test(NAME multithread_watchpoint_integration_nopie
+    COMMAND multithread_watchpoint_integration $<TARGET_FILE:debugger_fixture_nopie>)
+
   add_executable(backtrace_integration tests/backtrace_integration.cpp)
   target_link_libraries(backtrace_integration PRIVATE mdbg_core)
   target_compile_options(backtrace_integration PRIVATE -Wall -Wextra -Wpedantic -Werror)

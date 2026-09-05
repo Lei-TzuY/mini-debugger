@@ -215,13 +215,20 @@ static int run_threaded_watchpoint_attach(const char* path) {
 
 static void* register_mutation_worker(void* argument) {
   (void)argument;
-  register uint64_t marker __asm__("r12") = REGISTER_MUTATION_SEED;
-  __asm__ volatile("" : "+r"(marker) : : "memory");
-  register_worker_ready = 1;
-  while (!register_release) {
-    __asm__ volatile("pause" : "+r"(marker) : : "memory");
-  }
-  return (void*)(uintptr_t)(marker == REGISTER_MUTATION_VALUE ? 0 : 1);
+  unsigned char matched = 0;
+  __asm__ volatile(
+      "movabsq $0x13579bdf2468ace0, %%r12\n"
+      "movl $1, register_worker_ready(%%rip)\n"
+      "1:\n"
+      "cmpl $0, register_release(%%rip)\n"
+      "je 1b\n"
+      "movabsq $0xa5a55a5ac3c33c3c, %%rax\n"
+      "cmpq %%rax, %%r12\n"
+      "sete %0\n"
+      : "=q"(matched)
+      :
+      : "rax", "r12", "cc", "memory");
+  return matched != 0 ? NULL : (void*)(uintptr_t)1;
 }
 
 static int run_threaded_register_mutation_attach(const char* path) {

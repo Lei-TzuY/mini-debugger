@@ -7,11 +7,12 @@
 #define OPTIMIZED_LOCAL_EXPECTED UINT64_C(0x1e3c1e781e3c1ef0)
 #define ARITHMETIC_LOCAL_EXPECTED UINT64_C(0x10203040506070a5)
 #define INDIRECT_LOCAL_EXPECTED UINT64_C(0x8877665544332211)
+#define INDIRECT_LOCAL_XOR UINT64_C(0x55aa00ff33cc6699)
 #define INLINE_LOCAL_EXPECTED UINT64_C(0x02146638cadcae70)
 
 volatile uint64_t parameter_seed = UINT64_C(0x1122334455667788);
 volatile uint64_t inline_seed = INLINE_LOCAL_EXPECTED;
-uint64_t indirect_seed = INDIRECT_LOCAL_EXPECTED;
+uint64_t indirect_seed = INDIRECT_LOCAL_EXPECTED ^ INDIRECT_LOCAL_XOR;
 
 __attribute__((noinline)) uint64_t inspect_parameter_value(uint64_t parameter) {
   __asm__ volatile(".globl formal_parameter_probe\n"
@@ -69,7 +70,7 @@ __attribute__((noinline)) uint64_t inspect_arithmetic_local(
 }
 
 __attribute__((noinline)) uint64_t inspect_indirect_local(uint64_t* ptr) {
-  const uint64_t indirect_local = *ptr;
+  const uint64_t indirect_local = *ptr ^ INDIRECT_LOCAL_XOR;
   __asm__ volatile(".globl indirect_local_probe\n"
                    "indirect_local_probe:\n"
                    "nop\n"

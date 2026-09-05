@@ -34,6 +34,7 @@ enum class StopReason {
   Signaled
 };
 enum class SignalPolicy { Suppress, Forward };
+enum class ProcessEventKind { None, Fork };
 
 struct StopInfo {
   StopReason reason;
@@ -44,6 +45,8 @@ struct StopInfo {
   pid_t tid{-1};
   std::optional<pid_t> new_tid{};
   std::optional<pid_t> former_tid{};
+  ProcessEventKind process_event{ProcessEventKind::None};
+  std::optional<pid_t> child_pid{};
 };
 
 struct Watchpoint {

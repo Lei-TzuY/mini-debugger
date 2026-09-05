@@ -3,7 +3,9 @@
 #include "ptrace/ptrace.hpp"
 
 #include <sys/ptrace.h>
+#include <sys/wait.h>
 
+#include <cerrno>
 #include <csignal>
 #include <filesystem>
 #include <limits>
@@ -43,9 +45,23 @@ std::string process_executable(pid_t pid) {
 }
 
 unsigned long tracing_options(ProcessOrigin origin) {
-  unsigned long options = PTRACE_O_TRACECLONE | PTRACE_O_TRACEEXEC;
+  unsigned long options = PTRACE_O_TRACECLONE | PTRACE_O_TRACEEXEC | PTRACE_O_TRACEFORK;
   if (origin == ProcessOrigin::Launched) options |= PTRACE_O_EXITKILL;
   return options;
+}
+
+void wait_for_unfollowed_child_stop(pid_t child) {
+  int status = 0;
+  pid_t result;
+  do {
+    result = ::waitpid(child, &status, __WALL);
+  } while (result == -1 && errno == EINTR);
+  if (result != child) {
+    throw std::runtime_error("failed to consume fork child's initial ptrace stop");
+  }
+  if (!WIFSTOPPED(status)) {
+    throw std::runtime_error("fork child did not enter an initial ptrace stop");
+  }
 }
 }  // namespace
 
@@ -436,6 +452,51 @@ StopInfo Debugger::wait_and_classify(bool expected_single_step) {
       executable_path_ = process_executable(process_.pid());
       stop_info_ = make_stop(StopReason::Exec, SIGTRAP, event.tid);
       stop_info_.former_tid = former_tid;
+      return stop_info_;
+    }
+
+    if (event.ptrace_event == PTRACE_EVENT_FORK) {
+      const auto message = lowlevel::get_event_message(event.tid);
+      if (message == 0 ||
+          message > static_cast<std::uint64_t>(std::numeric_limits<pid_t>::max())) {
+        throw std::runtime_error("PTRACE_EVENT_FORK returned an invalid child process id");
+      }
+      const auto child = static_cast<pid_t>(message);
+      wait_for_unfollowed_child_stop(child);
+
+      bool detached = false;
+      try {
+        for (const auto& [address, breakpoint] : breakpoints_by_address_) {
+          if (!breakpoint.installed) continue;
+          lowlevel::write_byte(child, address, breakpoint.original_byte);
+        }
+
+        if (watchpoint_register_snapshot_ && watchpoint_register_snapshot_->tid == event.tid) {
+          const auto& snapshot = *watchpoint_register_snapshot_;
+          const auto current_dr7 = lowlevel::get_debug_register(child, 7);
+          const auto disabled_dr7 =
+              current_dr7 & ~(kDr7Slot0EnableMask | kDr7Slot0ControlMask);
+          lowlevel::set_debug_register(child, 7, disabled_dr7);
+          lowlevel::set_debug_register(child, 0, snapshot.dr0);
+          lowlevel::set_debug_register(child, 6, snapshot.dr6);
+          lowlevel::set_debug_register(child, 7, snapshot.dr7);
+        }
+
+        lowlevel::detach(child);
+        detached = true;
+      } catch (...) {
+        if (!detached) {
+          try {
+            lowlevel::detach(child, SIGKILL);
+          } catch (...) {
+          }
+        }
+        throw;
+      }
+
+      stop_info_ = make_stop(StopReason::Trap, SIGTRAP, event.tid);
+      stop_info_.process_event = ProcessEventKind::Fork;
+      stop_info_.child_pid = child;
       return stop_info_;
     }
 

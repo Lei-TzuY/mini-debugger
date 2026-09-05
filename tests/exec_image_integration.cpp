@@ -10,9 +10,11 @@
 #include <chrono>
 #include <csignal>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <stdexcept>
 #include <string>
+#include <thread>
 
 namespace {
 
@@ -73,6 +75,77 @@ void run_exec_replacement(const std::string& driver, const std::string& target) 
   info = breakpoints.continue_execution();
   require(info.reason == mdbg::StopReason::Exited && info.value == 0,
           "replacement executable did not exit cleanly");
+}
+
+struct DetachedChildGuard {
+  pid_t pid{-1};
+  ~DetachedChildGuard() {
+    if (pid > 0) (void)::kill(pid, SIGKILL);
+  }
+};
+
+void require_child_stopped_untraced(pid_t child) {
+  const auto status_path = std::filesystem::path("/proc") / std::to_string(child) / "status";
+  for (int attempt = 0; attempt < 200; ++attempt) {
+    std::ifstream input(status_path);
+    std::string line;
+    char state = '\0';
+    pid_t tracer = -1;
+    while (std::getline(input, line)) {
+      if (line.rfind("State:", 0) == 0) {
+        const auto position = line.find_first_not_of(" \t", 6);
+        if (position != std::string::npos) state = line[position];
+      } else if (line.rfind("TracerPid:", 0) == 0) {
+        tracer = static_cast<pid_t>(std::stol(line.substr(std::string("TracerPid:").size())));
+      }
+    }
+    if ((state == 'T' || state == 't') && tracer == 0) return;
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+  throw std::runtime_error("fork child did not become independently stopped and untraced");
+}
+
+void run_follow_parent_fork(const std::string& driver) {
+  auto debugger = mdbg::Debugger::launch(driver, {"--fork-topology"});
+  require(debugger.stop_info().reason == mdbg::StopReason::InitialExec,
+          "fork driver did not expose the initial exec stop");
+  const auto leader = debugger.pid();
+
+  const mdbg::ElfFile image(driver);
+  const auto probe = image.find_symbol("fork_shared_probe");
+  require(probe.has_value(), "fork shared probe symbol is unavailable");
+  const auto probe_address = static_cast<std::uintptr_t>(image.runtime_address(leader, *probe));
+  const auto breakpoint_id = debugger.add_breakpoint(probe_address);
+
+  auto info = debugger.continue_execution();
+  require(info.process_event == mdbg::ProcessEventKind::Fork,
+          "real fork was not classified as a process-topology event");
+  require(info.tid == leader, "fork event did not remain owned by the followed parent");
+  require(info.child_pid.has_value() && *info.child_pid > 0 && *info.child_pid != leader,
+          "fork event did not expose a distinct child process identity");
+  DetachedChildGuard child{*info.child_pid};
+
+  const auto threads = debugger.threads();
+  require(threads.size() == 1 && threads.front().tid == leader && threads.front().active,
+          "unfollowed fork child leaked into the parent's TID registry");
+  require(debugger.breakpoints().size() == 1 &&
+              debugger.breakpoints().front().id == breakpoint_id,
+          "parent breakpoint ownership changed at fork");
+
+  require_child_stopped_untraced(child.pid);
+  require(::kill(child.pid, SIGCONT) == 0, "failed to release detached fork child");
+
+  info = debugger.continue_execution();
+  require(info.reason == mdbg::StopReason::Breakpoint && info.tid == leader &&
+              info.breakpoint_address == probe_address,
+          "parent managed breakpoint did not survive child detachment");
+  child.pid = -1;
+
+  require(debugger.remove_breakpoint(breakpoint_id),
+          "parent managed breakpoint could not be removed after fork");
+  info = debugger.continue_execution();
+  require(info.reason == mdbg::StopReason::Exited && info.value == 0,
+          "followed parent did not exit cleanly after detached child completion");
 }
 
 struct CliProcess {
@@ -229,10 +302,11 @@ int main(int argc, char** argv) {
   }
   try {
     run_exec_replacement(argv[1], argv[2]);
+    run_follow_parent_fork(argv[1]);
     run_cli_exec_replacement(argv[1], argv[2]);
-    std::cout << "exec image integration passed\n";
+    std::cout << "exec/process topology integration passed\n";
   } catch (const std::exception& error) {
-    std::cerr << "exec image integration failure: " << error.what() << '\n';
+    std::cerr << "exec/process topology integration failure: " << error.what() << '\n';
     return 1;
   }
   return 0;

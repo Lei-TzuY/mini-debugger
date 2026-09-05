@@ -22,18 +22,28 @@ This closes the bounded launched-exec milestone. The tracing option is also inst
 
 Forked children are not threads in the current task registry: the existing model validates TIDs against one `/proc/<leader>/task` set and owns one process-wide software-breakpoint namespace. `PTRACE_O_TRACEFORK`/`PTRACE_O_TRACEVFORK` therefore require a process-topology abstraction rather than inserting child PIDs into the P4 thread map.
 
-First coherent slice acceptance:
+P1-A follow-parent `fork()` is complete as the first bounded process-topology slice:
 
-- choose and expose one deterministic parent/child follow policy before enabling fork events; do not silently trace both execution domains through one thread registry;
-- classify a real `fork()`/`vfork()` event with parent and child process identity distinct from thread creation;
-- maintain independent task registries and process lifecycle state for the followed execution domain while leaving the unfollowed side in a defined, testable state;
-- define software-breakpoint ownership after address-space duplication so parent/child copies cannot corrupt each other's saved-byte/displaced-step state;
-- route signals, detach/destructor cleanup, and terminal process exit through the chosen process identity without leaking ptrace ownership;
-- expose enough session/CLI identity that stops after fork identify which process owns the event;
-- PIE and non-PIE integration must run a real fork topology through the selected policy and prove breakpoint/lifecycle cleanup, not merely observe `PTRACE_EVENT_FORK`.
+- the policy is explicit follow-parent/unfollow-child: `PTRACE_O_TRACEFORK` is enabled, `StopInfo` exposes `ProcessEventKind::Fork` plus the distinct child PID, and the child is never inserted into the followed parent's TID registry;
+- the debugger consumes the kernel-created child's initial ptrace stop before releasing it, so transient ptrace ownership cannot leak outside the topology transition;
+- installed software breakpoints inherited across `fork()` are restored in the child's copy-on-write address space before detach while the parent's breakpoint metadata and physical `INT3` remain owned by the parent session;
+- when the forking TID owns the bounded hardware watchpoint, the child's inherited DR0/DR6/DR7 state is restored to the pre-watchpoint snapshot before detach rather than silently extending parent watchpoint ownership to the child process;
+- detach failure uses a bounded best-effort kill/detach cleanup path rather than releasing a partially restored child;
+- a real fork fixture executes the same managed-breakpointed probe in both domains: the child reaches an independent SIGSTOP with `TracerPid: 0`, is externally resumed and exits, while the followed parent retains its one-process task registry, later hits the original managed breakpoint, removes it, and exits cleanly;
+- the fixture blocks SIGCHLD only to isolate this topology test from the already independent signal-delivery policy; production does not swallow or special-case SIGCHLD;
+- PIE and non-PIE run through the full GCC and Clang-large matrices. Test-first coverage initially failed because no process-event identity existed, and the first production candidate then exposed the real child-exit/SIGCHLD ordering before the fixture isolated that orthogonal signal stop.
 
-Do not begin this milestone by merely enabling ptrace flags. Fork/vfork is process topology, not another TID variant.
+Priority 1 remains in progress. P1-A deliberately does not enable `PTRACE_O_TRACEVFORK`: a vfork child shares the parent's address space until exec/exit, so restoring inherited `INT3` bytes in the child would also mutate the followed parent. The next topology slice must define a shared-VM ownership protocol around `PTRACE_EVENT_VFORK`/`PTRACE_EVENT_VFORK_DONE` before enabling those events. Process-event identity is currently exposed through the debugger API; dedicated CLI rendering for fork/vfork ownership remains part of Priority 1 product integration and is not claimed complete by P1-A.
+
+Remaining Priority 1 acceptance:
+
+- define and prove the `vfork()` shared-address-space policy without corrupting parent breakpoint/displaced-step/watchpoint ownership;
+- preserve independent lifecycle and cleanup semantics across `VFORK_DONE`, child exec/exit, signals, detach, and terminal parent exit;
+- expose process-topology ownership clearly through the interactive CLI once fork/vfork semantics are stable;
+- add real PIE/non-PIE vfork integration rather than relying on synthetic ptrace-event injection.
+
+Do not complete this milestone by merely enabling `PTRACE_O_TRACEVFORK`. vfork is shared-address-space ownership, not a fork flag variant.
 
 ## Selection rule
 
-Priority 1 is the current frontier. Expression evaluation, richer register classes, and convenience UI are lower priority until fork/vfork has an executable process-topology contract. As in Phase 2, compiler/kernel variants are added only when a reproducible real workflow demonstrates a gap.
+Priority 1 remains the current frontier, with vfork/VFORK_DONE ownership as the next architectural slice. Expression evaluation, richer register classes, and convenience UI are lower priority until fork/vfork has an executable process-topology contract. As in Phase 2, compiler/kernel variants are added only when a reproducible real workflow demonstrates a gap.

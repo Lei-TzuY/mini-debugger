@@ -148,11 +148,29 @@ pid_t Debugger::stopped_tid() const {
 }
 
 void Debugger::set_fork_follow_policy(ForkFollowPolicy policy) {
-  if (retained_process_ && policy != ForkFollowPolicy::Both) {
-    throw std::logic_error("cannot change fork follow policy while two process domains are retained");
+  if (retained_process_) {
+    if (policy != ForkFollowPolicy::Both) {
+      throw std::logic_error(
+          "cannot change fork follow policy while two process domains are retained");
+    }
+    fork_follow_policy_ = policy;
+    return;
   }
   if (policy == ForkFollowPolicy::Both) {
-    require_single_process_debug_state("simultaneous fork ownership");
+    if (process_.origin() != ProcessOrigin::Launched) {
+      throw std::logic_error(
+          "simultaneous fork ownership is currently supported for launched tracees only");
+    }
+    const auto tids = process_.tids();
+    if (tids.size() != 1 || tids.front() != process_.current_tid() ||
+        process_.current_tid() != process_.pid()) {
+      throw std::logic_error(
+          "simultaneous fork ownership currently requires a single-thread parent");
+    }
+    if (!breakpoints_by_address_.empty() || pending_breakpoint_step_) {
+      throw std::logic_error(
+          "simultaneous fork ownership requires software breakpoints to be armed after fork");
+    }
   }
   fork_follow_policy_ = policy;
 }
@@ -182,6 +200,12 @@ void Debugger::swap_active_process() {
   std::swap(executable_path_, retained_process_->executable_path);
   pending_thread_starts_.swap(retained_process_->pending_thread_starts);
   pending_signals_.swap(retained_process_->pending_signals);
+  breakpoints_by_address_.swap(retained_process_->breakpoints_by_address);
+  breakpoint_ids_.swap(retained_process_->breakpoint_ids);
+  std::swap(pending_breakpoint_step_, retained_process_->pending_breakpoint_step);
+  std::swap(watchpoint_, retained_process_->watchpoint);
+  std::swap(watchpoint_register_snapshot_,
+            retained_process_->watchpoint_register_snapshot);
 }
 
 void Debugger::select_process(pid_t pid) {
@@ -228,21 +252,10 @@ std::vector<std::byte> Debugger::read_memory(std::uintptr_t address,
   return lowlevel::read_memory(stopped_tid(), address, length);
 }
 
-void Debugger::require_single_process_debug_state(const char* operation) const {
-  if (retained_process_ || fork_follow_policy_ == ForkFollowPolicy::Both) {
-    throw std::logic_error(std::string(operation) +
-                           " is unavailable while simultaneous process ownership is enabled");
-  }
-  if (!breakpoints_by_address_.empty() || watchpoint_ || pending_breakpoint_step_) {
-    throw std::logic_error(std::string(operation) +
-                           " requires an empty breakpoint/watchpoint ownership state");
-  }
-}
-
 std::size_t Debugger::add_breakpoint(std::uintptr_t address) {
-  if (retained_process_ || fork_follow_policy_ == ForkFollowPolicy::Both) {
+  if (fork_follow_policy_ == ForkFollowPolicy::Both && !retained_process_) {
     throw std::logic_error(
-        "managed breakpoints are not yet process-scoped for simultaneous process ownership");
+        "process-scoped managed breakpoints can only be armed after fork retention");
   }
   const auto tid = stopped_tid();
   if (breakpoints_by_address_.count(address) != 0) {
@@ -299,10 +312,6 @@ std::vector<Breakpoint> Debugger::breakpoints() const {
 }
 
 std::size_t Debugger::add_write_watchpoint(std::uintptr_t address, std::size_t length) {
-  if (retained_process_ || fork_follow_policy_ == ForkFollowPolicy::Both) {
-    throw std::logic_error(
-        "hardware watchpoints are not yet process-scoped for simultaneous process ownership");
-  }
   const auto tid = stopped_tid();
   if (watchpoint_) {
     throw std::invalid_argument("only one hardware watchpoint is currently supported");
@@ -701,21 +710,60 @@ StopInfo Debugger::wait_and_classify(bool expected_single_step) {
           throw std::runtime_error(
               "simultaneous fork ownership currently requires one single-thread parent/child pair");
         }
-        if (!breakpoints_by_address_.empty() || watchpoint_ || pending_breakpoint_step_) {
+        if (!breakpoints_by_address_.empty() || pending_breakpoint_step_) {
           try {
             lowlevel::detach(child, SIGKILL);
           } catch (...) {
             (void)::kill(child, SIGKILL);
           }
           throw std::logic_error(
-              "simultaneous fork ownership requires empty breakpoint/watchpoint state");
+              "simultaneous fork ownership requires software breakpoints to be armed after fork");
         }
 
-        lowlevel::set_options(child, tracing_options(process_.origin()));
-        auto child_stop = make_stop(StopReason::Trap, SIGSTOP, child);
-        retained_process_.emplace(RetainedProcessDomain{
-            Process::adopt_stopped(child, process_.origin()), std::move(child_stop),
-            executable_path_, {}, {}});
+        bool child_retained = false;
+        try {
+          lowlevel::set_options(child, tracing_options(process_.origin()));
+
+          std::optional<Watchpoint> child_watchpoint;
+          std::optional<DebugRegisterSnapshot> child_watchpoint_snapshot;
+          if (watchpoint_) {
+            if (!watchpoint_register_snapshot_ ||
+                watchpoint_register_snapshot_->tid != event.tid) {
+              throw std::logic_error(
+                  "watchpoint ownership does not match the process that forked");
+            }
+            const auto& snapshot = *watchpoint_register_snapshot_;
+            const auto armed_dr0 = lowlevel::get_debug_register(event.tid, 0);
+            const auto armed_dr6 = lowlevel::get_debug_register(event.tid, 6);
+            const auto armed_dr7 = lowlevel::get_debug_register(event.tid, 7);
+            const auto child_dr7 = lowlevel::get_debug_register(child, 7);
+            const auto disabled_child_dr7 =
+                child_dr7 & ~(kDr7Slot0EnableMask | kDr7Slot0ControlMask);
+            lowlevel::set_debug_register(child, 7, disabled_child_dr7);
+            lowlevel::set_debug_register(child, 0, armed_dr0);
+            lowlevel::set_debug_register(child, 6, armed_dr6 & ~kDr6Breakpoint0);
+            lowlevel::set_debug_register(child, 7, armed_dr7);
+            child_watchpoint = watchpoint_;
+            child_watchpoint_snapshot = DebugRegisterSnapshot{
+                child, snapshot.dr0, snapshot.dr6, snapshot.dr7};
+          }
+
+          auto child_stop = make_stop(StopReason::Trap, SIGSTOP, child);
+          retained_process_.emplace(RetainedProcessDomain{
+              Process::adopt_stopped(child, process_.origin()), std::move(child_stop),
+              executable_path_, {}, {}, {}, {}, std::nullopt, child_watchpoint,
+              child_watchpoint_snapshot});
+          child_retained = true;
+        } catch (...) {
+          if (!child_retained) {
+            try {
+              lowlevel::detach(child, SIGKILL);
+            } catch (...) {
+              (void)::kill(child, SIGKILL);
+            }
+          }
+          throw;
+        }
 
         stop_info_ = make_stop(StopReason::Trap, SIGTRAP, event.tid);
         stop_info_.process_event = ProcessEventKind::Fork;

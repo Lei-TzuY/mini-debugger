@@ -601,6 +601,18 @@ StopInfo Debugger::wait_and_classify(bool expected_single_step) {
 
           const bool transfer_watchpoint =
               watchpoint_register_snapshot_ && watchpoint_register_snapshot_->tid == event.tid;
+          if (transfer_watchpoint) {
+            const auto armed_dr0 = lowlevel::get_debug_register(event.tid, 0);
+            const auto armed_dr6 = lowlevel::get_debug_register(event.tid, 6);
+            const auto armed_dr7 = lowlevel::get_debug_register(event.tid, 7);
+            const auto child_dr7 = lowlevel::get_debug_register(child, 7);
+            const auto disabled_child_dr7 =
+                child_dr7 & ~(kDr7Slot0EnableMask | kDr7Slot0ControlMask);
+            lowlevel::set_debug_register(child, 7, disabled_child_dr7);
+            lowlevel::set_debug_register(child, 0, armed_dr0);
+            lowlevel::set_debug_register(child, 6, armed_dr6 & ~kDr6Breakpoint0);
+            lowlevel::set_debug_register(child, 7, armed_dr7);
+          }
           if (watchpoint_register_snapshot_) {
             restore_watchpoint_registers();
           }

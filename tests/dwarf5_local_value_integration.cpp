@@ -22,9 +22,11 @@ namespace {
 
 constexpr std::uint64_t kExpectedEntryParameter = UINT64_C(0x1020304050607080);
 constexpr std::uint64_t kExpectedEntryRdiSentinel = UINT64_C(0x777788889999aaaa);
+constexpr std::uint64_t kExpectedTransformedLocal = UINT64_C(0x458a30bf63ac1619);
 constexpr std::uint64_t kExpectedOptimizedLocal = UINT64_C(0x1e3c1e781e3c1ef0);
 constexpr std::uint64_t kExpectedArithmeticLocal = UINT64_C(0x10203040506070a5);
 constexpr const char* kExpectedEntryCliValue = "entry_parameter = 1161981756646125696";
+constexpr const char* kExpectedTransformedCliValue = "transformed = 5010871133972207129";
 constexpr const char* kExpectedCliValue = "optimized_local = 2178649820992642800";
 
 void require(bool condition, const std::string& message) {
@@ -77,19 +79,24 @@ void test_direct_api(const std::string& fixture) {
   auto debugger = mdbg::Debugger::launch(fixture, {});
   const mdbg::ElfFile elf(fixture);
   const auto entry_function = elf.find_symbol("inspect_entry_parameter");
+  const auto transformed_probe = elf.find_symbol("transformed_local_probe");
   const auto optimized_probe = elf.find_symbol("optimized_local_probe");
   const auto arithmetic_probe = elf.find_symbol("arithmetic_local_probe");
   require(entry_function.has_value(), "DWARF5 entry function symbol is missing");
+  require(transformed_probe.has_value(), "DWARF5 transformed-local probe symbol is missing");
   require(optimized_probe.has_value(), "DWARF5 optimized-local probe symbol is missing");
   require(arithmetic_probe.has_value(), "DWARF5 arithmetic-local probe symbol is missing");
   const auto function_address = static_cast<std::uintptr_t>(
       elf.runtime_address(debugger.pid(), *entry_function));
+  const auto transformed_address = static_cast<std::uintptr_t>(
+      elf.runtime_address(debugger.pid(), *transformed_probe));
   const auto entry_address = entry_value_address(elf, debugger.pid(), *entry_function);
   const auto optimized_address = static_cast<std::uintptr_t>(
       elf.runtime_address(debugger.pid(), *optimized_probe));
   const auto arithmetic_address = static_cast<std::uintptr_t>(
       elf.runtime_address(debugger.pid(), *arithmetic_probe));
   debugger.add_breakpoint(function_address);
+  debugger.add_breakpoint(transformed_address);
   debugger.add_breakpoint(entry_address);
   debugger.add_breakpoint(optimized_address);
   debugger.add_breakpoint(arithmetic_address);
@@ -100,6 +107,25 @@ void test_direct_api(const std::string& fixture) {
           "DWARF5 fixture did not expose the function-entry register state");
   require(debugger.registers().rdi == kExpectedEntryParameter,
           "function-entry breakpoint did not observe the original RDI parameter");
+
+  stop = debugger.continue_execution();
+  require(stop.reason == mdbg::StopReason::Breakpoint &&
+              stop.breakpoint_address == transformed_address,
+          "DWARF5 fixture did not stop while transformed was live");
+  require(debugger.registers().rdi == kExpectedEntryRdiSentinel,
+          "transformed-local probe did not occur after the RDI clobber");
+
+  const auto transformed_value =
+      mdbg::inspect_local_integer(debugger, elf, "transformed");
+  require(transformed_value.name == "transformed",
+          "DWARF5 transformed lookup returned wrong name");
+  require(transformed_value.raw_value == kExpectedTransformedLocal,
+          "DWARF5 transformed lookup returned wrong runtime value");
+  require(transformed_value.byte_size == sizeof(std::uint64_t) &&
+              !transformed_value.is_signed,
+          "DWARF5 transformed lookup returned wrong uint64_t type metadata");
+  require(std::filesystem::equivalent(transformed_value.module_path, fixture),
+          "DWARF5 transformed lookup lost owning module identity");
 
   stop = debugger.continue_execution();
   require(stop.reason == mdbg::StopReason::Breakpoint &&
@@ -236,10 +262,13 @@ std::string run_cli(const std::string& mdbg_path, const std::string& fixture) {
   address_text << "0x" << std::hex << entry_address;
   const std::string script =
       "break inspect_entry_parameter\n"
+      "break transformed_local_probe\n"
       "break " + address_text.str() + "\n"
       "break optimized_local_probe\n"
       "break arithmetic_local_probe\n"
       "continue\n"
+      "continue\n"
+      "print transformed\n"
       "continue\n"
       "print entry_parameter\n"
       "continue\n"
@@ -294,8 +323,11 @@ void test_cli(const std::string& mdbg_path, const std::string& fixture) {
   require(output.find("Breakpoint 1") != std::string::npos &&
               output.find("Breakpoint 2") != std::string::npos &&
               output.find("Breakpoint 3") != std::string::npos &&
-              output.find("Breakpoint 4") != std::string::npos,
+              output.find("Breakpoint 4") != std::string::npos &&
+              output.find("Breakpoint 5") != std::string::npos,
           "DWARF5 CLI did not install all source-value breakpoints\n" + output);
+  require(output.find(kExpectedTransformedCliValue) != std::string::npos,
+          "DWARF5 CLI did not print transformed\n" + output);
   require(output.find(kExpectedEntryCliValue) != std::string::npos,
           "DWARF5 CLI did not print the entry-value parameter\n" + output);
   require(output.find(kExpectedCliValue) != std::string::npos,

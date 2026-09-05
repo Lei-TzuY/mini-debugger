@@ -58,8 +58,9 @@ Move from one traced thread to a deliberate thread model.
 Completed slices:
 
 - P4-A: launched tracees enable `PTRACE_O_TRACECLONE`; `Process` waits across traced tasks with `__WALL`, records the TID on every wait event, reads the kernel-reported child TID from `PTRACE_GETEVENTMSG`, tracks per-TID stopped/running state, and removes exited tasks from the registry. A real pthread fixture exercises clone discovery, the worker's initial ptrace stop, worker exit, leader exit, and empty-registry convergence in both PIE and non-PIE integration runs.
+- P4-B: debugger execution is bound to the active stopped TID. Clone creator stops are held while the new worker's initial ptrace stop becomes the user-visible `ThreadCreated` event; `registers`, continue, single-step, breakpoint RIP repair, and displaced execution target that active TID. Process-wide software-breakpoint ownership remains singular while the restore/step/reinsert window executes with all other traced tasks stopped. Non-final task exit/signal events are distinguished from whole-process termination, and PIE/non-PIE integration proves repeated worker-thread breakpoint hits plus same-TID displaced stepping.
 
-Current slice: P4-B — connect the task-aware process layer to debugger execution semantics. Register access, resume, and single-step must target the active stopped TID; clone-child initial stops and thread exits need deterministic user-visible handling; process-wide software-breakpoint ownership must remain singular while displaced execution is bound to the correct TID.
+Current slice: P4-C — complete multi-thread signal routing and teardown. Forward/suppress decisions must apply to the correct stopped TID, and attached/launched teardown must leave no traced task behind. Hardware watchpoints remain explicitly single-thread-only until per-TID debug-register ownership is designed.
 
 Acceptance criteria:
 
@@ -69,7 +70,7 @@ Acceptance criteria:
 - thread creation/exit and signal routing have regression coverage;
 - detach/teardown leaves no traced thread behind.
 
-P4-A establishes the real two-thread tracee lifecycle and per-TID stop identity before CLI presentation. P4 is not complete yet: debugger-facing execution policy, per-thread displaced execution, signal routing, and teardown still have to cross the same boundary before promotion.
+P4-A established the real two-thread lifecycle; P4-B carries that identity through debugger execution with a single-runner policy. P4 remains open until per-TID signal routing and teardown cross the same boundary.
 
 ## Priority 5: broader CFI recovery
 

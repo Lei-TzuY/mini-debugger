@@ -110,18 +110,24 @@ This seals the current watchpoint milestone. DR1-DR3 allocation, read/read-write
 
 ## Priority 8: controlled inferior state mutation — current frontier
 
-The debugger can inspect selected-thread registers and process memory, and its low-level ptrace layer already contains register and word writes, but there is no debugger-level or CLI contract for deliberately changing inferior state. The next architectural step is to expose mutation without bypassing the ownership invariants already established for threads, software breakpoints, and hardware watchpoints.
+The debugger can now deliberately change a bounded subset of selected-thread register state without bypassing the P4 single-runner ownership model. Process-memory mutation remains the next unresolved part of this frontier because it must cooperate with managed `INT3` ownership rather than exposing raw ptrace writes.
 
-Acceptance for the first coherent slices:
+Completed slice:
 
-- selected-thread general-purpose register assignment performs a bounded read-modify-write of the live register set, changes only the named register, and leaves every non-selected TID untouched;
+- P8-A: `Debugger::set_register()` performs a GETREGS/read-modify-write/SETREGS cycle on `stopped_tid()`, so assignment follows the explicitly selected stopped TID and leaves every non-selected TID untouched;
+- the writable surface is deliberately limited to the sixteen x86-64 general-purpose data/stack registers (`rax` through `r15`, including `rbp`/`rsp`); `rip` and `eflags` remain read-only in this slice so register mutation cannot silently bypass breakpoint program-counter ownership or flag semantics;
+- the CLI exposes the same contract as `set register <name> <value>` with full-value parsing and deterministic assignment errors rather than calling ptrace directly;
+- a deterministic attached pthread fixture pins a known seed in worker `r12`; PIE and non-PIE integration select that worker, mutate and read back `r12`, prove the stopped leader's `r12` is unchanged, detach, then let the worker itself verify the mutated value remained in its execution state.
+
+Current P8-B acceptance:
+
 - process-memory writes round-trip through the debugger API and CLI with explicit bounds and deterministic ptrace failure reporting;
 - a memory write overlapping an installed managed software breakpoint updates the breakpoint's saved original byte while keeping the physical `INT3` installed, so later displaced execution and breakpoint removal observe the user's new program byte rather than stale pre-write state;
 - external mutation that overlaps a currently restored byte during a pending displaced-breakpoint step is rejected or completed through one explicit ownership path; it may not silently corrupt the restore/step/reinsert invariant;
 - debugger-originated memory writes do not fabricate hardware-watchpoint stops because no tracee instruction executed;
-- PIE/non-PIE integration proves register mutation on a selected pthread worker, ordinary memory mutation, managed-breakpoint overlap, and exact readback/cleanup behavior.
+- PIE/non-PIE integration proves ordinary memory mutation, managed-breakpoint overlap, exact readback, and cleanup behavior.
 
-P8 may be split into register and memory slices, but both must use the existing selected-TID and breakpoint ownership model rather than exposing raw ptrace writes as a parallel subsystem.
+P8-B must extend the existing breakpoint ownership model; it must not expose `PTRACE_POKEDATA` as a parallel raw-memory subsystem that can invalidate saved breakpoint bytes.
 
 ## Selection rule
 

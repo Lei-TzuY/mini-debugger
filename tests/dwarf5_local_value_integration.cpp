@@ -16,7 +16,9 @@
 
 namespace {
 
+constexpr std::uint64_t kExpectedEntryParameter = UINT64_C(0x1020304050607080);
 constexpr std::uint64_t kExpectedOptimizedLocal = UINT64_C(0x1e3c1e781e3c1ef0);
+constexpr const char* kExpectedEntryCliValue = "entry_parameter = 1161981756646125696";
 constexpr const char* kExpectedCliValue = "optimized_local = 2178649820992642800";
 
 void require(bool condition, const std::string& message) {
@@ -26,15 +28,38 @@ void require(bool condition, const std::string& message) {
 void test_direct_api(const std::string& fixture) {
   auto debugger = mdbg::Debugger::launch(fixture, {});
   const mdbg::ElfFile elf(fixture);
-  const auto probe = elf.find_symbol("optimized_local_probe");
-  require(probe.has_value(), "DWARF5 optimized-local probe symbol is missing");
-  const auto address =
-      static_cast<std::uintptr_t>(elf.runtime_address(debugger.pid(), *probe));
-  debugger.add_breakpoint(address);
+  const auto entry_probe = elf.find_symbol("entry_parameter_probe");
+  const auto optimized_probe = elf.find_symbol("optimized_local_probe");
+  require(entry_probe.has_value(), "DWARF5 entry-value probe symbol is missing");
+  require(optimized_probe.has_value(), "DWARF5 optimized-local probe symbol is missing");
+  const auto entry_address = static_cast<std::uintptr_t>(
+      elf.runtime_address(debugger.pid(), *entry_probe));
+  const auto optimized_address = static_cast<std::uintptr_t>(
+      elf.runtime_address(debugger.pid(), *optimized_probe));
+  debugger.add_breakpoint(entry_address);
+  debugger.add_breakpoint(optimized_address);
 
-  const auto stop = debugger.continue_execution();
+  auto stop = debugger.continue_execution();
   require(stop.reason == mdbg::StopReason::Breakpoint &&
-              stop.breakpoint_address == address,
+              stop.breakpoint_address == entry_address,
+          "DWARF5 fixture did not stop in the entry-value parameter range");
+  require(debugger.registers().rdi == 0,
+          "entry-value probe must differ from the current RDI register value");
+
+  const auto entry_value =
+      mdbg::inspect_local_integer(debugger, elf, "entry_parameter");
+  require(entry_value.name == "entry_parameter",
+          "DWARF5 entry-value lookup returned wrong name");
+  require(entry_value.raw_value == kExpectedEntryParameter,
+          "DWARF5 entry-value lookup returned wrong historical parameter value");
+  require(entry_value.byte_size == sizeof(std::uint64_t) && !entry_value.is_signed,
+          "DWARF5 entry-value lookup returned wrong uint64_t type metadata");
+  require(std::filesystem::equivalent(entry_value.module_path, fixture),
+          "DWARF5 entry-value lookup lost owning module identity");
+
+  stop = debugger.continue_execution();
+  require(stop.reason == mdbg::StopReason::Breakpoint &&
+              stop.breakpoint_address == optimized_address,
           "DWARF5 fixture did not stop while optimized_local was live");
 
   const auto value = mdbg::inspect_local_integer(debugger, elf, "optimized_local");
@@ -84,7 +109,10 @@ std::string run_cli(const std::string& mdbg_path, const std::string& fixture) {
   ::close(input_pipe[0]);
   ::close(output_pipe[1]);
   const std::string script =
+      "break entry_parameter_probe\n"
       "break optimized_local_probe\n"
+      "continue\n"
+      "print entry_parameter\n"
       "continue\n"
       "print optimized_local\n"
       "continue\n";
@@ -134,8 +162,11 @@ std::string run_cli(const std::string& mdbg_path, const std::string& fixture) {
 
 void test_cli(const std::string& mdbg_path, const std::string& fixture) {
   const auto output = run_cli(mdbg_path, fixture);
-  require(output.find("Breakpoint 1") != std::string::npos,
-          "DWARF5 CLI did not install optimized-local breakpoint\n" + output);
+  require(output.find("Breakpoint 1") != std::string::npos &&
+              output.find("Breakpoint 2") != std::string::npos,
+          "DWARF5 CLI did not install both source-value breakpoints\n" + output);
+  require(output.find(kExpectedEntryCliValue) != std::string::npos,
+          "DWARF5 CLI did not print the entry-value parameter\n" + output);
   require(output.find(kExpectedCliValue) != std::string::npos,
           "DWARF5 CLI did not print optimized_local\n" + output);
 }

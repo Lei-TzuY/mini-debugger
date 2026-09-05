@@ -9,6 +9,7 @@
 #include <cerrno>
 #include <chrono>
 #include <cstdint>
+#include <cstdlib>
 #include <filesystem>
 #include <iostream>
 #include <stdexcept>
@@ -24,6 +25,11 @@ constexpr const char* kExpectedCliValue = "optimized_local = 2178649820992642800
 
 void require(bool condition, const std::string& message) {
   if (!condition) throw std::runtime_error(message);
+}
+
+void dump_location_lists(const std::string& fixture) {
+  const auto command = "readelf --debug-dump=loc --wide \"" + fixture + "\"";
+  (void)std::system(command.c_str());
 }
 
 void test_direct_api(const std::string& fixture) {
@@ -48,8 +54,13 @@ void test_direct_api(const std::string& fixture) {
   require(current_rdi == kExpectedEntryRdiSentinel,
           "entry-value helper did not leave the expected current RDI sentinel");
 
-  const auto entry_value =
-      mdbg::inspect_local_integer(debugger, elf, "entry_parameter");
+  mdbg::LocalScalarValue entry_value;
+  try {
+    entry_value = mdbg::inspect_local_integer(debugger, elf, "entry_parameter");
+  } catch (...) {
+    dump_location_lists(fixture);
+    throw;
+  }
   require(entry_value.name == "entry_parameter",
           "DWARF5 entry-value lookup returned wrong name");
   require(entry_value.raw_value == kExpectedEntryParameter,

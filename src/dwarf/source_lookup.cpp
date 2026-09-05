@@ -53,6 +53,7 @@ constexpr std::uint64_t kDwFormSecOffset = 0x17;
 constexpr std::uint64_t kDwFormExprloc = 0x18;
 constexpr std::uint64_t kDwFormFlagPresent = 0x19;
 
+constexpr std::uint8_t kDwOpReg0 = 0x50;
 constexpr std::uint8_t kDwOpReg5 = 0x55;
 constexpr std::uint8_t kDwOpReg6 = 0x56;
 constexpr std::uint8_t kDwOpFbreg = 0x91;
@@ -482,10 +483,10 @@ std::vector<std::byte> active_location_expression(const DebugSections& sections,
                                                   std::uint64_t virtual_pc,
                                                   std::uint64_t initial_base) {
   if (sections.locations.empty()) {
-    throw std::runtime_error("formal parameter location list requires .debug_loc");
+    throw std::runtime_error("local value location list requires .debug_loc");
   }
   if (offset >= sections.locations.size()) {
-    throw std::runtime_error("formal parameter location-list offset is out of range");
+    throw std::runtime_error("local value location-list offset is out of range");
   }
 
   std::size_t cursor = static_cast<std::size_t>(offset);
@@ -521,7 +522,7 @@ std::vector<std::byte> active_location_expression(const DebugSections& sections,
     }
     cursor = expression_end;
   }
-  throw std::runtime_error("formal parameter has no location for the current PC");
+  throw std::runtime_error("local value has no location for the current PC");
 }
 
 std::uint64_t frame_base(const Debugger& debugger, const ElfFile& module,
@@ -620,7 +621,6 @@ std::optional<LocalIntegerValue> inspect_unit(const DebugSections& sections,
 
   const auto& subprogram_die = dies[*subprogram];
   const auto& value_die = dies[*value_die_index];
-  const bool is_formal_parameter = value_die.tag == kDwTagFormalParameter;
   const auto* location = attribute(value_die, kDwAtLocation);
   const auto* type = attribute(value_die, kDwAtType);
   if (location == nullptr) {
@@ -634,26 +634,32 @@ std::optional<LocalIntegerValue> inspect_unit(const DebugSections& sections,
   std::vector<std::byte> location_expression;
   if (location->form == kDwFormExprloc) {
     location_expression = location->expression;
-  } else if (is_formal_parameter && location->form == kDwFormSecOffset) {
+  } else if (location->form == kDwFormSecOffset) {
     location_expression = active_location_expression(
         sections, location->number, virtual_pc, compilation_unit_base);
-  } else if (location->form == kDwFormSecOffset) {
-    throw std::runtime_error(
-        "optimized local-variable location lists are outside this milestone");
   } else {
     throw std::runtime_error("local value has no supported DW_AT_location form");
   }
 
-  if (location_expression.size() == 1 &&
-      std::to_integer<std::uint8_t>(location_expression.front()) == kDwOpReg5) {
-    const auto raw = truncate_integer(debugger.registers().rdi, integer_type.byte_size);
-    return LocalIntegerValue{module.path(), std::string(name), raw,
-                             integer_type.byte_size, integer_type.is_signed};
+  if (location_expression.size() == 1) {
+    const auto op = std::to_integer<std::uint8_t>(location_expression.front());
+    const auto regs = debugger.registers();
+    if (op == kDwOpReg0) {
+      const auto raw = truncate_integer(regs.rax, integer_type.byte_size);
+      return LocalIntegerValue{module.path(), std::string(name), raw,
+                               integer_type.byte_size, integer_type.is_signed};
+    }
+    if (op == kDwOpReg5) {
+      const auto raw = truncate_integer(regs.rdi, integer_type.byte_size);
+      return LocalIntegerValue{module.path(), std::string(name), raw,
+                               integer_type.byte_size, integer_type.is_signed};
+    }
   }
 
   if (location_expression.empty() ||
       std::to_integer<std::uint8_t>(location_expression.front()) != kDwOpFbreg) {
-    throw std::runtime_error("local value location is not a supported DW_OP_reg5/DW_OP_fbreg form");
+    throw std::runtime_error(
+        "local value location is not a supported DW_OP_reg0/DW_OP_reg5/DW_OP_fbreg form");
   }
   const auto* base_expression = attribute(subprogram_die, kDwAtFrameBase);
   if (base_expression == nullptr || base_expression->form != kDwFormExprloc) {

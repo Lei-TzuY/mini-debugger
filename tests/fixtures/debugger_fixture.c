@@ -13,6 +13,7 @@ static volatile sig_atomic_t worker_marker = 0;
 static volatile sig_atomic_t signal_handler_count = 0;
 static volatile sig_atomic_t signal_handler_tid = 0;
 static volatile sig_atomic_t signal_worker_tid = 0;
+static volatile sig_atomic_t selection_release = 0;
 
 __attribute__((noinline)) void breakpoint_one(void) {
   __asm__ volatile("nop" ::: "memory");
@@ -66,6 +67,11 @@ static void worker_signal_handler(int signal_number) {
   (void)signal_number;
   signal_handler_count += 1;
   signal_handler_tid = (sig_atomic_t)syscall(SYS_gettid);
+}
+
+static void release_selection_worker(int signal_number) {
+  (void)signal_number;
+  selection_release = 1;
 }
 
 static void* lifecycle_worker(void* argument) {
@@ -147,6 +153,30 @@ static int run_threaded_attach(const char* path) {
   return 0;
 }
 
+static void* selectable_worker(void* argument) {
+  (void)argument;
+  worker_marker = 5;
+  while (!selection_release) usleep(1000);
+  breakpoint_one();
+  worker_marker = 6;
+  return NULL;
+}
+
+static int run_threaded_select_attach(const char* path) {
+  struct sigaction action;
+  memset(&action, 0, sizeof(action));
+  action.sa_handler = release_selection_worker;
+  sigemptyset(&action.sa_mask);
+  if (sigaction(SIGUSR2, &action, NULL) != 0) return 101;
+
+  pthread_t thread;
+  if (pthread_create(&thread, NULL, selectable_worker, NULL) != 0) return 102;
+  while (worker_marker != 5) usleep(1000);
+  publish_addresses(path);
+  if (pthread_join(thread, NULL) != 0) return 103;
+  return worker_marker == 6 && fixture_value == 0x1122334455667789ULL ? 0 : 104;
+}
+
 int main(int argc, char** argv) {
   if (argc == 2 && strcmp(argv[1], "thread-lifecycle") == 0) {
     return run_thread_lifecycle();
@@ -155,6 +185,9 @@ int main(int argc, char** argv) {
   if (argc < 3) return 82;
   if (strcmp(argv[2], "attach-threaded") == 0) {
     return run_threaded_attach(argv[1]);
+  }
+  if (strcmp(argv[2], "attach-thread-select") == 0) {
+    return run_threaded_select_attach(argv[1]);
   }
   publish_addresses(argv[1]);
 

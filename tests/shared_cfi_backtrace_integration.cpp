@@ -6,6 +6,10 @@
 #include "source/source_step.hpp"
 #include "unwind/cfi.hpp"
 
+#include <sys/wait.h>
+#include <unistd.h>
+
+#include <cerrno>
 #include <csignal>
 #include <cstdio>
 #include <cstring>
@@ -17,6 +21,72 @@ namespace {
 
 void require(bool condition, const std::string& message) {
   if (!condition) throw std::runtime_error(message);
+}
+
+void write_all(int fd, const std::string& text) {
+  std::size_t offset = 0;
+  while (offset < text.size()) {
+    const auto written = ::write(fd, text.data() + offset, text.size() - offset);
+    if (written == -1 && errno == EINTR) continue;
+    if (written <= 0) throw std::runtime_error("failed to write CLI command stream");
+    offset += static_cast<std::size_t>(written);
+  }
+}
+
+std::string read_all(int fd) {
+  std::string output;
+  char buffer[4096];
+  for (;;) {
+    const auto count = ::read(fd, buffer, sizeof(buffer));
+    if (count == -1 && errno == EINTR) continue;
+    if (count == 0) return output;
+    if (count < 0) throw std::runtime_error("failed to read CLI output");
+    output.append(buffer, static_cast<std::size_t>(count));
+  }
+}
+
+std::size_t occurrence_count(const std::string& text, const std::string& needle) {
+  std::size_t count = 0;
+  std::size_t position = 0;
+  while ((position = text.find(needle, position)) != std::string::npos) {
+    ++count;
+    position += needle.size();
+  }
+  return count;
+}
+
+bool has_module_qualified_backtrace_source(const std::string& output,
+                                           const std::string& module) {
+  const std::string prefix = module + "!";
+  std::size_t begin = 0;
+  while (begin <= output.size()) {
+    const auto end = output.find('\n', begin);
+    const auto line = output.substr(begin, end == std::string::npos ? end : end - begin);
+    if (line.rfind("#0 ", 0) == 0 && occurrence_count(line, prefix) >= 2 &&
+        line.find("shared_cfi_library.c:") != std::string::npos) {
+      return true;
+    }
+    if (end == std::string::npos) break;
+    begin = end + 1;
+  }
+  return false;
+}
+
+bool has_module_qualified_source_position(const std::string& output,
+                                          const std::string& module) {
+  const std::string prefix = module + "!";
+  std::size_t begin = 0;
+  while (begin <= output.size()) {
+    const auto end = output.find('\n', begin);
+    const auto line = output.substr(begin, end == std::string::npos ? end : end - begin);
+    if (line.rfind("0x", 0) == 0 && line.find(prefix) != std::string::npos &&
+        line.find("shared_cfi_library.c:") != std::string::npos) {
+      return true;
+    }
+    if (end == std::string::npos) break;
+    begin = end + 1;
+  }
+  return false;
 }
 
 void require_same_module(const std::string& actual, const std::string& expected,
@@ -277,6 +347,77 @@ void test_shared_library_cfi(const std::string& driver, const std::string& libra
           "shared-library CFI fixture did not exit cleanly");
 }
 
+void test_cli_module_qualification(const std::string& integration_path,
+                                   const std::string& driver,
+                                   const std::string& library) {
+  const auto mdbg_path =
+      (std::filesystem::absolute(integration_path).parent_path() / "mdbg").string();
+  require(std::filesystem::exists(mdbg_path), "mdbg executable is missing beside integration test");
+
+  int input_pipe[2] = {-1, -1};
+  int output_pipe[2] = {-1, -1};
+  require(::pipe(input_pipe) == 0, "failed to create CLI stdin pipe");
+  require(::pipe(output_pipe) == 0, "failed to create CLI stdout pipe");
+
+  const pid_t child = ::fork();
+  require(child != -1, "failed to fork CLI module-rendering child");
+  if (child == 0) {
+    ::dup2(input_pipe[0], STDIN_FILENO);
+    ::dup2(output_pipe[1], STDOUT_FILENO);
+    ::dup2(output_pipe[1], STDERR_FILENO);
+    ::close(input_pipe[0]);
+    ::close(input_pipe[1]);
+    ::close(output_pipe[0]);
+    ::close(output_pipe[1]);
+    ::execl(mdbg_path.c_str(), mdbg_path.c_str(), driver.c_str(), nullptr);
+    _exit(127);
+  }
+
+  ::close(input_pipe[0]);
+  ::close(output_pipe[1]);
+  try {
+    write_all(input_pipe[1],
+              "continue\n"
+              "break shared_cfi_probe\n"
+              "continue\n"
+              "bt\n"
+              "list\n"
+              "quit\n");
+    ::close(input_pipe[1]);
+    input_pipe[1] = -1;
+
+    const auto output = read_all(output_pipe[0]);
+    ::close(output_pipe[0]);
+    output_pipe[0] = -1;
+
+    int status = 0;
+    pid_t waited;
+    do {
+      waited = ::waitpid(child, &status, 0);
+    } while (waited == -1 && errno == EINTR);
+    require(waited == child && WIFEXITED(status) && WEXITSTATUS(status) == 0,
+            "mdbg CLI module-rendering workflow did not exit cleanly\n" + output);
+
+    require(output.find(library + "!shared_cfi_probe") != std::string::npos,
+            "shared-object breakpoint stop did not preserve module identity\n" + output);
+    require(has_module_qualified_backtrace_source(output, library),
+            "backtrace frame did not qualify both symbol and source with the owning module\n" +
+                output);
+    require(has_module_qualified_source_position(output, library),
+            "list did not qualify the shared-object source position with its module\n" + output);
+    require(output.find("scratch[0] = 1;") != std::string::npos,
+            "module-qualified list lost bounded real-file source context\n" + output);
+  } catch (...) {
+    if (input_pipe[1] != -1) ::close(input_pipe[1]);
+    if (output_pipe[0] != -1) ::close(output_pipe[0]);
+    ::kill(child, SIGKILL);
+    int status = 0;
+    while (::waitpid(child, &status, 0) == -1 && errno == EINTR) {
+    }
+    throw;
+  }
+}
+
 void test_dwarf5_module_source(const std::string& dwarf5_fixture) {
   auto debugger = mdbg::Debugger::launch(dwarf5_fixture, {});
   const mdbg::ElfFile executable(dwarf5_fixture);
@@ -308,6 +449,7 @@ int main(int argc, char** argv) {
   if (argc != 4) return 2;
   try {
     test_shared_library_cfi(argv[1], argv[2]);
+    test_cli_module_qualification(argv[0], argv[1], argv[2]);
     test_dwarf5_module_source(argv[3]);
     return 0;
   } catch (const std::exception& error) {

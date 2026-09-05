@@ -182,6 +182,17 @@ void test_worker_owned_watchpoint(const std::string& fixture) {
     require(worker_armed.dr0 != worker_before.dr0 || worker_armed.dr7 != worker_before.dr7,
             "worker debug-register state did not change when watchpoint was armed");
 
+    debugger.select_thread(child.pid);
+    require(debugger.active_tid() == child.pid,
+            "non-owner leader could not be selected while worker watchpoint was active");
+    require_debug_registers(debug_registers(child.pid), leader_before,
+                            "selecting the non-owner leader inherited worker debug registers");
+    require_debug_registers(debug_registers(worker), worker_armed,
+                            "selecting the non-owner leader changed owner debug registers");
+    debugger.select_thread(worker);
+    require(debugger.active_tid() == worker,
+            "watchpoint owner could not be reselected after non-owner selection");
+
     require(::syscall(SYS_tgkill, child.pid, worker, SIGUSR2) == 0,
             "failed to queue targeted worker release signal");
     auto info = debugger.continue_execution();

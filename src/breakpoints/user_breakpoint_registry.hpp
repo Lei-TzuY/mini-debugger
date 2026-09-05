@@ -27,6 +27,20 @@ struct UserBreakpoint {
 };
 
 class UserBreakpointRegistry {
+ private:
+  enum class BackendKind { Managed, Deferred };
+
+  struct Entry {
+    std::string expression;
+    BackendKind kind;
+    std::size_t backend_id;
+  };
+
+  struct DomainState {
+    std::optional<DeferredBreakpoints> deferred;
+    std::map<std::size_t, Entry> entries;
+  };
+
  public:
   UserBreakpointRegistry(Debugger& debugger, const ElfFile& executable)
       : debugger_(debugger), executable_(executable) {}
@@ -34,7 +48,8 @@ class UserBreakpointRegistry {
   std::size_t add_address(std::uintptr_t address, std::string expression) {
     const auto backend_id = debugger_.add_breakpoint(address);
     const auto id = next_id_++;
-    entries_.emplace(id, Entry{std::move(expression), BackendKind::Managed, backend_id});
+    active_domain().entries.emplace(
+        id, Entry{std::move(expression), BackendKind::Managed, backend_id});
     return id;
   }
 
@@ -45,10 +60,11 @@ class UserBreakpointRegistry {
       return add_address(resolved->address, std::move(symbol));
     }
 
-    ensure_deferred();
-    const auto backend_id = deferred_->add_symbol(symbol);
+    auto& domain = active_domain();
+    ensure_deferred(domain);
+    const auto backend_id = domain.deferred->add_symbol(symbol);
     const auto id = next_id_++;
-    entries_.emplace(id, Entry{std::move(symbol), BackendKind::Deferred, backend_id});
+    domain.entries.emplace(id, Entry{std::move(symbol), BackendKind::Deferred, backend_id});
     return id;
   }
 
@@ -61,77 +77,99 @@ class UserBreakpointRegistry {
       return add_address(resolved->address, std::move(expression));
     }
 
-    ensure_deferred();
-    const auto backend_id = deferred_->add_source(std::move(file), line);
+    auto& domain = active_domain();
+    ensure_deferred(domain);
+    const auto backend_id = domain.deferred->add_source(std::move(file), line);
     const auto id = next_id_++;
-    entries_.emplace(id, Entry{std::move(expression), BackendKind::Deferred, backend_id});
+    domain.entries.emplace(id, Entry{std::move(expression), BackendKind::Deferred, backend_id});
     return id;
   }
 
   bool remove(std::size_t id) {
-    const auto it = entries_.find(id);
-    if (it == entries_.end()) return false;
+    auto* domain = active_domain_if_present();
+    if (domain == nullptr) return false;
+    const auto it = domain->entries.find(id);
+    if (it == domain->entries.end()) return false;
 
     bool removed = false;
     if (it->second.kind == BackendKind::Managed) {
       removed = debugger_.remove_breakpoint(it->second.backend_id);
     } else {
-      if (!deferred_) {
+      if (!domain->deferred) {
         throw std::logic_error("deferred user breakpoint has no loader controller");
       }
-      removed = deferred_->remove(it->second.backend_id);
+      removed = domain->deferred->remove(it->second.backend_id);
     }
     if (!removed) {
       throw std::logic_error("user breakpoint backend disappeared from registry ownership");
     }
-    entries_.erase(it);
+    domain->entries.erase(it);
     return true;
   }
 
   void on_image_replaced() noexcept {
-    deferred_.reset();
-    entries_.clear();
+    auto* domain = active_domain_if_present();
+    if (domain == nullptr) return;
+    domain->deferred.reset();
+    domain->entries.clear();
   }
 
   [[nodiscard]] std::optional<UserBreakpoint> breakpoint(std::size_t id) const {
-    const auto it = entries_.find(id);
-    if (it == entries_.end()) return std::nullopt;
-    return snapshot(id, it->second);
+    const auto* domain = active_domain_if_present();
+    if (domain == nullptr) return std::nullopt;
+    const auto it = domain->entries.find(id);
+    if (it == domain->entries.end()) return std::nullopt;
+    return snapshot(id, it->second, *domain);
   }
 
   [[nodiscard]] std::vector<UserBreakpoint> breakpoints() const {
+    const auto* domain = active_domain_if_present();
+    if (domain == nullptr) return {};
+
     std::vector<UserBreakpoint> result;
-    result.reserve(entries_.size());
-    for (const auto& [id, entry] : entries_) result.push_back(snapshot(id, entry));
+    result.reserve(domain->entries.size());
+    for (const auto& [id, entry] : domain->entries) {
+      result.push_back(snapshot(id, entry, *domain));
+    }
     return result;
   }
 
   [[nodiscard]] bool has_pending() const {
-    for (const auto& [id, entry] : entries_) {
-      if (snapshot(id, entry).state == UserBreakpointState::Pending) return true;
+    const auto* domain = active_domain_if_present();
+    if (domain == nullptr) return false;
+    for (const auto& [id, entry] : domain->entries) {
+      if (snapshot(id, entry, *domain).state == UserBreakpointState::Pending) return true;
     }
     return false;
   }
 
   StopInfo continue_execution(SignalPolicy policy = SignalPolicy::Suppress) {
-    if (deferred_) return deferred_->continue_execution(policy);
+    auto* domain = active_domain_if_present();
+    if (domain != nullptr && domain->deferred) {
+      return domain->deferred->continue_execution(policy);
+    }
     return debugger_.continue_execution(policy);
   }
 
  private:
-  enum class BackendKind { Managed, Deferred };
+  DomainState& active_domain() { return domains_[debugger_.pid()]; }
 
-  struct Entry {
-    std::string expression;
-    BackendKind kind;
-    std::size_t backend_id;
-  };
-
-  void ensure_deferred() {
-    if (!deferred_) deferred_.emplace(debugger_, executable_);
+  DomainState* active_domain_if_present() {
+    const auto it = domains_.find(debugger_.pid());
+    return it == domains_.end() ? nullptr : &it->second;
   }
 
-  [[nodiscard]] UserBreakpoint snapshot(std::size_t id, const Entry& entry) const {
+  const DomainState* active_domain_if_present() const {
+    const auto it = domains_.find(debugger_.pid());
+    return it == domains_.end() ? nullptr : &it->second;
+  }
+
+  void ensure_deferred(DomainState& domain) {
+    if (!domain.deferred) domain.deferred.emplace(debugger_, executable_);
+  }
+
+  [[nodiscard]] UserBreakpoint snapshot(std::size_t id, const Entry& entry,
+                                        const DomainState& domain) const {
     if (entry.kind == BackendKind::Managed) {
       const auto managed = debugger_.breakpoints();
       const auto it =
@@ -146,8 +184,10 @@ class UserBreakpointRegistry {
                             : UserBreakpointState::TemporarilyRestored};
     }
 
-    if (!deferred_) throw std::logic_error("deferred user breakpoint has no loader controller");
-    const auto deferred = deferred_->breakpoints();
+    if (!domain.deferred) {
+      throw std::logic_error("deferred user breakpoint has no loader controller");
+    }
+    const auto deferred = domain.deferred->breakpoints();
     const auto request = std::find_if(
         deferred.begin(), deferred.end(), [&](const DeferredBreakpoint& breakpoint) {
           return breakpoint.request_id == entry.backend_id;
@@ -174,8 +214,7 @@ class UserBreakpointRegistry {
 
   Debugger& debugger_;
   const ElfFile& executable_;
-  std::optional<DeferredBreakpoints> deferred_;
-  std::map<std::size_t, Entry> entries_;
+  std::map<pid_t, DomainState> domains_;
   std::size_t next_id_{1};
 };
 

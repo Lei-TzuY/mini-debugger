@@ -2,7 +2,7 @@
 
 #define PARAMETER_EXPECTED UINT64_C(0x1020304050607080)
 #define ENTRY_PARAMETER_XOR UINT64_C(0x55aa00ff33cc6699)
-#define ENTRY_RESULT_EXPECTED UINT64_C(0x458a30bf63ac1619)
+#define ENTRY_RESULT_EXPECTED UINT64_C(0x54a805fe32c96390)
 #define OPTIMIZED_LOCAL_EXPECTED UINT64_C(0x1e3c1e781e3c1ef0)
 
 volatile uint64_t parameter_seed = UINT64_C(0x1122334455667788);
@@ -17,16 +17,21 @@ __attribute__((noinline)) uint64_t inspect_parameter_value(uint64_t parameter) {
   return parameter;
 }
 
+__attribute__((noinline)) uint64_t clobber_argument_registers(
+    uint64_t first, uint64_t second, uint64_t third,
+    uint64_t fourth, uint64_t fifth, uint64_t sixth) {
+  return parameter_seed ^ first ^ (second << 8U) ^ (third << 16U) ^
+         (fourth << 24U) ^ (fifth << 32U) ^ (sixth << 40U);
+}
+
 __attribute__((noinline)) uint64_t inspect_entry_parameter(uint64_t entry_parameter) {
-  uint64_t transformed = entry_parameter ^ ENTRY_PARAMETER_XOR;
-  __asm__ volatile("xorl %%edi, %%edi\n"
-                   ".globl entry_parameter_probe\n"
+  const uint64_t transformed = entry_parameter ^ ENTRY_PARAMETER_XOR;
+  const uint64_t side_effect = clobber_argument_registers(1, 2, 3, 4, 5, 6);
+  __asm__ volatile(".globl entry_parameter_probe\n"
                    "entry_parameter_probe:\n"
                    "nop\n"
-                   : "+a"(transformed)
-                   :
-                   : "rdi", "cc", "memory");
-  return transformed;
+                   ::: "memory");
+  return transformed ^ side_effect;
 }
 
 __attribute__((noinline)) uint64_t inspect_optimized_local(void) {

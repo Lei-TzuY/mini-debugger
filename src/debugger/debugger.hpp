@@ -147,8 +147,8 @@ class Debugger {
   Debugger(Process process, StopInfo initial_stop, std::string executable_path);
 
   [[nodiscard]] pid_t stopped_tid() const;
-  [[nodiscard]] bool has_live_retained_process() const noexcept;
-  void swap_active_process();
+  [[nodiscard]] std::optional<pid_t> first_stopped_retained_process() const noexcept;
+  void swap_active_process(pid_t pid);
   WaitEvent wait_active_process();
   StopInfo wait_and_classify(bool expected_single_step = false);
   int resume_signal(SignalPolicy policy, pid_t tid) const;
@@ -174,7 +174,7 @@ class Debugger {
   std::size_t next_watchpoint_id_{1};
   std::set<pid_t> pending_thread_starts_;
   std::map<pid_t, int> pending_signals_;
-  std::optional<RetainedProcessDomain> retained_process_;
+  std::map<pid_t, RetainedProcessDomain> retained_processes_;
 };
 
 }  // namespace mdbg

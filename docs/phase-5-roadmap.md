@@ -30,7 +30,21 @@ Completed Priority 1 contract:
 - direct API and real CLI coverage prove `arithmetic_local == 0x10203040506070a5` for PIE and non-PIE, and the permanent GCC/Clang-large matrix remains green;
 - malformed offsets, missing `DW_OP_stack_value`, trailing operations, and other `DW_OP_bregN` registers remain fail-closed.
 
-The same GCC debug output also contains more complex register-relative arithmetic such as constant/XOR/shift expressions in other location ranges. Priority 1 deliberately does not interpret those expressions: they remain candidates only if a future current-PC source-value workflow independently requires them.
+## Priority 2: compiler-preserved RBX XOR stack values — complete
+
+The third Phase 5 slice promotes one of the previously deferred arithmetic expressions only after a real current-PC workflow requires it. `inspect_entry_parameter()` computes `transformed = entry_parameter ^ 0x55aa00ff33cc6699`, then calls a function that deliberately clobbers current RDI before an exported `transformed_local_probe`. GCC 13.3 and Clang 18.1.3 both select the active post-call location expression `DW_OP_breg3 (rbx): 0; DW_OP_constu 6172747335350380185; DW_OP_xor; DW_OP_stack_value` at that probe.
+
+Completed Priority 2 contract:
+
+- test-first PIE and non-PIE sessions under both permanent compiler lanes reach the real post-call probe, verify current RDI has already become the sentinel `0x777788889999aaaa`, and then fail specifically because the selected RBX/XOR expression is unsupported;
+- the fixture keeps `transformed` unqualified so this slice isolates expression semantics instead of implicitly adding a separate `DW_TAG_const_type` capability; independent compiler probes confirm GCC and Clang still select the same post-call RBX/XOR expression;
+- the evaluator accepts only `DW_OP_breg3`, one signed LEB128 offset, `DW_OP_constu`, one unsigned LEB128 constant, `DW_OP_xor`, one trailing `DW_OP_stack_value`, and no additional operations;
+- evaluation reads RBX from the currently selected stopped TID, applies checked signed base adjustment, XORs the compiler-provided constant, and truncates through the already-resolved scalar type width;
+- direct API and real CLI coverage prove `transformed == 0x458a30bf63ac1619` while current RDI remains the clobbered sentinel, so recovery cannot accidentally substitute the original argument register or historical entry state;
+- existing entry-value, `DW_OP_breg5`, register, frame-base, pointer, structure, process-domain, and debugger execution coverage stays green under GCC and Clang-large;
+- other `DW_OP_bregN` registers, shift/piece/dereference forms, alternative arithmetic sequences, malformed LEB128 operands, missing `DW_OP_stack_value`, and trailing operations remain fail-closed.
+
+Priority 2 still does not create a general DWARF expression stack machine. The larger multi-register XOR/shift expressions visible elsewhere in compiler output remain unsupported until a separate active current-PC workflow independently requires them.
 
 ## Current frontier: next compiler-produced expression failure
 

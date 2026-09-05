@@ -73,6 +73,7 @@ constexpr std::uint8_t kDwLleBaseAddress = 0x06;
 constexpr std::uint8_t kDwOpReg0 = 0x50;
 constexpr std::uint8_t kDwOpReg5 = 0x55;
 constexpr std::uint8_t kDwOpReg6 = 0x56;
+constexpr std::uint8_t kDwOpBreg5 = 0x75;
 constexpr std::uint8_t kDwOpFbreg = 0x91;
 constexpr std::uint8_t kDwOpStackValue = 0x9f;
 constexpr std::uint8_t kDwOpEntryValue = 0xa3;
@@ -1036,6 +1037,28 @@ std::uint64_t truncate_integer(std::uint64_t value, std::size_t byte_size) {
   return value & ((std::uint64_t{1} << bits) - 1U);
 }
 
+std::uint64_t evaluate_breg5_stack_value(const std::vector<std::byte>& expression,
+                                         const Debugger& debugger) {
+  if (expression.empty() ||
+      std::to_integer<std::uint8_t>(expression.front()) != kDwOpBreg5) {
+    throw std::runtime_error(
+        "local value location is not the compiler-proven DW_OP_breg5 form");
+  }
+  std::size_t cursor = 1;
+  const auto offset =
+      read_sleb(expression, cursor, expression.size(), "DW_OP_breg5 offset");
+  if (cursor >= expression.size() ||
+      std::to_integer<std::uint8_t>(expression[cursor]) != kDwOpStackValue) {
+    throw std::runtime_error(
+        "DW_OP_breg5 value requires the compiler-proven trailing DW_OP_stack_value");
+  }
+  ++cursor;
+  if (cursor != expression.size()) {
+    throw std::runtime_error("unsupported trailing operations after DW_OP_breg5 value");
+  }
+  return add_signed(debugger.registers().rdi, offset, "DW_OP_breg5 value");
+}
+
 std::uint64_t evaluate_entry_rdi(
     const std::vector<std::byte>& expression, const Debugger& debugger,
     const ElfFile& module, const Die& subprogram_die) {
@@ -1194,13 +1217,23 @@ std::optional<LocalScalarValue> inspect_unit(const DebugSections& sections,
                             value_type.kind};
   }
 
+  if (value_type.kind != LocalValueKind::Structure && !location_expression.empty() &&
+      std::to_integer<std::uint8_t>(location_expression.front()) == kDwOpBreg5) {
+    const auto raw = truncate_integer(
+        evaluate_breg5_stack_value(location_expression, debugger),
+        value_type.byte_size);
+    return LocalScalarValue{module.path(), std::string(name), raw,
+                            value_type.byte_size, value_type.is_signed,
+                            value_type.kind};
+  }
+
   if (location_expression.empty() ||
       std::to_integer<std::uint8_t>(location_expression.front()) != kDwOpFbreg) {
     if (value_type.kind == LocalValueKind::Structure) {
       throw std::runtime_error("local struct is not in the supported DW_OP_fbreg storage form");
     }
     throw std::runtime_error(
-        "local value location is not a supported DW_OP_reg0/DW_OP_reg5/DW_OP_fbreg form");
+        "local value location is not a supported DW_OP_reg0/DW_OP_reg5/DW_OP_breg5/DW_OP_fbreg form");
   }
   const auto* base_expression = attribute(subprogram_die, kDwAtFrameBase);
   if (base_expression == nullptr || base_expression->form != kDwFormExprloc) {

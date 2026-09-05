@@ -18,6 +18,20 @@ Completed Priority 0 contract:
 
 Priority 0 does not create a general DWARF stack machine. Historical function-entry state remains bounded to debugger-observed managed breakpoint stops; the implementation does not claim arbitrary frame reconstruction, recursion-aware entry histories, or call-site parameter recovery.
 
+## Priority 1: GCC register-relative stack values — complete
+
+The second Phase 5 slice is again selected from a real active compiler location rather than from the opcode table. The `-O1 -g -gdwarf-5` fixture keeps `arithmetic_local = parameter + 0x25` live at an exported probe. GCC 13.3 selects the current-PC location expression `DW_OP_breg5 (rdi): 37; DW_OP_stack_value` for that probe, while Clang 18.1.3 materializes the same source local in `DW_OP_reg0 (rax)` and therefore remains covered by the pre-existing register path.
+
+Completed Priority 1 contract:
+
+- test-first GCC PIE and non-PIE sessions reach the real arithmetic-local probe with module, lexical-scope, type, and location-list selection already resolved, then fail specifically because the active `DW_OP_breg5 ...; DW_OP_stack_value` expression is unsupported; the Clang-large lane stays green on the same source workflow;
+- the evaluator accepts only the compiler-proven `DW_OP_breg5`, one signed LEB128 offset, one trailing `DW_OP_stack_value`, and no additional operations;
+- evaluation reads RDI from the currently selected stopped TID, performs checked signed 64-bit addition, then truncates through the already-resolved scalar type width before returning the value with existing module/type ownership;
+- direct API and real CLI coverage prove `arithmetic_local == 0x10203040506070a5` for PIE and non-PIE, and the permanent GCC/Clang-large matrix remains green;
+- malformed offsets, missing `DW_OP_stack_value`, trailing operations, and other `DW_OP_bregN` registers remain fail-closed.
+
+The same GCC debug output also contains more complex register-relative arithmetic such as constant/XOR/shift expressions in other location ranges. Priority 1 deliberately does not interpret those expressions: they remain candidates only if a future current-PC source-value workflow independently requires them.
+
 ## Current frontier: next compiler-produced expression failure
 
 Do not select the next opcode family from the DWARF specification by enumeration. First find a real GCC or Clang current-PC location expression that the existing evaluator rejects in an otherwise valid source-value workflow, preserve the exact compiler evidence, and then add only the minimum semantics and ownership state required by that failure.

@@ -92,7 +92,9 @@ void test_direct_api(const std::string& fixture) {
   require(current_rdi == kExpectedEntryRdiSentinel,
           "entry-value helper did not leave the expected current RDI sentinel");
 
-  const auto entry_value =\n      mdbg::inspect_local_integer(debugger, elf, "entry_parameter");\n  require(entry_value.name == "entry_parameter",
+  const auto entry_value =
+      mdbg::inspect_local_integer(debugger, elf, "entry_parameter");
+  require(entry_value.name == "entry_parameter",
           "DWARF5 entry-value lookup returned wrong name");
   require(entry_value.raw_value == kExpectedEntryParameter,
           "DWARF5 entry-value lookup returned " + std::to_string(entry_value.raw_value) +

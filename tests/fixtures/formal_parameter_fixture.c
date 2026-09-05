@@ -50,7 +50,7 @@ __attribute__((noinline)) uint64_t inspect_optimized_local(void) {
 }
 
 __attribute__((noinline)) uint64_t inspect_arithmetic_local(uint64_t parameter) {
-  const uint64_t arithmetic_local = parameter + ARITHMETIC_ADDEND;
+  uint64_t arithmetic_local = parameter + ARITHMETIC_ADDEND;
   __asm__ volatile(".globl arithmetic_local_probe\n"
                    "arithmetic_local_probe:\n"
                    "nop\n"

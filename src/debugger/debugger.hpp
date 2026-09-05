@@ -49,6 +49,12 @@ struct Watchpoint {
   std::size_t length;
 };
 
+struct ThreadInfo {
+  pid_t tid;
+  ProcessState state;
+  bool active;
+};
+
 class Debugger {
  public:
   ~Debugger();
@@ -66,6 +72,8 @@ class Debugger {
   [[nodiscard]] ProcessState state() const noexcept { return process_.state(); }
   [[nodiscard]] ProcessOrigin origin() const noexcept { return process_.origin(); }
   [[nodiscard]] const StopInfo& stop_info() const noexcept { return stop_info_; }
+  [[nodiscard]] std::vector<ThreadInfo> threads() const;
+  void select_thread(pid_t tid);
 
   StopInfo continue_execution(SignalPolicy policy = SignalPolicy::Suppress);
   StopInfo single_step(SignalPolicy policy = SignalPolicy::Suppress);
@@ -101,7 +109,7 @@ class Debugger {
 
   [[nodiscard]] pid_t stopped_tid() const;
   StopInfo wait_and_classify(bool expected_single_step = false);
-  int resume_signal(SignalPolicy policy) const;
+  int resume_signal(SignalPolicy policy, pid_t tid) const;
   void prepare_breakpoint_hit(std::uintptr_t address, user_regs_struct regs, pid_t tid);
   StopInfo step_over_pending_breakpoint(bool expose_single_step);
   void reinsert_breakpoint(std::uintptr_t address, pid_t tid);
@@ -120,6 +128,7 @@ class Debugger {
   std::optional<DebugRegisterSnapshot> watchpoint_register_snapshot_;
   std::size_t next_watchpoint_id_{1};
   std::set<pid_t> pending_thread_starts_;
+  std::map<pid_t, int> pending_signals_;
 };
 
 }  // namespace mdbg

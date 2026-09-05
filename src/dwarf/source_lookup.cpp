@@ -32,6 +32,7 @@ constexpr std::uint64_t kDwTagLexicalBlock = 0x0b;
 constexpr std::uint64_t kDwTagPointerType = 0x0f;
 constexpr std::uint64_t kDwTagStructureType = 0x13;
 constexpr std::uint64_t kDwTagTypedef = 0x16;
+constexpr std::uint64_t kDwTagInlinedSubroutine = 0x1d;
 constexpr std::uint64_t kDwTagBaseType = 0x24;
 constexpr std::uint64_t kDwTagSubprogram = 0x2e;
 constexpr std::uint64_t kDwTagVariable = 0x34;
@@ -41,6 +42,7 @@ constexpr std::uint64_t kDwAtName = 0x03;
 constexpr std::uint64_t kDwAtByteSize = 0x0b;
 constexpr std::uint64_t kDwAtLowPc = 0x11;
 constexpr std::uint64_t kDwAtHighPc = 0x12;
+constexpr std::uint64_t kDwAtAbstractOrigin = 0x31;
 constexpr std::uint64_t kDwAtDataMemberLocation = 0x38;
 constexpr std::uint64_t kDwAtEncoding = 0x3e;
 constexpr std::uint64_t kDwAtFrameBase = 0x40;
@@ -97,6 +99,7 @@ constexpr std::uint64_t kDwAteSigned = 0x05;
 constexpr std::uint64_t kDwAteUnsigned = 0x07;
 constexpr std::size_t kMaxLocalStructSize = 256;
 constexpr std::size_t kMaxLocalStructMembers = 32;
+constexpr unsigned kMaxAbstractOriginDepth = 8;
 
 struct DebugSections {
   std::vector<std::byte> info;
@@ -461,6 +464,29 @@ std::optional<std::size_t> die_index_by_offset(const std::vector<Die>& dies,
   return std::nullopt;
 }
 
+const AttributeValue* attribute_with_abstract_origin(const std::vector<Die>& dies,
+                                                     std::size_t die_index,
+                                                     std::uint64_t name) {
+  for (unsigned depth = 0; depth < kMaxAbstractOriginDepth; ++depth) {
+    if (const auto* direct = attribute(dies[die_index], name)) return direct;
+    const auto* origin = attribute(dies[die_index], kDwAtAbstractOrigin);
+    if (origin == nullptr) return nullptr;
+    if (origin->form != kDwFormRef4) {
+      throw std::runtime_error(
+          "inlined local abstract origin does not use supported DW_FORM_ref4");
+    }
+    const auto next = die_index_by_offset(dies, origin->number);
+    if (!next) {
+      throw std::runtime_error("inlined local abstract origin references an unknown DIE");
+    }
+    if (*next == die_index) {
+      throw std::runtime_error("inlined local abstract origin is self-referential");
+    }
+    die_index = *next;
+  }
+  throw std::runtime_error("inlined local abstract-origin chain is too deep");
+}
+
 bool is_descendant_of(const std::vector<Die>& dies, std::size_t child,
                       std::size_t ancestor) {
   auto parent = dies[child].parent;
@@ -746,21 +772,23 @@ bool die_contains_pc(const Die& die, std::uint64_t pc) {
   return pc >= low->number && pc < high_pc;
 }
 
-std::optional<std::size_t> active_lexical_depth(const std::vector<Die>& dies,
-                                                std::size_t value_index,
-                                                std::size_t subprogram,
-                                                std::uint64_t pc) {
+std::optional<std::size_t> active_scope_depth(const std::vector<Die>& dies,
+                                              std::size_t value_index,
+                                              std::size_t subprogram,
+                                              std::uint64_t pc) {
   auto parent = dies[value_index].parent;
   if (!parent) return std::nullopt;
   std::size_t depth = 0;
   while (*parent != subprogram) {
     const auto& scope = dies[*parent];
-    if (scope.tag != kDwTagLexicalBlock) return std::nullopt;
+    if (scope.tag != kDwTagLexicalBlock && scope.tag != kDwTagInlinedSubroutine) {
+      return std::nullopt;
+    }
     const auto* low = attribute(scope, kDwAtLowPc);
     const auto* high = attribute(scope, kDwAtHighPc);
     if (low == nullptr || high == nullptr || low->form != kDwFormAddr) {
       throw std::runtime_error(
-          "lexical block does not use the supported DW_AT_low_pc/DW_AT_high_pc range");
+          "local scope does not use the supported DW_AT_low_pc/DW_AT_high_pc range");
     }
     if (!die_contains_pc(scope, pc)) return std::nullopt;
     ++depth;
@@ -1351,17 +1379,14 @@ std::optional<LocalScalarValue> inspect_unit(const DebugSections& sections,
     const bool supported_value_tag =
         dies[index].tag == kDwTagVariable || dies[index].tag == kDwTagFormalParameter;
     if (!supported_value_tag) continue;
-    const auto* die_name = attribute(dies[index], kDwAtName);
+    const auto* die_name = attribute_with_abstract_origin(dies, index, kDwAtName);
     if (die_name == nullptr || die_name->text != name) continue;
 
-    std::optional<std::size_t> depth;
-    if (dies[index].tag == kDwTagFormalParameter) {
-      if (dies[index].parent == *subprogram) depth = 0;
-    } else {
-      depth = active_lexical_depth(dies, index, *subprogram, virtual_pc);
-      if (!depth && is_descendant_of(dies, index, *subprogram)) nested_name = true;
+    const auto depth = active_scope_depth(dies, index, *subprogram, virtual_pc);
+    if (!depth) {
+      if (is_descendant_of(dies, index, *subprogram)) nested_name = true;
+      continue;
     }
-    if (!depth) continue;
 
     if (!value_die_index || *depth > *best_depth) {
       value_die_index = index;
@@ -1385,7 +1410,8 @@ std::optional<LocalScalarValue> inspect_unit(const DebugSections& sections,
   const auto& subprogram_die = dies[*subprogram];
   const auto& value_die = dies[*value_die_index];
   const auto* location = attribute(value_die, kDwAtLocation);
-  const auto* type = attribute(value_die, kDwAtType);
+  const auto* type =
+      attribute_with_abstract_origin(dies, *value_die_index, kDwAtType);
   if (location == nullptr) {
     throw std::runtime_error("local value has no DW_AT_location");
   }

@@ -43,6 +43,12 @@ std::optional<SourceLocation> source_only(
   return position->source;
 }
 
+std::optional<std::string> module_only(
+    const std::optional<ModuleSourcePosition>& position) {
+  if (!position) return std::nullopt;
+  return position->module_path;
+}
+
 std::optional<std::uintptr_t> supported_call_return_address(
     const Debugger& debugger) {
   const auto rip = static_cast<std::uintptr_t>(debugger.registers().rip);
@@ -106,16 +112,18 @@ SourceStepResult step_source(Debugger& debugger, const ElfFile& elf,
     const auto source = current_module_source(debugger, elf);
 
     if (stop.reason != StopReason::SingleStep) {
-      return {SourceStepStopReason::Interrupted, stop, source_only(source), instructions};
+      return {SourceStepStopReason::Interrupted, stop, source_only(source), instructions,
+              module_only(source)};
     }
     if (source && !same_source_line(*source, *start)) {
-      return {SourceStepStopReason::LineChanged, stop, source_only(source), instructions};
+      return {SourceStepStopReason::LineChanged, stop, source_only(source), instructions,
+              module_only(source)};
     }
   }
 
   const auto source = current_module_source(debugger, elf);
   return {SourceStepStopReason::InstructionLimit, debugger.stop_info(),
-          source_only(source), instruction_limit};
+          source_only(source), instruction_limit, module_only(source)};
 }
 
 SourceStepResult step_source(Debugger& debugger, const DwarfLineTable& lines,
@@ -162,10 +170,12 @@ SourceStepResult next_source(Debugger& debugger, const ElfFile& elf,
       const auto source = current_module_source(debugger, elf);
 
       if (!returned || user_breakpoint) {
-        return {SourceStepStopReason::Interrupted, stop, source_only(source), instructions};
+        return {SourceStepStopReason::Interrupted, stop, source_only(source), instructions,
+                module_only(source)};
       }
       if (source && !same_source_line(*source, *start)) {
-        return {SourceStepStopReason::LineChanged, stop, source_only(source), instructions};
+        return {SourceStepStopReason::LineChanged, stop, source_only(source), instructions,
+                module_only(source)};
       }
       continue;
     }
@@ -173,16 +183,18 @@ SourceStepResult next_source(Debugger& debugger, const ElfFile& elf,
     const auto stop = debugger.single_step();
     const auto source = current_module_source(debugger, elf);
     if (stop.reason != StopReason::SingleStep) {
-      return {SourceStepStopReason::Interrupted, stop, source_only(source), instructions};
+      return {SourceStepStopReason::Interrupted, stop, source_only(source), instructions,
+              module_only(source)};
     }
     if (source && !same_source_line(*source, *start)) {
-      return {SourceStepStopReason::LineChanged, stop, source_only(source), instructions};
+      return {SourceStepStopReason::LineChanged, stop, source_only(source), instructions,
+              module_only(source)};
     }
   }
 
   const auto source = current_module_source(debugger, elf);
   return {SourceStepStopReason::InstructionLimit, debugger.stop_info(),
-          source_only(source), instruction_limit};
+          source_only(source), instruction_limit, module_only(source)};
 }
 
 SourceStepResult next_source(Debugger& debugger, const DwarfLineTable& lines,

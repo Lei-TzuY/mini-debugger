@@ -4,6 +4,7 @@
 
 #include <map>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -50,6 +51,16 @@ class Process {
   void mark_running() noexcept { mark_running(current_tid_); }
   void mark_running(pid_t tid) noexcept;
   void select_tid(pid_t tid);
+  void collapse_after_exec(pid_t tid) {
+    if (tid <= 0) throw std::invalid_argument("exec collapse requires a positive tid");
+    task_states_.clear();
+    task_states_.emplace(tid, ProcessState::Stopped);
+    pid_ = tid;
+    current_tid_ = tid;
+    state_ = ProcessState::Stopped;
+    exit_code_.reset();
+    termination_signal_.reset();
+  }
   void detach(int signal = 0);
 
  private:

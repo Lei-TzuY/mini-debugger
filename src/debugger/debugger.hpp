@@ -83,6 +83,7 @@ class Debugger {
   user_regs_struct registers() const;
   void set_register(std::string_view name, std::uint64_t value);
   std::vector<std::byte> read_memory(std::uintptr_t address, std::size_t length) const;
+  void write_memory(std::uintptr_t address, const std::vector<std::byte>& bytes);
 
   std::size_t add_breakpoint(std::uintptr_t address);
   bool remove_breakpoint(std::size_t id);

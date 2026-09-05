@@ -250,7 +250,7 @@ WaitEvent Process::wait_for(pid_t requested_tid) {
       current_tid_ = -1;
       state_ = ProcessState::Signaled;
     } else {
-      update_agregate_state();
+      update_aggregate_state();
       select_current_task();
     }
     return {WaitEvent::Kind::Signaled, signal, result};
@@ -365,5 +365,52 @@ void Process::cleanup() noexcept {
     if (state_ == ProcessState::Stopped) {
       try {
         detach();
+        return;
       } catch (...) {
-        for (auto it = task_states_.begin(); it != task_states_.end();
+        for (auto it = task_states_.begin(); it != task_states_.end();) {
+          if (it->second != ProcessState::Stopped) {
+            ++it;
+            continue;
+          }
+          try {
+            lowlevel::detach(it->first);
+            it = task_states_.erase(it);
+          } catch (const lowlevel::PtraceError& error) {
+            if (error.error_number() == ESRCH) {
+              it = task_states_.erase(it);
+            } else {
+              ++it;
+            }
+          } catch (...) {
+            ++it;
+          }
+        }
+      }
+    }
+    task_states_.clear();
+    current_tid_ = -1;
+    pid_ = -1;
+    state_ = ProcessState::Detached;
+    return;
+  }
+
+  ::kill(pid_, SIGKILL);
+  int status = 0;
+  for (;;) {
+    pid_t result;
+    do {
+      result = ::waitpid(-1, &status, __WALL);
+    } while (result == -1 && errno == EINTR);
+    if (result == -1) {
+      if (errno == ECHILD) break;
+      break;
+    }
+    task_states_.erase(result);
+  }
+  task_states_.clear();
+  current_tid_ = -1;
+  pid_ = -1;
+  state_ = ProcessState::Exited;
+}
+
+}  // namespace mdbg

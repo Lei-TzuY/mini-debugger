@@ -35,6 +35,10 @@ jobs:
         run: |
           "$CC" -O1 -g -gdwarf-5 -fPIE tests/fixtures/formal_parameter_fixture.c -pie -o build/formal_parameter_fixture_v5_pie
           "$CC" -O1 -g -gdwarf-5 -fno-pie tests/fixtures/formal_parameter_fixture.c -no-pie -o build/formal_parameter_fixture_v5_nopie
+          echo "=== ${CC} DWARF5 info ==="
+          readelf --debug-dump=info build/formal_parameter_fixture_v5_nopie | sed -n '1,240p'
+          echo "=== ${CC} DWARF5 loclists ==="
+          readelf --debug-dump=loc build/formal_parameter_fixture_v5_nopie | sed -n '1,240p'
           build/dwarf_line_integration \
             build/debug_line_fixture_pie \
             build/debugger_fixture_stripped \

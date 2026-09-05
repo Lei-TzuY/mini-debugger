@@ -1,6 +1,7 @@
 #include "debugger/debugger.hpp"
 #include "dwarf/eh_frame.hpp"
 #include "dwarf/line_table.hpp"
+#include "dwarf/local_value.hpp"
 #include "elf/elf.hpp"
 #include "ptrace/ptrace.hpp"
 #include "unwind/cfi.hpp"
@@ -18,6 +19,7 @@
 
 namespace {
 
+constexpr std::uint64_t kCallerFrameLocalExpected = UINT64_C(0x6a5b4c3d2e1f9081);
 volatile int exception_fixture_value = 0;
 
 extern "C" __attribute__((noinline)) void cfi_exception_throw_helper(bool should_throw) {
@@ -108,7 +110,7 @@ std::uintptr_t source_address(const mdbg::DwarfLineTable& lines, const mdbg::Elf
 void test_frame_pointer_backtrace(const std::string& fixture) {
   const std::string path = temp_path();
   try {
-    auto debugger = mdbg::Debugger::launch(fixture, {path, "backtrace"});
+    auto debugger = mdbg::Debugger::launch(fixture, {path, "backtrace-repeat"});
     const auto sync = debugger.continue_execution();
     require(sync.reason == mdbg::StopReason::Signal && sync.value == SIGSTOP,
             "fixture synchronization SIGSTOP was not observed");
@@ -134,6 +136,84 @@ void test_frame_pointer_backtrace(const std::string& fixture) {
     require_frame_name(elf, debugger.pid(), trace.frames[2].instruction_pointer,
                        "backtrace_outer");
     require_frame_name(elf, debugger.pid(), trace.frames[3].instruction_pointer, "main");
+
+    const mdbg::EhFrame cfi(fixture);
+    require(cfi.available(), "backtrace fixture is missing .eh_frame for inspection frames");
+    const auto live_before = debugger.registers();
+    const auto inspection_frames = mdbg::build_inspection_frames(debugger, elf, cfi, 4);
+    require(inspection_frames.size() >= 2,
+            "inspection-frame unwind did not recover the immediate caller");
+    require(inspection_frames[0].index == 0 &&
+                inspection_frames[0].process_pid == debugger.pid() &&
+                inspection_frames[0].tid == debugger.active_tid() &&
+                inspection_frames[0].runtime_pc == probe_address,
+            "frame 0 does not preserve live execution ownership");
+    require(inspection_frames[1].index == 1 &&
+                inspection_frames[1].process_pid == debugger.pid() &&
+                inspection_frames[1].tid == debugger.active_tid(),
+            "caller frame does not preserve process/TID ownership");
+    require(inspection_frames[0].origin_stop_sequence == debugger.stop_info().sequence &&
+                inspection_frames[1].origin_stop_sequence == debugger.stop_info().sequence,
+            "inspection frames did not bind to the originating stop identity");
+    require_frame_name(elf, debugger.pid(), inspection_frames[1].runtime_pc,
+                       "backtrace_inner");
+    require(inspection_frames[1].registers.rbp.has_value(),
+            "caller frame did not retain CFI-recovered frame-pointer state");
+    require(!inspection_frames[1].registers.rdi.has_value(),
+            "caller frame must not invent an unrecovered historical argument register");
+
+    bool frame_zero_rejected_caller_local = false;
+    try {
+      (void)mdbg::inspect_local_value(debugger, elf, inspection_frames[0],
+                                      "caller_frame_local");
+    } catch (const std::runtime_error&) {
+      frame_zero_rejected_caller_local = true;
+    }
+    require(frame_zero_rejected_caller_local,
+            "frame 0 incorrectly resolved a caller-owned local variable");
+
+    const auto caller_value =
+        mdbg::inspect_local_value(debugger, elf, inspection_frames[1], "caller_frame_local");
+    require(caller_value.kind == mdbg::LocalValueKind::Integer &&
+                caller_value.raw_value == kCallerFrameLocalExpected &&
+                caller_value.byte_size == sizeof(std::uint64_t),
+            "caller-frame source-value inspection returned the wrong stack local");
+
+    const auto live_after = debugger.registers();
+    require(live_after.rip == live_before.rip && live_after.rsp == live_before.rsp &&
+                live_after.rbp == live_before.rbp && live_after.rdi == live_before.rdi,
+            "caller-frame inspection mutated or redirected live execution registers");
+
+    const auto second_hit = debugger.continue_execution();
+    require(second_hit.reason == mdbg::StopReason::Breakpoint &&
+                second_hit.breakpoint_address == probe_address,
+            "repeated backtrace probe breakpoint was not hit");
+    const auto repeated_live = debugger.registers();
+    require(repeated_live.rip == live_before.rip && repeated_live.rsp == live_before.rsp &&
+                repeated_live.rbp == live_before.rbp,
+            "repeat fixture did not recreate the identical RIP/RSP/RBP stop fingerprint");
+    require(debugger.stop_info().sequence != inspection_frames[1].origin_stop_sequence,
+            "new breakpoint stop did not receive a distinct stop identity");
+
+    bool stale_rejected = false;
+    try {
+      (void)mdbg::inspect_local_value(debugger, elf, inspection_frames[1],
+                                      "caller_frame_local");
+    } catch (const std::logic_error&) {
+      stale_rejected = true;
+    }
+    require(stale_rejected,
+            "caller inspection frame survived a new stop with an identical register fingerprint");
+
+    const auto fresh_frames = mdbg::build_inspection_frames(debugger, elf, cfi, 4);
+    require(fresh_frames.size() >= 2 &&
+                fresh_frames[1].origin_stop_sequence == debugger.stop_info().sequence,
+            "fresh caller frame did not bind to the repeated stop identity");
+    const auto fresh_value =
+        mdbg::inspect_local_value(debugger, elf, fresh_frames[1], "caller_frame_local");
+    require(fresh_value.kind == mdbg::LocalValueKind::Integer &&
+                fresh_value.raw_value == kCallerFrameLocalExpected,
+            "fresh caller-frame source-value inspection failed after repeated stop");
 
     const auto limited = mdbg::unwind_frame_pointers(debugger, 2);
     require(limited.frames.size() == 2 &&

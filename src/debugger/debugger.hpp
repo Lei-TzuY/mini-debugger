@@ -5,6 +5,7 @@
 
 #include <sys/user.h>
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <map>
@@ -39,6 +40,11 @@ enum class SignalPolicy { Suppress, Forward };
 enum class ProcessEventKind { None, Fork, Vfork };
 enum class ForkFollowPolicy { Parent, Child, Both };
 
+inline std::uint64_t next_stop_sequence() noexcept {
+  static std::atomic<std::uint64_t> sequence{0};
+  return sequence.fetch_add(1, std::memory_order_relaxed) + 1;
+}
+
 struct StopInfo {
   StopReason reason;
   int value{0};
@@ -52,6 +58,7 @@ struct StopInfo {
   std::optional<pid_t> parent_pid{};
   std::optional<pid_t> child_pid{};
   bool retains_child{false};
+  std::uint64_t sequence{next_stop_sequence()};
 };
 
 struct Watchpoint {

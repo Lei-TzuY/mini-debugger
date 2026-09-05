@@ -236,6 +236,7 @@ void Debugger::select_process(pid_t pid) {
     throw std::logic_error("cannot switch processes while a breakpoint displaced step is pending");
   }
   swap_active_process(pid);
+  stop_info_.sequence = next_stop_sequence();
 }
 
 std::vector<ThreadInfo> Debugger::threads() const {

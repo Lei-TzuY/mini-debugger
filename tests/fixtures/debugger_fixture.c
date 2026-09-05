@@ -20,6 +20,7 @@ static volatile sig_atomic_t register_worker_ready = 0;
 
 #define REGISTER_MUTATION_SEED UINT64_C(0x13579bdf2468ace0)
 #define REGISTER_MUTATION_VALUE UINT64_C(0xa5a55a5ac3c33c3c)
+#define CALLER_FRAME_LOCAL_EXPECTED UINT64_C(0x6a5b4c3d2e1f9081)
 
 __attribute__((noinline)) void breakpoint_one(void) {
   __asm__ volatile("nop" ::: "memory");
@@ -47,8 +48,11 @@ __attribute__((noinline)) void backtrace_leaf(void) {
 }
 
 __attribute__((noinline)) void backtrace_inner(void) {
+  uint64_t caller_frame_local = CALLER_FRAME_LOCAL_EXPECTED;
+  __asm__ volatile("" : "+m"(caller_frame_local) : : "memory");
   backtrace_leaf();
-  fixture_value += 1;
+  __asm__ volatile("" : "+m"(caller_frame_local) : : "memory");
+  if (caller_frame_local == CALLER_FRAME_LOCAL_EXPECTED) fixture_value += 1;
 }
 
 __attribute__((noinline)) void backtrace_outer(void) {
@@ -298,6 +302,11 @@ int main(int argc, char** argv) {
   if (strcmp(argv[2], "backtrace") == 0) {
     backtrace_outer();
     return 0;
+  }
+  if (strcmp(argv[2], "backtrace-repeat") == 0) {
+    backtrace_outer();
+    backtrace_outer();
+    return fixture_value == 0x112233445566778eULL ? 0 : 114;
   }
   if (strcmp(argv[2], "watchpoint") == 0) {
     watched_write();

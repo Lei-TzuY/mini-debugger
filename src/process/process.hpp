@@ -61,6 +61,16 @@ class Process {
     exit_code_.reset();
     termination_signal_.reset();
   }
+  void adopt_stopped_process(pid_t pid) {
+    if (pid <= 0) throw std::invalid_argument("process adoption requires a positive pid");
+    task_states_.clear();
+    task_states_.emplace(pid, ProcessState::Stopped);
+    pid_ = pid;
+    current_tid_ = pid;
+    state_ = ProcessState::Stopped;
+    exit_code_.reset();
+    termination_signal_.reset();
+  }
   void detach(int signal = 0);
 
  private:

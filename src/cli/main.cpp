@@ -86,6 +86,11 @@ void print_thread(const mdbg::ThreadInfo& thread) {
             << process_state_name(thread.state) << '\n';
 }
 
+void print_process(const mdbg::ProcessInfo& process) {
+  std::cout << (process.active ? "* " : "  ") << process.pid << ' '
+            << process_state_name(process.state) << '\n';
+}
+
 std::string process_executable(pid_t pid) {
   return std::filesystem::read_symlink("/proc/" + std::to_string(pid) + "/exe").string();
 }
@@ -110,6 +115,11 @@ void print_stop(const mdbg::StopInfo& info, const mdbg::ElfFile& elf, pid_t pid)
     const bool follows_child =
         !is_vfork && info.child_pid.has_value() && info.tid == *info.child_pid;
     std::cout << "process " << (is_vfork ? "vfork" : "fork") << ": ";
+    if (!is_vfork && info.retains_child && info.child_pid) {
+      std::cout << "retained parent " << parent << ", retained child " << *info.child_pid
+                << ", active " << pid << '\n';
+      return;
+    }
     if (follows_child) {
       std::cout << "parent " << parent << " unfollowed, followed child " << *info.child_pid
                 << '\n';
@@ -150,6 +160,16 @@ void print_stop(const mdbg::StopInfo& info, const mdbg::ElfFile& elf, pid_t pid)
       break;
     case StopReason::ThreadSignaled:
       std::cout << "thread " << info.tid << " terminated by signal " << info.value << '\n';
+      break;
+    case StopReason::ProcessExited:
+      std::cout << "process " << info.tid << " exited with code " << info.value;
+      if (pid > 0 && pid != info.tid) std::cout << "; active process " << pid;
+      std::cout << '\n';
+      break;
+    case StopReason::ProcessSignaled:
+      std::cout << "process " << info.tid << " terminated by signal " << info.value;
+      if (pid > 0 && pid != info.tid) std::cout << "; active process " << pid;
+      std::cout << '\n';
       break;
     case StopReason::Breakpoint: {
       std::cout << "breakpoint at 0x" << std::hex << *info.breakpoint_address << std::dec;
@@ -513,15 +533,21 @@ int main(int argc, char** argv) {
         if (topic == "follow-fork-mode") {
           std::string mode;
           input >> mode;
-          if (mode == "parent") {
-            debugger.set_fork_follow_policy(mdbg::ForkFollowPolicy::Parent);
-          } else if (mode == "child") {
-            debugger.set_fork_follow_policy(mdbg::ForkFollowPolicy::Child);
-          } else {
-            std::cout << "usage: set follow-fork-mode <parent|child>\n";
-            continue;
+          try {
+            if (mode == "parent") {
+              debugger.set_fork_follow_policy(mdbg::ForkFollowPolicy::Parent);
+            } else if (mode == "child") {
+              debugger.set_fork_follow_policy(mdbg::ForkFollowPolicy::Child);
+            } else if (mode == "both") {
+              debugger.set_fork_follow_policy(mdbg::ForkFollowPolicy::Both);
+            } else {
+              std::cout << "usage: set follow-fork-mode <parent|child|both>\n";
+              continue;
+            }
+            std::cout << "follow-fork-mode = " << mode << '\n';
+          } catch (const std::exception& error) {
+            std::cout << "follow-fork-mode failed: " << error.what() << '\n';
           }
-          std::cout << "follow-fork-mode = " << mode << '\n';
           continue;
         }
         if (topic == "register") {
@@ -622,28 +648,48 @@ int main(int argc, char** argv) {
           continue;
         }
 
-        std::size_t id = 0;
-        if (const auto address = try_parse_address(location)) {
-          id = breakpoints.add_address(*address, location);
-        } else if (const auto source = try_parse_source_spec(location)) {
-          id = breakpoints.add_source(source->file, source->line, location);
-        } else {
-          id = breakpoints.add_symbol(location);
-        }
+        try {
+          std::size_t id = 0;
+          if (const auto address = try_parse_address(location)) {
+            id = breakpoints.add_address(*address, location);
+          } else if (const auto source = try_parse_source_spec(location)) {
+            id = breakpoints.add_source(source->file, source->line, location);
+          } else {
+            id = breakpoints.add_symbol(location);
+          }
 
-        const auto breakpoint = breakpoints.breakpoint(id);
-        if (!breakpoint) throw std::logic_error("new user breakpoint disappeared");
-        std::cout << "Breakpoint " << id;
-        if (breakpoint->state == mdbg::UserBreakpointState::Pending) {
-          std::cout << " pending";
-        } else {
-          std::cout << " at 0x" << std::hex << *breakpoint->address << std::dec;
+          const auto breakpoint = breakpoints.breakpoint(id);
+          if (!breakpoint) throw std::logic_error("new user breakpoint disappeared");
+          std::cout << "Breakpoint " << id;
+          if (breakpoint->state == mdbg::UserBreakpointState::Pending) {
+            std::cout << " pending";
+          } else {
+            std::cout << " at 0x" << std::hex << *breakpoint->address << std::dec;
+          }
+          std::cout << " (" << location << ")\n";
+        } catch (const std::exception& error) {
+          std::cout << "breakpoint insertion failed: " << error.what() << '\n';
         }
-        std::cout << " (" << location << ")\n";
       } else if (command == "delete") {
         std::size_t id = 0;
         input >> id;
         if (!breakpoints.remove(id)) std::cout << "no such breakpoint\n";
+      } else if (command == "process") {
+        std::string pid_text;
+        input >> pid_text;
+        if (pid_text.empty()) {
+          std::cout << "usage: process <pid>\n";
+          continue;
+        }
+        try {
+          const auto selected = parse_pid(pid_text);
+          debugger.select_process(selected);
+          executable = debugger.executable_path();
+          elf = mdbg::ElfFile(executable);
+          std::cout << "selected process " << selected << '\n';
+        } catch (const std::exception& error) {
+          std::cout << "process selection failed: " << error.what() << '\n';
+        }
       } else if (command == "thread") {
         std::string tid_text;
         input >> tid_text;
@@ -665,10 +711,12 @@ int main(int argc, char** argv) {
           for (const auto& breakpoint : breakpoints.breakpoints()) {
             print_user_breakpoint(breakpoint);
           }
+        } else if (topic == "processes") {
+          for (const auto& process : debugger.processes()) print_process(process);
         } else if (topic == "threads") {
           for (const auto& thread : debugger.threads()) print_thread(thread);
         } else {
-          std::cout << "usage: info <breakpoints|threads>\n";
+          std::cout << "usage: info <breakpoints|processes|threads>\n";
         }
       } else if (command == "symbols") {
         std::string filter;
@@ -681,11 +729,11 @@ int main(int argc, char** argv) {
         }
       } else {
         std::cout << "commands: continue, step, next, finish, stepi, regs, bt, list, "
-                     "line <addr|symbol>, set follow-fork-mode <parent|child>, "
+                     "line <addr|symbol>, set follow-fork-mode <parent|child|both>, "
                      "set register <name> <value>, set memory <addr|symbol> <byte> [byte...], "
                      "set substitute-path <from> <to>, reg <name>, x <addr|symbol> [len], "
-                     "break <addr|symbol|file:line>, delete <id>, thread <tid>, "
-                     "info <breakpoints|threads>, symbols [filter], detach, quit\n";
+                     "break <addr|symbol|file:line>, delete <id>, process <pid>, thread <tid>, "
+                     "info <breakpoints|processes|threads>, symbols [filter], detach, quit\n";
       }
     }
   } catch (const std::exception& error) {

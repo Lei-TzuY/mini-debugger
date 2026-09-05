@@ -73,22 +73,39 @@ Priority 2 closes the one-process ownership-transfer gap for a regular `fork()` 
 
 This completes the bounded regular-fork follow-child ownership-transfer milestone. It does **not** claim vfork follow-child, attached-origin follow-child, multi-thread-parent handoff, or simultaneous parent/child debugging.
 
-## Priority 3: simultaneous regular-fork process ownership — current frontier
+## Priority 3: simultaneous regular-fork process ownership — complete for the bounded two-domain milestone
 
-After Priority 2, a single session can deterministically choose either side of a regular fork, but it still throws away one process domain. The next architectural boundary is therefore an explicit multi-process session model for one real parent/child fork, not another follow-policy rendering variant.
+Priority 3 replaces the one-active-PID assumption with one executable two-domain regular-fork model rather than another follow-policy rendering variant.
+
+- `ForkFollowPolicy::Both` retains a launched single-thread parent and its one regular-fork child as distinct ptrace-owned process domains after consuming the child's initial stop; the child is never inserted into the parent's TID registry;
+- `Debugger::processes()` exposes both process identities and one active process, while `select_process(pid)` switches only between stopped retained domains and remains separate from thread selection;
+- each domain preserves its own `Process`/TID registry, stop metadata, executable identity, pending thread starts, and pending signal-delivery state; register, memory, resume, and single-step operations therefore route through the selected process/TID pair;
+- process exit/signal terminal events are surfaced independently as `ProcessExited` / `ProcessSignaled`; when one retained domain terminates, the surviving stopped domain becomes active and the session closes only after the final retained process terminates;
+- managed software-breakpoint maps, breakpoint IDs, pending displaced-step state, logical hardware-watchpoint state, and debug-register restore snapshots are process-domain state rather than one ambiguous session-global namespace; process selection swaps the complete debug-ownership state together with the selected `Process`;
+- managed breakpoints are deliberately armed after fork retention in this first slice, once copy-on-write domains exist; parent and child can place a breakpoint at the same virtual address with distinct session IDs, hit and remove them independently, and one domain's displaced-step/remove path cannot rewrite the sibling domain;
+- one pre-fork bounded write watchpoint is explicitly split at the fork stop: the parent's armed DR0/DR6/DR7 remain parent-owned, the debugger explicitly programs the child's DR state rather than relying on kernel inheritance, and the child receives an independent logical watchpoint plus restore snapshot for its own TID;
+- direct PIE/non-PIE integration switches to the child, observes child managed-breakpoint then child hardware-watchpoint stops, removes both child-owned resources, surfaces child SIGSTOP and independent exit, then proves the retained parent still owns and hits its own breakpoint/watchpoint before clean final exit;
+- a real `mdbg` subprocess independently proves retained parent/child identities, both `TracerPid` relationships, `info processes`, explicit process selection, selected-child single-step and SIGSTOP, copy-on-write memory divergence, child terminal promotion, and leak-free final process completion;
+- test-first ownership coverage built cleanly and left 38/40 tests green, failing only because hardware watchpoints were explicitly not process-scoped; the completed production model returns the full 40-test GCC and Clang-large matrices to green.
+
+The bounded model intentionally remains one launched, single-thread regular-fork parent plus one child. Attached-origin simultaneous fork ownership, multi-thread-parent retention, nested process trees, simultaneous vfork ownership, and pre-fork managed software-breakpoint duplication are not claimed.
+
+## Priority 4: per-process exec image divergence — current frontier
+
+The next architectural boundary is no longer retaining two ordinary fork domains; it is allowing those retained domains to stop sharing one executable-image assumption after one side calls `exec`.
 
 First coherent slice acceptance:
 
-- retain both a regular-fork parent and child as independently identified traced processes after the child's initial ptrace stop, without inserting the child PID into the parent's TID registry or aliasing process selection to thread selection;
-- introduce an explicit process registry and one active process identity while preserving each process's own TID registry, executable identity, signal-delivery state, and lifecycle state;
-- route register/memory operations and resume/step commands through the selected process/TID pair, with deterministic process selection and no implicit cross-process resume;
-- make managed software-breakpoint ownership process-scoped after copy-on-write divergence: removing or displaced-stepping a breakpoint in one process may not silently rewrite the sibling process's byte or metadata;
-- keep hardware debug-register ownership per TID and therefore per process domain; a watchpoint armed before fork must not become one ambiguous session-global snapshot once both domains remain traced;
-- surface parent and child exits independently and only close the debugging session after all retained process domains have reached terminal/detached states;
-- prove the model with one real PIE/non-PIE fork in which parent and child take distinguishable paths, switch active process explicitly, hit process-scoped stops in both domains, and terminate without leaked ptrace ownership under GCC and Clang-large.
+- start from the proven two-domain regular-fork session, select one retained domain, and let that process replace its image with a real `execve()` while the sibling remains traced in the old executable;
+- classify the exec stop only in the process domain that executed it: collapse that domain's task registry, refresh only its executable identity, clear only its old-image breakpoint/watchpoint/pending execution ownership, and leave the sibling's executable path, TIDs, pending signals, and debug state untouched;
+- preserve explicit process selection after image divergence so switching to the old-image sibling restores its old executable identity/resolution context, while switching back to the exec'd process exposes the replacement image;
+- make CLI symbol/source resolution and user/deferred breakpoint bookkeeping follow the selected process image rather than one session-global `ElfFile`; image replacement in one process may not invalidate the sibling process's user breakpoint state;
+- prove a new-image symbol breakpoint in the exec'd process and an old-image managed/symbol breakpoint in the sibling can coexist and be hit independently after switching process domains;
+- surface exec'd-process and old-image-sibling terminal events independently and end the session only after both domains complete;
+- run one real PIE/non-PIE fork -> child exec -> divergent-image workflow through GCC and Clang-large, including a real `mdbg` subprocess rather than only direct API state inspection.
 
-Do not generalize the first multi-process slice to arbitrary process trees, vfork shared-VM ownership, or attached-origin fork. The purpose of Priority 3 is to replace the single-`pid_` architectural assumption with one executable two-domain fork model before expanding breadth.
+Do not expand this slice to arbitrary nested process trees, attached-origin multi-process exec, or simultaneous vfork ownership. The goal is to prove that process ownership and image ownership are independently scoped before increasing process-tree breadth.
 
 ## Selection rule
 
-Priority 3 is the current frontier, with simultaneous regular-fork parent/child ownership as the next architectural slice. Attached-origin lifecycle evidence, vfork follow-child, arbitrary process trees, expression evaluation, richer register classes, and convenience UI remain lower priority until the session can retain two ordinary fork domains at once. As in earlier phases, kernel/compiler variants are added only when a reproducible workflow demonstrates a gap.
+Priority 4 is the current frontier. The next work must demonstrate one retained fork domain replacing its executable without corrupting the sibling domain's image/debug state. Arbitrary process trees, attached-origin lifecycle evidence, vfork follow-child/both, expression evaluation, richer register classes, and convenience UI remain lower priority until divergent executable images work inside the two-domain session. As in earlier phases, kernel/compiler variants are added only when a reproducible workflow demonstrates a gap.

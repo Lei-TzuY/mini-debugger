@@ -250,6 +250,94 @@ void run_follow_child_fork(const std::string& driver) {
   parent_guard.pid = -1;
 }
 
+void run_two_process_debug_state(const std::string& driver) {
+  auto debugger = mdbg::Debugger::launch(driver, {"--fork-topology"});
+  require(debugger.stop_info().reason == mdbg::StopReason::InitialExec,
+          "two-process debug-state driver did not expose initial exec stop");
+  const auto parent = debugger.pid();
+
+  const mdbg::ElfFile image(driver);
+  const auto probe = image.find_symbol("fork_shared_probe");
+  const auto value = image.find_symbol("fork_shared_value");
+  require(probe.has_value() && value.has_value(),
+          "two-process fork probe/value symbols are unavailable");
+  const auto probe_address =
+      static_cast<std::uintptr_t>(image.runtime_address(parent, *probe));
+  const auto value_address =
+      static_cast<std::uintptr_t>(image.runtime_address(parent, *value));
+
+  debugger.set_fork_follow_policy(mdbg::ForkFollowPolicy::Both);
+  const auto inherited_watchpoint =
+      debugger.add_write_watchpoint(value_address, sizeof(std::uint64_t));
+
+  auto info = debugger.continue_execution();
+  require(info.process_event == mdbg::ProcessEventKind::Fork && info.retains_child,
+          "simultaneous fork did not retain both process domains");
+  require(info.child_pid.has_value() && *info.child_pid > 0 && *info.child_pid != parent,
+          "simultaneous fork did not expose a distinct child");
+  const auto child = *info.child_pid;
+
+  require(debugger.pid() == parent,
+          "simultaneous fork did not keep the parent as the initial active process");
+  require(debugger.watchpoints().size() == 1 &&
+              debugger.watchpoints().front().id == inherited_watchpoint,
+          "parent lost the pre-fork watchpoint after retaining the child");
+  const auto parent_breakpoint = debugger.add_breakpoint(probe_address);
+
+  debugger.select_process(child);
+  require(debugger.watchpoints().size() == 1 &&
+              debugger.watchpoints().front().id == inherited_watchpoint,
+          "child did not receive its own inherited watchpoint ownership");
+  const auto child_breakpoint = debugger.add_breakpoint(probe_address);
+  require(child_breakpoint != parent_breakpoint,
+          "process-scoped managed breakpoints reused one ambiguous session ID");
+
+  info = debugger.continue_execution();
+  require(info.reason == mdbg::StopReason::Breakpoint && info.tid == child &&
+              info.breakpoint_address == probe_address,
+          "retained child did not hit its process-scoped managed breakpoint");
+  info = debugger.continue_execution();
+  require(info.reason == mdbg::StopReason::Watchpoint && info.tid == child &&
+              info.watchpoint_id == inherited_watchpoint,
+          "retained child did not hit its process-scoped inherited watchpoint");
+  require(debugger.remove_breakpoint(child_breakpoint),
+          "retained child breakpoint could not be removed independently");
+  require(debugger.remove_watchpoint(inherited_watchpoint),
+          "retained child watchpoint could not be removed independently");
+
+  info = debugger.continue_execution();
+  require(info.reason == mdbg::StopReason::Signal && info.value == SIGSTOP && info.tid == child,
+          "retained child did not surface its independent SIGSTOP");
+  info = debugger.continue_execution(mdbg::SignalPolicy::Suppress);
+  require(info.reason == mdbg::StopReason::ProcessExited && info.tid == child && info.value == 0,
+          "retained child exit was not surfaced independently");
+  require(debugger.pid() == parent,
+          "parent was not promoted after retained child exit");
+  require(debugger.breakpoints().size() == 1 &&
+              debugger.breakpoints().front().id == parent_breakpoint,
+          "child breakpoint removal corrupted parent breakpoint ownership");
+  require(debugger.watchpoints().size() == 1 &&
+              debugger.watchpoints().front().id == inherited_watchpoint,
+          "child watchpoint removal corrupted parent watchpoint ownership");
+
+  info = debugger.continue_execution();
+  require(info.reason == mdbg::StopReason::Breakpoint && info.tid == parent &&
+              info.breakpoint_address == probe_address,
+          "retained parent did not hit its process-scoped managed breakpoint");
+  info = debugger.continue_execution();
+  require(info.reason == mdbg::StopReason::Watchpoint && info.tid == parent &&
+              info.watchpoint_id == inherited_watchpoint,
+          "retained parent did not hit its process-scoped inherited watchpoint");
+  require(debugger.remove_breakpoint(parent_breakpoint),
+          "retained parent breakpoint could not be removed");
+  require(debugger.remove_watchpoint(inherited_watchpoint),
+          "retained parent watchpoint could not be removed");
+
+  info = debugger.continue_execution();
+  require(info.reason == mdbg::StopReason::Exited && info.value == 0,
+          "retained parent did not exit cleanly after child completion");
+}
+
 void run_follow_parent_vfork(const std::string& driver, const std::string& target) {
   auto debugger = mdbg::Debugger::launch(driver, {"--vfork-topology", target});
   require(debugger.stop_info().reason == mdbg::StopReason::InitialExec,
@@ -586,6 +674,7 @@ int main(int argc, char** argv) {
     run_exec_replacement(argv[1], argv[2]);
     run_follow_parent_fork(argv[1]);
     run_follow_child_fork(argv[1]);
+    run_two_process_debug_state(argv[1]);
     run_follow_parent_vfork(argv[1], argv[2]);
     run_cli_exec_replacement(argv[1], argv[2]);
     run_cli_follow_parent_fork(argv[1]);

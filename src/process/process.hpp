@@ -35,6 +35,7 @@ class Process {
   static Process launch(const std::string& executable,
                         const std::vector<std::string>& arguments = {});
   static Process attach(pid_t pid);
+  static Process adopt_stopped(pid_t pid, ProcessOrigin origin);
 
   [[nodiscard]] pid_t pid() const noexcept { return pid_; }
   [[nodiscard]] pid_t current_tid() const noexcept { return current_tid_; }
@@ -48,9 +49,11 @@ class Process {
   [[nodiscard]] std::optional<ProcessState> task_state(pid_t tid) const noexcept;
 
   WaitEvent wait();
+  WaitEvent wait_current();
   void mark_running() noexcept { mark_running(current_tid_); }
   void mark_running(pid_t tid) noexcept;
   void select_tid(pid_t tid);
+  void swap(Process& other) noexcept;
   void collapse_after_exec(pid_t tid) {
     if (tid <= 0) throw std::invalid_argument("exec collapse requires a positive tid");
     task_states_.clear();

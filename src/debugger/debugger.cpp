@@ -82,6 +82,11 @@ int wait_for_transient_child(pid_t child) {
   }
   return status;
 }
+
+bool terminal_process_state(ProcessState state) {
+  return state == ProcessState::Exited || state == ProcessState::Signaled ||
+         state == ProcessState::Detached;
+}
 }  // namespace
 
 Debugger Debugger::launch(const std::string& executable,
@@ -108,6 +113,17 @@ Debugger::Debugger(Process process, StopInfo initial_stop, std::string executabl
       executable_path_(std::move(executable_path)) {}
 
 Debugger::~Debugger() {
+  if (retained_process_) {
+    if (!terminal_process_state(process_.state()) && process_.pid() > 0) {
+      (void)::kill(process_.pid(), SIGKILL);
+    }
+    if (!terminal_process_state(retained_process_->process.state()) &&
+        retained_process_->process.pid() > 0) {
+      (void)::kill(retained_process_->process.pid(), SIGKILL);
+    }
+    return;
+  }
+
   if (process_.origin() != ProcessOrigin::Attached ||
       process_.state() != ProcessState::Stopped) {
     return;
@@ -129,6 +145,84 @@ pid_t Debugger::stopped_tid() const {
     throw std::logic_error("no active stopped tracee thread");
   }
   return tid;
+}
+
+void Debugger::set_fork_follow_policy(ForkFollowPolicy policy) {
+  if (retained_process_) {
+    if (policy != ForkFollowPolicy::Both) {
+      throw std::logic_error(
+          "cannot change fork follow policy while two process domains are retained");
+    }
+    fork_follow_policy_ = policy;
+    return;
+  }
+  if (policy == ForkFollowPolicy::Both) {
+    if (process_.origin() != ProcessOrigin::Launched) {
+      throw std::logic_error(
+          "simultaneous fork ownership is currently supported for launched tracees only");
+    }
+    const auto tids = process_.tids();
+    if (tids.size() != 1 || tids.front() != process_.current_tid() ||
+        process_.current_tid() != process_.pid()) {
+      throw std::logic_error(
+          "simultaneous fork ownership currently requires a single-thread parent");
+    }
+    if (!breakpoints_by_address_.empty() || pending_breakpoint_step_) {
+      throw std::logic_error(
+          "simultaneous fork ownership requires software breakpoints to be armed after fork");
+    }
+  }
+  fork_follow_policy_ = policy;
+}
+
+std::vector<ProcessInfo> Debugger::processes() const {
+  std::vector<ProcessInfo> result;
+  if (process_.pid() > 0) {
+    result.push_back(ProcessInfo{process_.pid(), process_.state(), true});
+  }
+  if (retained_process_ && retained_process_->process.pid() > 0) {
+    result.push_back(ProcessInfo{retained_process_->process.pid(),
+                                 retained_process_->process.state(), false});
+  }
+  return result;
+}
+
+bool Debugger::has_live_retained_process() const noexcept {
+  return retained_process_ && !terminal_process_state(retained_process_->process.state());
+}
+
+void Debugger::swap_active_process() {
+  if (!retained_process_) {
+    throw std::logic_error("no retained process is available for selection");
+  }
+  process_.swap(retained_process_->process);
+  std::swap(stop_info_, retained_process_->stop_info);
+  std::swap(executable_path_, retained_process_->executable_path);
+  pending_thread_starts_.swap(retained_process_->pending_thread_starts);
+  pending_signals_.swap(retained_process_->pending_signals);
+  breakpoints_by_address_.swap(retained_process_->breakpoints_by_address);
+  breakpoint_ids_.swap(retained_process_->breakpoint_ids);
+  std::swap(pending_breakpoint_step_, retained_process_->pending_breakpoint_step);
+  std::swap(watchpoint_, retained_process_->watchpoint);
+  std::swap(watchpoint_register_snapshot_,
+            retained_process_->watchpoint_register_snapshot);
+}
+
+void Debugger::select_process(pid_t pid) {
+  if (pid == process_.pid()) return;
+  if (!retained_process_ || retained_process_->process.pid() != pid) {
+    throw std::invalid_argument("cannot select an untracked process");
+  }
+  if (process_.state() != ProcessState::Stopped) {
+    throw std::logic_error("process selection requires the active process to be stopped");
+  }
+  if (retained_process_->process.state() != ProcessState::Stopped) {
+    throw std::logic_error("cannot select a process that is not stopped");
+  }
+  if (pending_breakpoint_step_) {
+    throw std::logic_error("cannot switch processes while a breakpoint displaced step is pending");
+  }
+  swap_active_process();
 }
 
 std::vector<ThreadInfo> Debugger::threads() const {
@@ -159,6 +253,10 @@ std::vector<std::byte> Debugger::read_memory(std::uintptr_t address,
 }
 
 std::size_t Debugger::add_breakpoint(std::uintptr_t address) {
+  if (fork_follow_policy_ == ForkFollowPolicy::Both && !retained_process_) {
+    throw std::logic_error(
+        "process-scoped managed breakpoints can only be armed after fork retention");
+  }
   const auto tid = stopped_tid();
   if (breakpoints_by_address_.count(address) != 0) {
     throw std::invalid_argument("a breakpoint already exists at that address");
@@ -320,6 +418,9 @@ StopInfo Debugger::single_step(SignalPolicy policy) {
 }
 
 void Debugger::detach(SignalPolicy policy) {
+  if (retained_process_) {
+    throw std::logic_error("detach is not yet supported for a two-process session");
+  }
   if (process_.origin() != ProcessOrigin::Attached) {
     throw std::logic_error("detach is only valid for an attached process");
   }
@@ -421,9 +522,14 @@ void Debugger::reinsert_breakpoint(std::uintptr_t address, pid_t tid) {
   it->second.installed = true;
 }
 
+WaitEvent Debugger::wait_active_process() {
+  if (retained_process_) return process_.wait_current();
+  return process_.wait();
+}
+
 StopInfo Debugger::wait_and_classify(bool expected_single_step) {
   for (;;) {
-    const auto event = process_.wait();
+    const auto event = wait_active_process();
     if (event.kind == WaitEvent::Kind::Exited) {
       pending_thread_starts_.erase(event.tid);
       pending_signals_.erase(event.tid);
@@ -432,6 +538,13 @@ StopInfo Debugger::wait_and_classify(bool expected_single_step) {
         watchpoint_register_snapshot_.reset();
       }
       if (process_.tids().empty()) {
+        if (has_live_retained_process()) {
+          const auto terminal = make_stop(StopReason::ProcessExited, event.value, event.tid);
+          stop_info_ = terminal;
+          swap_active_process();
+          stop_info_ = terminal;
+          return stop_info_;
+        }
         stop_info_ = make_stop(StopReason::Exited, event.value, event.tid);
         return stop_info_;
       }
@@ -447,6 +560,13 @@ StopInfo Debugger::wait_and_classify(bool expected_single_step) {
         watchpoint_register_snapshot_.reset();
       }
       if (process_.tids().empty()) {
+        if (has_live_retained_process()) {
+          const auto terminal = make_stop(StopReason::ProcessSignaled, event.value, event.tid);
+          stop_info_ = terminal;
+          swap_active_process();
+          stop_info_ = terminal;
+          return stop_info_;
+        }
         stop_info_ = make_stop(StopReason::Signaled, event.value, event.tid);
         return stop_info_;
       }
@@ -568,6 +688,90 @@ StopInfo Debugger::wait_and_classify(bool expected_single_step) {
       const auto child = static_cast<pid_t>(message);
       const auto parent = process_.pid();
       wait_for_unfollowed_child_stop(child);
+
+      if (fork_follow_policy_ == ForkFollowPolicy::Both) {
+        if (process_.origin() != ProcessOrigin::Launched) {
+          try {
+            lowlevel::detach(child, SIGKILL);
+          } catch (...) {
+            (void)::kill(child, SIGKILL);
+          }
+          throw std::runtime_error(
+              "simultaneous fork ownership is currently supported for launched tracees only");
+        }
+        const auto parent_tids = process_.tids();
+        if (retained_process_ || parent_tids.size() != 1 || parent_tids.front() != event.tid ||
+            event.tid != parent) {
+          try {
+            lowlevel::detach(child, SIGKILL);
+          } catch (...) {
+            (void)::kill(child, SIGKILL);
+          }
+          throw std::runtime_error(
+              "simultaneous fork ownership currently requires one single-thread parent/child pair");
+        }
+        if (!breakpoints_by_address_.empty() || pending_breakpoint_step_) {
+          try {
+            lowlevel::detach(child, SIGKILL);
+          } catch (...) {
+            (void)::kill(child, SIGKILL);
+          }
+          throw std::logic_error(
+              "simultaneous fork ownership requires software breakpoints to be armed after fork");
+        }
+
+        bool child_retained = false;
+        try {
+          lowlevel::set_options(child, tracing_options(process_.origin()));
+
+          std::optional<Watchpoint> child_watchpoint;
+          std::optional<DebugRegisterSnapshot> child_watchpoint_snapshot;
+          if (watchpoint_) {
+            if (!watchpoint_register_snapshot_ ||
+                watchpoint_register_snapshot_->tid != event.tid) {
+              throw std::logic_error(
+                  "watchpoint ownership does not match the process that forked");
+            }
+            const auto& snapshot = *watchpoint_register_snapshot_;
+            const auto armed_dr0 = lowlevel::get_debug_register(event.tid, 0);
+            const auto armed_dr6 = lowlevel::get_debug_register(event.tid, 6);
+            const auto armed_dr7 = lowlevel::get_debug_register(event.tid, 7);
+            const auto child_dr7 = lowlevel::get_debug_register(child, 7);
+            const auto disabled_child_dr7 =
+                child_dr7 & ~(kDr7Slot0EnableMask | kDr7Slot0ControlMask);
+            lowlevel::set_debug_register(child, 7, disabled_child_dr7);
+            lowlevel::set_debug_register(child, 0, armed_dr0);
+            lowlevel::set_debug_register(child, 6, armed_dr6 & ~kDr6Breakpoint0);
+            lowlevel::set_debug_register(child, 7, armed_dr7);
+            child_watchpoint = watchpoint_;
+            child_watchpoint_snapshot = DebugRegisterSnapshot{
+                child, snapshot.dr0, snapshot.dr6, snapshot.dr7};
+          }
+
+          auto child_stop = make_stop(StopReason::Trap, SIGSTOP, child);
+          retained_process_.emplace(RetainedProcessDomain{
+              Process::adopt_stopped(child, process_.origin()), std::move(child_stop),
+              executable_path_, {}, {}, {}, {}, std::nullopt, child_watchpoint,
+              child_watchpoint_snapshot});
+          child_retained = true;
+        } catch (...) {
+          if (!child_retained) {
+            try {
+              lowlevel::detach(child, SIGKILL);
+            } catch (...) {
+              (void)::kill(child, SIGKILL);
+            }
+          }
+          throw;
+        }
+
+        stop_info_ = make_stop(StopReason::Trap, SIGTRAP, event.tid);
+        stop_info_.process_event = ProcessEventKind::Fork;
+        stop_info_.parent_pid = parent;
+        stop_info_.child_pid = child;
+        stop_info_.retains_child = true;
+        return stop_info_;
+      }
 
       if (fork_follow_policy_ == ForkFollowPolicy::Child) {
         if (process_.origin() != ProcessOrigin::Launched) {

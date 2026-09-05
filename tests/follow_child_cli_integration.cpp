@@ -155,12 +155,20 @@ void require_untraced(pid_t pid) {
   throw std::runtime_error("follow-child parent remained ptrace-owned");
 }
 
+void require_traced_by(pid_t tracee, pid_t tracer, const std::string& message) {
+  for (int attempt = 0; attempt < 200; ++attempt) {
+    if (tracer_pid(tracee) == tracer) return;
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+  throw std::runtime_error(message);
+}
+
 void require_process_gone(pid_t pid) {
   for (int attempt = 0; attempt < 200; ++attempt) {
     if (!std::filesystem::exists(std::filesystem::path("/proc") / std::to_string(pid))) return;
     std::this_thread::sleep_for(std::chrono::milliseconds(5));
   }
-  throw std::runtime_error("detached parent remained after followed child completion");
+  throw std::runtime_error("process remained after debugger session completion");
 }
 
 void require_clean_cli_exit(CliProcess& cli) {
@@ -178,7 +186,7 @@ void require_clean_cli_exit(CliProcess& cli) {
     result = ::waitpid(cli.pid, &status, 0);
   } while (result == -1 && errno == EINTR);
   require(result == cli.pid && WIFEXITED(status) && WEXITSTATUS(status) == 0,
-          "mdbg follow-child CLI did not exit cleanly");
+          "mdbg fork CLI did not exit cleanly");
   cli.pid = -1;
 }
 
@@ -235,6 +243,96 @@ void run_follow_child_cli(const std::string& driver, const std::string& mdbg) {
   }
 }
 
+void run_two_process_cli(const std::string& driver, const std::string& mdbg) {
+  auto cli = spawn_cli(mdbg, driver);
+  pid_t parent = -1;
+  pid_t child = -1;
+  try {
+    auto output = read_until(cli, "(mdbg) ");
+    require(output.find("stopped after exec") != std::string::npos,
+            "two-process CLI did not expose initial exec stop");
+
+    write_cli(cli, "set follow-fork-mode both\n");
+    output = read_until(cli, "(mdbg) ");
+    require(output.find("follow-fork-mode = both") != std::string::npos,
+            "CLI did not accept simultaneous fork ownership");
+
+    write_cli(cli, "continue\n");
+    output = read_until(cli, "(mdbg) ");
+    parent = parse_pid_after(output, "retained parent ");
+    child = parse_pid_after(output, "retained child ");
+    require(parent > 0 && child > 0 && parent != child,
+            "simultaneous fork did not expose distinct retained processes");
+    require_traced_by(parent, cli.pid, "retained parent is not traced by mdbg");
+    require_traced_by(child, cli.pid, "retained child is not traced by mdbg");
+
+    write_cli(cli, "info processes\n");
+    output = read_until(cli, "(mdbg) ");
+    require(output.find("* " + std::to_string(parent) + " stopped") != std::string::npos,
+            "retained parent is not the initial active process");
+    require(output.find("  " + std::to_string(child) + " stopped") != std::string::npos,
+            "retained child is missing from process registry");
+
+    write_cli(cli, "x fork_shared_value 8\n");
+    output = read_until(cli, "(mdbg) ");
+    require(output.find("45 90 45 28 18 28 18 27") != std::string::npos,
+            "parent COW value changed before parent execution");
+
+    write_cli(cli, "process " + std::to_string(child) + "\n");
+    output = read_until(cli, "(mdbg) ");
+    require(output.find("selected process " + std::to_string(child)) != std::string::npos,
+            "CLI did not select retained child process");
+
+    write_cli(cli, "stepi\n");
+    output = read_until(cli, "(mdbg) ");
+    require(output.find("single-step trap on thread " + std::to_string(child)) !=
+                std::string::npos,
+            "single-step did not route through selected child process");
+
+    write_cli(cli, "continue\n");
+    output = read_until(cli, "(mdbg) ");
+    require(output.find("stopped by signal " + std::to_string(SIGSTOP)) != std::string::npos &&
+                output.find("on thread " + std::to_string(child)) != std::string::npos,
+            "child did not surface its independent SIGSTOP");
+
+    write_cli(cli, "x fork_shared_value 8\n");
+    output = read_until(cli, "(mdbg) ");
+    require(output.find("46 90 45 28 18 28 18 27") != std::string::npos,
+            "child COW write was not visible in selected process");
+
+    write_cli(cli, "continue\n");
+    output = read_until(cli, "(mdbg) ");
+    require(output.find("process " + std::to_string(child) + " exited with code 0") !=
+                std::string::npos,
+            "child terminal event was not surfaced independently");
+    require(output.find("active process " + std::to_string(parent)) != std::string::npos,
+            "remaining parent was not promoted after child exit");
+
+    write_cli(cli, "info processes\n");
+    output = read_until(cli, "(mdbg) ");
+    require(output.find("* " + std::to_string(parent) + " stopped") != std::string::npos,
+            "parent is not the active remaining process");
+
+    write_cli(cli, "x fork_shared_value 8\n");
+    output = read_until(cli, "(mdbg) ");
+    require(output.find("45 90 45 28 18 28 18 27") != std::string::npos,
+            "parent memory was corrupted by child COW execution");
+
+    write_cli(cli, "continue\n");
+    output = read_to_eof(cli);
+    require(output.find("process exited with code 0") != std::string::npos,
+            "remaining parent did not exit cleanly");
+    require_clean_cli_exit(cli);
+    require_process_gone(parent);
+    require_process_gone(child);
+  } catch (...) {
+    if (parent > 0) (void)::kill(parent, SIGKILL);
+    if (child > 0) (void)::kill(child, SIGKILL);
+    terminate_cli(cli);
+    throw;
+  }
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -244,9 +342,10 @@ int main(int argc, char** argv) {
   }
   try {
     run_follow_child_cli(argv[1], argv[2]);
-    std::cout << "follow-child CLI integration passed\n";
+    run_two_process_cli(argv[1], argv[2]);
+    std::cout << "fork CLI integration passed\n";
   } catch (const std::exception& error) {
-    std::cerr << "follow-child CLI integration failure: " << error.what() << '\n';
+    std::cerr << "fork CLI integration failure: " << error.what() << '\n';
     return 1;
   }
   return 0;

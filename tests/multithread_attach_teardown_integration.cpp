@@ -118,21 +118,41 @@ void require_tracer_state(pid_t leader, const std::vector<pid_t>& tids, pid_t tr
   }
 }
 
+pid_t worker_tid(pid_t leader, const std::vector<pid_t>& tids) {
+  for (const auto tid : tids) {
+    if (tid != leader) return tid;
+  }
+  throw std::runtime_error("worker TID is unavailable");
+}
+
 void test_explicit_multithread_detach(const std::string& fixture) {
   const auto child = spawn_threaded_fixture(fixture, "attach-threaded");
   try {
     const auto before = task_ids(child.pid);
     require(before.size() >= 2, "fixture did not expose a pre-existing worker");
+    const auto worker = worker_tid(child.pid, before);
 
     auto debugger = mdbg::Debugger::attach(child.pid);
     require(debugger.active_tid() == child.pid,
             "attach must select the thread-group leader as initial active TID");
     require_tracer_state(child.pid, before, ::getpid(), "attach did not trace every existing TID");
 
+    bool invalid_rejected = false;
+    try {
+      debugger.select_thread(999999999);
+    } catch (const std::invalid_argument&) {
+      invalid_rejected = true;
+    }
+    require(invalid_rejected, "untracked TID selection was not rejected deterministically");
+
+    debugger.select_thread(worker);
+    require(debugger.active_tid() == worker,
+            "worker did not remain active before explicit detach");
     debugger.detach();
     require(debugger.state() == mdbg::ProcessState::Detached,
             "explicit detach did not transition to Detached");
-    require_tracer_state(child.pid, before, 0, "explicit detach left a TID traced");
+    require_tracer_state(child.pid, before, 0,
+                         "explicit detach after thread selection left a TID traced");
     release_and_require_clean_exit(child);
   } catch (...) {
     terminate_child(child);
@@ -149,8 +169,10 @@ void test_destructor_multithread_detach(const std::string& fixture) {
       auto debugger = mdbg::Debugger::attach(child.pid);
       require_tracer_state(child.pid, before, ::getpid(),
                            "destructor setup did not trace every existing TID");
+      debugger.select_thread(worker_tid(child.pid, before));
     }
-    require_tracer_state(child.pid, before, 0, "debugger destructor left a TID traced");
+    require_tracer_state(child.pid, before, 0,
+                         "debugger destructor after thread selection left a TID traced");
     release_and_require_clean_exit(child);
   } catch (...) {
     terminate_child(child);
@@ -163,7 +185,7 @@ void test_explicit_thread_selection_progress(const std::string& fixture) {
   try {
     const auto before = task_ids(child.pid);
     require(before.size() == 2, "selection fixture must expose one leader and one worker");
-    const auto worker = before.front() == child.pid ? before.back() : before.front();
+    const auto worker = worker_tid(child.pid, before);
     const auto breakpoint_address = first_breakpoint_address(child.path);
 
     auto debugger = mdbg::Debugger::attach(child.pid);
@@ -214,6 +236,14 @@ void test_explicit_thread_selection_progress(const std::string& fixture) {
             "selected worker did not complete and exit after its displaced breakpoint step");
     require(debugger.active_tid() == child.pid,
             "stopped leader did not become active after the selected worker exited");
+
+    bool exited_rejected = false;
+    try {
+      debugger.select_thread(worker);
+    } catch (const std::invalid_argument&) {
+      exited_rejected = true;
+    }
+    require(exited_rejected, "exited worker TID remained selectable");
     require(debugger.remove_breakpoint(breakpoint_id),
             "managed breakpoint could not be removed after worker exit");
 

@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <map>
 #include <optional>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -19,6 +20,9 @@ class DeferredBreakpoints;
 enum class StopReason {
   InitialExec,
   Attached,
+  ThreadCreated,
+  ThreadExited,
+  ThreadSignaled,
   Breakpoint,
   Watchpoint,
   SingleStep,
@@ -35,6 +39,8 @@ struct StopInfo {
   std::optional<std::uintptr_t> breakpoint_address{};
   std::optional<std::size_t> watchpoint_id{};
   std::optional<std::uintptr_t> watchpoint_address{};
+  pid_t tid{-1};
+  std::optional<pid_t> new_tid{};
 };
 
 struct Watchpoint {
@@ -56,6 +62,7 @@ class Debugger {
   static Debugger attach(pid_t pid);
 
   [[nodiscard]] pid_t pid() const noexcept { return process_.pid(); }
+  [[nodiscard]] pid_t active_tid() const noexcept { return process_.current_tid(); }
   [[nodiscard]] ProcessState state() const noexcept { return process_.state(); }
   [[nodiscard]] ProcessOrigin origin() const noexcept { return process_.origin(); }
   [[nodiscard]] const StopInfo& stop_info() const noexcept { return stop_info_; }
@@ -76,7 +83,13 @@ class Debugger {
   [[nodiscard]] std::vector<Watchpoint> watchpoints() const;
 
  private:
+  struct PendingBreakpointStep {
+    std::uintptr_t address;
+    pid_t tid;
+  };
+
   struct DebugRegisterSnapshot {
+    pid_t tid;
     std::uint64_t dr0;
     std::uint64_t dr6;
     std::uint64_t dr7;
@@ -86,14 +99,15 @@ class Debugger {
 
   Debugger(Process process, StopInfo initial_stop);
 
+  [[nodiscard]] pid_t stopped_tid() const;
   StopInfo wait_and_classify(bool expected_single_step = false);
   int resume_signal(SignalPolicy policy) const;
-  void prepare_breakpoint_hit(std::uintptr_t address, user_regs_struct regs);
+  void prepare_breakpoint_hit(std::uintptr_t address, user_regs_struct regs, pid_t tid);
   StopInfo step_over_pending_breakpoint(bool expose_single_step);
-  void reinsert_breakpoint(std::uintptr_t address);
+  void reinsert_breakpoint(std::uintptr_t address, pid_t tid);
   void restore_all_breakpoints();
   void restore_watchpoint_registers();
-  [[nodiscard]] std::optional<StopInfo> classify_watchpoint_stop();
+  [[nodiscard]] std::optional<StopInfo> classify_watchpoint_stop(pid_t tid);
   bool discard_breakpoint(std::size_t id) noexcept;
 
   Process process_;
@@ -101,10 +115,11 @@ class Debugger {
   std::map<std::uintptr_t, Breakpoint> breakpoints_by_address_;
   std::map<std::size_t, std::uintptr_t> breakpoint_ids_;
   std::size_t next_breakpoint_id_{1};
-  std::optional<std::uintptr_t> pending_breakpoint_step_;
+  std::optional<PendingBreakpointStep> pending_breakpoint_step_;
   std::optional<Watchpoint> watchpoint_;
   std::optional<DebugRegisterSnapshot> watchpoint_register_snapshot_;
   std::size_t next_watchpoint_id_{1};
+  std::set<pid_t> pending_thread_starts_;
 };
 
 }  // namespace mdbg

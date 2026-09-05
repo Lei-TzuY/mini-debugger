@@ -82,6 +82,15 @@ void print_stop(const mdbg::StopInfo& info, const mdbg::ElfFile& elf, pid_t pid)
     case StopReason::Attached:
       std::cout << "attached to process " << pid << '\n';
       break;
+    case StopReason::ThreadCreated:
+      std::cout << "thread " << info.tid << " created and stopped\n";
+      break;
+    case StopReason::ThreadExited:
+      std::cout << "thread " << info.tid << " exited with code " << info.value << '\n';
+      break;
+    case StopReason::ThreadSignaled:
+      std::cout << "thread " << info.tid << " terminated by signal " << info.value << '\n';
+      break;
     case StopReason::Breakpoint: {
       std::cout << "breakpoint at 0x" << std::hex << *info.breakpoint_address << std::dec;
       try {
@@ -93,6 +102,7 @@ void print_stop(const mdbg::StopInfo& info, const mdbg::ElfFile& elf, pid_t pid)
         }
       } catch (const std::exception&) {
       }
+      if (info.tid > 0) std::cout << " [tid " << info.tid << ']';
       std::cout << '\n';
       break;
     }
@@ -102,16 +112,23 @@ void print_stop(const mdbg::StopInfo& info, const mdbg::ElfFile& elf, pid_t pid)
       if (info.watchpoint_address) {
         std::cout << " at 0x" << std::hex << *info.watchpoint_address << std::dec;
       }
+      if (info.tid > 0) std::cout << " [tid " << info.tid << ']';
       std::cout << '\n';
       break;
     case StopReason::SingleStep:
-      std::cout << "single-step trap\n";
+      std::cout << "single-step trap";
+      if (info.tid > 0) std::cout << " on thread " << info.tid;
+      std::cout << '\n';
       break;
     case StopReason::Signal:
-      std::cout << "stopped by signal " << info.value << '\n';
+      std::cout << "stopped by signal " << info.value;
+      if (info.tid > 0) std::cout << " on thread " << info.tid;
+      std::cout << '\n';
       break;
     case StopReason::Trap:
-      std::cout << "SIGTRAP (not a managed breakpoint)\n";
+      std::cout << "SIGTRAP (not a managed breakpoint)";
+      if (info.tid > 0) std::cout << " on thread " << info.tid;
+      std::cout << '\n';
       break;
     case StopReason::Exited:
       std::cout << "process exited with code " << info.value << '\n';

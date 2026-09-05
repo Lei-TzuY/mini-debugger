@@ -61,6 +61,7 @@ class Process {
   }
 
   void update_aggregate_state() noexcept;
+  void select_current_task() noexcept;
   void cleanup() noexcept;
 
   pid_t pid_{-1};

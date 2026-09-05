@@ -146,16 +146,73 @@ struct Session {
         addresses{} {
     require(debugger.stop_info().reason == mdbg::StopReason::InitialExec,
             "launch should expose initial exec stop");
+    require(debugger.stop_info().tid == debugger.pid(),
+            "initial exec stop must identify the leader TID");
     require(debugger.state() == mdbg::ProcessState::Stopped,
             "tracee should be stopped after launch");
     const auto sync = debugger.continue_execution();
     require(sync.reason == mdbg::StopReason::Signal && sync.value == SIGSTOP,
             "fixture synchronization SIGSTOP was not observed");
+    require(sync.tid == debugger.pid(),
+            "fixture synchronization stop must identify the leader TID");
     addresses = read_addresses(path);
   }
 
   ~Session() { std::remove(path.c_str()); }
 };
+
+void test_worker_thread_breakpoint_execution(const std::string& fixture) {
+  Session session(fixture, "thread-breakpoint");
+  const auto leader = session.debugger.pid();
+  const auto breakpoint_id = session.debugger.add_breakpoint(session.addresses.one);
+  require(breakpoint_id == 1, "first managed breakpoint id must start at one");
+
+  auto info = session.debugger.continue_execution();
+  require(info.reason == mdbg::StopReason::ThreadCreated,
+          "pthread clone must surface one thread-created stop");
+  require(info.new_tid.has_value() && *info.new_tid == info.tid && info.tid != leader,
+          "thread-created stop must identify the new worker TID");
+  const auto worker = info.tid;
+  require(session.debugger.active_tid() == worker,
+          "new worker must become the active stopped TID");
+  require(session.debugger.registers().rip != 0,
+          "register access must target the active worker TID");
+
+  info = session.debugger.continue_execution();
+  require(info.reason == mdbg::StopReason::Breakpoint && info.tid == worker &&
+              info.breakpoint_address == session.addresses.one,
+          "worker did not hit the process-wide managed breakpoint");
+  require(session.debugger.active_tid() == worker,
+          "breakpoint stop must preserve worker as the active TID");
+  require(session.debugger.registers().rip == session.addresses.one,
+          "worker RIP was not repaired to the managed breakpoint address");
+
+  info = session.debugger.single_step();
+  require(info.reason == mdbg::StopReason::SingleStep && info.tid == worker,
+          "displaced breakpoint step must execute on the worker TID");
+  require(session.debugger.active_tid() == worker,
+          "single-step stop must remain associated with the worker TID");
+  require(session.debugger.registers().rip != session.addresses.one,
+          "worker single-step did not advance RIP");
+
+  info = session.debugger.continue_execution();
+  require(info.reason == mdbg::StopReason::Breakpoint && info.tid == worker &&
+              info.breakpoint_address == session.addresses.one,
+          "process-wide breakpoint was not reinserted for the worker's second call");
+
+  info = session.debugger.continue_execution();
+  require(info.reason == mdbg::StopReason::ThreadExited && info.tid == worker &&
+              info.value == 0,
+          "worker exit must not be misreported as whole-process exit");
+  require(session.debugger.active_tid() == leader,
+          "leader must become active after the worker exits");
+  require(session.debugger.state() == mdbg::ProcessState::Stopped,
+          "leader must remain stopped while worker lifecycle events are surfaced");
+
+  info = session.debugger.continue_execution();
+  require(info.reason == mdbg::StopReason::Exited && info.tid == leader && info.value == 0,
+          "leader did not exit cleanly after worker completion");
+}
 
 void test_normal_exit(const std::string& fixture) {
   Session session(fixture, "exit");
@@ -401,6 +458,7 @@ int main(int argc, char** argv) {
   try {
     const std::string fixture = argv[1];
     test_multithread_process_lifecycle(fixture);
+    test_worker_thread_breakpoint_execution(fixture);
     test_normal_exit(fixture);
     test_elf_runtime_symbol_resolution(fixture);
     test_registers_and_memory(fixture);

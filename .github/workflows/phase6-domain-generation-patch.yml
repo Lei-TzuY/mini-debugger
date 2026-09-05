@@ -1,0 +1,50 @@
+name: phase6-domain-generation-patch
+
+on:
+  push:
+    branches:
+      - feat/caller-frame-source-values
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/caller-frame-source-values
+          fetch-depth: 0
+      - name: Apply process-domain generation ownership fix
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          debugger_path = Path('src/debugger/debugger.cpp')
+          debugger = debugger_path.read_text()
+          old = '''  swap_active_process(pid);\n}\n\nstd::vector<ThreadInfo> Debugger::threads() const {'''
+          new = '''  swap_active_process(pid);\n  stop_info_.sequence = next_stop_sequence();\n}\n\nstd::vector<ThreadInfo> Debugger::threads() const {'''
+          if debugger.count(old) != 1:
+              raise SystemExit('expected select_process tail exactly once')
+          debugger_path.write_text(debugger.replace(old, new, 1))
+
+          test_path = Path('tests/nested_process_domain_integration.cpp')
+          test = test_path.read_text()
+          old = '''  const auto child = *info.child_pid;\n  require(child != parent, "first nested fork did not create a distinct child");\n\n  const auto parent_breakpoint = debugger.add_breakpoint(probe_address);'''
+          new = '''  const auto child = *info.child_pid;\n  require(child != parent, "first nested fork did not create a distinct child");\n\n  const auto parent_stop_sequence = debugger.stop_info().sequence;\n  debugger.select_process(child);\n  debugger.select_process(parent);\n  require(debugger.stop_info().sequence != parent_stop_sequence,\n          "process-domain round trip did not invalidate the prior inspection generation");\n\n  const auto parent_breakpoint = debugger.add_breakpoint(probe_address);'''
+          if test.count(old) != 1:
+              raise SystemExit('expected first nested-fork child anchor exactly once')
+          test_path.write_text(test.replace(old, new, 1))
+          PY
+      - name: Commit fix and remove construction workflow
+        shell: bash
+        run: |
+          git config user.name 'LeiZ'
+          git config user.email '52287354+Lei-TzuY@users.noreply.github.com'
+          git rm .github/workflows/phase6-domain-generation-patch.yml
+          git add src/debugger/debugger.cpp tests/nested_process_domain_integration.cpp
+          git commit -m 'fix: invalidate frames across process selection'
+          git push origin HEAD:feat/caller-frame-source-values

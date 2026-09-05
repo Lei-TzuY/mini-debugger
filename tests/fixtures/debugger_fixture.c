@@ -303,6 +303,11 @@ int main(int argc, char** argv) {
     backtrace_outer();
     return 0;
   }
+  if (strcmp(argv[2], "backtrace-repeat") == 0) {
+    backtrace_outer();
+    backtrace_outer();
+    return fixture_value == 0x112233445566778eULL ? 0 : 114;
+  }
   if (strcmp(argv[2], "watchpoint") == 0) {
     watched_write();
     watched_write();

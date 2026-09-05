@@ -10,9 +10,13 @@
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
+#include <fstream>
+#include <iomanip>
 #include <iostream>
+#include <sstream>
 #include <stdexcept>
 #include <string>
+#include <thread>
 
 namespace {
 
@@ -26,21 +30,28 @@ void require(bool condition, const std::string& message) {
   if (!condition) throw std::runtime_error(message);
 }
 
+std::uintptr_t entry_value_address(const mdbg::ElfFile& elf, pid_t pid,
+                                   const mdbg::ElfSymbol& function) {
+  if (function.size == 0) {
+    throw std::runtime_error("entry-value function symbol has zero size");
+  }
+  return static_cast<std::uintptr_t>(elf.runtime_address(pid, function) + function.size - 1);
+}
+
 void test_missing_entry_snapshot(const std::string& fixture) {
   auto debugger = mdbg::Debugger::launch(fixture, {});
   const mdbg::ElfFile elf(fixture);
-  const auto entry_probe = elf.find_symbol("entry_parameter_probe");
-  require(entry_probe.has_value(), "DWARF5 entry-value probe symbol is missing");
-  const auto entry_address = static_cast<std::uintptr_t>(
-      elf.runtime_address(debugger.pid(), *entry_probe));
+  const auto entry_function = elf.find_symbol("inspect_entry_parameter");
+  require(entry_function.has_value(), "DWARF5 entry function symbol is missing");
+  const auto entry_address = entry_value_address(elf, debugger.pid(), *entry_function);
   debugger.add_breakpoint(entry_address);
 
   const auto stop = debugger.continue_execution();
   require(stop.reason == mdbg::StopReason::Breakpoint &&
               stop.breakpoint_address == entry_address,
-          "DWARF5 fixture did not stop in the entry-value parameter range");
+          "DWARF5 fixture did not stop in the compiler entry-value range");
   require(debugger.registers().rdi == kExpectedEntryRdiSentinel,
-          "entry-value helper did not leave the expected current RDI sentinel");
+          "entry-value range did not preserve the expected current RDI sentinel");
 
   bool missing_snapshot_failed = false;
   std::string missing_snapshot_error = "inspection unexpectedly succeeded";
@@ -65,15 +76,12 @@ void test_direct_api(const std::string& fixture) {
   auto debugger = mdbg::Debugger::launch(fixture, {});
   const mdbg::ElfFile elf(fixture);
   const auto entry_function = elf.find_symbol("inspect_entry_parameter");
-  const auto entry_probe = elf.find_symbol("entry_parameter_probe");
   const auto optimized_probe = elf.find_symbol("optimized_local_probe");
   require(entry_function.has_value(), "DWARF5 entry function symbol is missing");
-  require(entry_probe.has_value(), "DWARF5 entry-value probe symbol is missing");
   require(optimized_probe.has_value(), "DWARF5 optimized-local probe symbol is missing");
   const auto function_address = static_cast<std::uintptr_t>(
       elf.runtime_address(debugger.pid(), *entry_function));
-  const auto entry_address = static_cast<std::uintptr_t>(
-      elf.runtime_address(debugger.pid(), *entry_probe));
+  const auto entry_address = entry_value_address(elf, debugger.pid(), *entry_function);
   const auto optimized_address = static_cast<std::uintptr_t>(
       elf.runtime_address(debugger.pid(), *optimized_probe));
   debugger.add_breakpoint(function_address);
@@ -90,10 +98,10 @@ void test_direct_api(const std::string& fixture) {
   stop = debugger.continue_execution();
   require(stop.reason == mdbg::StopReason::Breakpoint &&
               stop.breakpoint_address == entry_address,
-          "DWARF5 fixture did not stop in the entry-value parameter range");
+          "DWARF5 fixture did not stop in the compiler entry-value range");
   const auto current_rdi = debugger.registers().rdi;
   require(current_rdi == kExpectedEntryRdiSentinel,
-          "entry-value helper did not leave the expected current RDI sentinel");
+          "entry-value range did not preserve the expected current RDI sentinel");
 
   const auto entry_value =
       mdbg::inspect_local_integer(debugger, elf, "entry_parameter");
@@ -134,6 +142,40 @@ void test_direct_api(const std::string& fixture) {
           "DWARF5 optimized-local fixture did not exit cleanly");
 }
 
+std::string read_until(int fd, const std::string& needle,
+                       std::chrono::steady_clock::time_point deadline) {
+  std::string output;
+  while (output.find(needle) == std::string::npos) {
+    const auto now = std::chrono::steady_clock::now();
+    if (now >= deadline) throw std::runtime_error("timed out waiting for CLI output: " + needle);
+    const auto remaining =
+        std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now).count();
+    pollfd descriptor{fd, POLLIN | POLLHUP, 0};
+    const int polled = ::poll(&descriptor, 1, static_cast<int>(remaining));
+    if (polled == -1 && errno == EINTR) continue;
+    if (polled <= 0) throw std::runtime_error("timed out reading CLI output: " + needle);
+    char buffer[512];
+    const auto count = ::read(fd, buffer, sizeof(buffer));
+    if (count == -1 && errno == EINTR) continue;
+    if (count <= 0) throw std::runtime_error("CLI exited before output: " + needle);
+    output.append(buffer, static_cast<std::size_t>(count));
+  }
+  return output;
+}
+
+pid_t wait_for_tracee_child(pid_t mdbg_pid) {
+  const auto children_path = std::filesystem::path("/proc") / std::to_string(mdbg_pid) /
+                             "task" / std::to_string(mdbg_pid) / "children";
+  for (int attempt = 0; attempt < 200; ++attempt) {
+    std::ifstream input(children_path);
+    pid_t tracee = -1;
+    pid_t extra = -1;
+    if ((input >> tracee) && !(input >> extra) && tracee > 0) return tracee;
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+  throw std::runtime_error("mdbg did not expose exactly one launched tracee child");
+}
+
 std::string run_cli(const std::string& mdbg_path, const std::string& fixture) {
   int input_pipe[2];
   int output_pipe[2];
@@ -158,9 +200,20 @@ std::string run_cli(const std::string& mdbg_path, const std::string& fixture) {
 
   ::close(input_pipe[0]);
   ::close(output_pipe[1]);
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(8);
+  std::string output = read_until(output_pipe[0], "(mdbg) ", deadline);
+
+  const pid_t tracee = wait_for_tracee_child(child);
+  const mdbg::ElfFile elf(fixture);
+  const auto entry_function = elf.find_symbol("inspect_entry_parameter");
+  require(entry_function.has_value(), "DWARF5 CLI entry function symbol is missing");
+  const auto entry_address = entry_value_address(elf, tracee, *entry_function);
+
+  std::ostringstream address_text;
+  address_text << "0x" << std::hex << entry_address;
   const std::string script =
       "break inspect_entry_parameter\n"
-      "break entry_parameter_probe\n"
+      "break " + address_text.str() + "\n"
       "break optimized_local_probe\n"
       "continue\n"
       "continue\n"
@@ -178,8 +231,6 @@ std::string run_cli(const std::string& mdbg_path, const std::string& fixture) {
   }
   ::close(input_pipe[1]);
 
-  std::string output;
-  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(8);
   for (;;) {
     const auto now = std::chrono::steady_clock::now();
     if (now >= deadline) {

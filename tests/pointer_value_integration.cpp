@@ -114,12 +114,14 @@ void test_pointer_api(const std::string& fixture) {
               stop.breakpoint_address == probe_address,
           "pointer fixture did not stop while local_pointer was live");
 
-  const auto value = mdbg::inspect_local_integer(debugger, elf, "local_pointer");
+  const auto value = mdbg::inspect_local_value(debugger, elf, "local_pointer");
   require(value.name == "local_pointer", "pointer lookup returned the wrong name");
+  require(value.kind == mdbg::LocalValueKind::Pointer,
+          "pointer lookup did not preserve pointer scalar type metadata");
   require(value.raw_value == target_address,
           "pointer lookup did not recover the live pointee address");
-  require(value.byte_size == sizeof(std::uint64_t),
-          "pointer lookup returned the wrong pointer width");
+  require(value.byte_size == sizeof(std::uint64_t) && !value.is_signed,
+          "pointer lookup returned the wrong pointer width/sign metadata");
   require(std::filesystem::equivalent(value.module_path, fixture),
           "pointer lookup lost owning module identity");
 

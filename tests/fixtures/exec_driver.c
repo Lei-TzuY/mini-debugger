@@ -16,6 +16,11 @@ __attribute__((noinline)) void fork_shared_probe(void) {
 }
 
 static int run_fork_topology(void) {
+  sigset_t blocked;
+  sigemptyset(&blocked);
+  sigaddset(&blocked, SIGCHLD);
+  if (sigprocmask(SIG_BLOCK, &blocked, NULL) != 0) return 19;
+
   const pid_t child = fork();
   if (child == -1) return 20;
   if (child == 0) {

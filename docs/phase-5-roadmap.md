@@ -92,11 +92,26 @@ Completed Priority 5 contract:
 
 Priority 5 does not add `DW_OP_deref` or a general location-expression VM. It adds only the compiler-proven distinction between a register-relative value expression terminated by `DW_OP_stack_value` and the same bounded register-relative address used as owned memory storage.
 
-## Current frontier: next compiler-produced expression failure
+## Priority 6: compiler inlined-scope local ownership — complete
 
-Do not select the next opcode family from the DWARF specification by enumeration. First find a real GCC or Clang current-PC location expression that the existing evaluator rejects in an otherwise valid source-value workflow, preserve the exact compiler evidence, and then add only the minimum semantics and ownership state required by that failure.
+The seventh Phase 5 slice advances source-value ownership rather than adding another opcode. A dedicated always-inline helper in the existing `-O1 -g -gdwarf-5` formal-parameter fixture keeps `inline_local` live at an exported current-PC probe. GCC 13.3 and Clang 18.1.3 both emit a concrete local DIE under `DW_TAG_inlined_subroutine` whose source identity/type are inherited through `DW_AT_abstract_origin`; before this slice the evaluator only treated lexical blocks beneath the current concrete subprogram as valid nested ownership and therefore rejected the local as outside the current subprogram.
 
-Potential surfaces such as dereference chains, inlined-scope ownership, richer stack-value combinations, additional piece layouts, or additional entry-value registers remain candidates only when real compiler output makes one independently necessary. A candidate that only appears in an inactive location-list range is not sufficient evidence.
+Completed Priority 6 contract:
+
+- test-first PIE and non-PIE sessions in both permanent compiler lanes build successfully and fail only at the new inlined-local API/CLI lookup with `local value is not in the current subprogram: inline_local`, while every other test remains green;
+- local-scope selection now admits only the existing `DW_TAG_lexical_block` and the compiler-proven `DW_TAG_inlined_subroutine`, and every intermediate scope must still contain the selected current PC through the supported `DW_AT_low_pc`/`DW_AT_high_pc` range model;
+- source identity and type may be inherited through a bounded `DW_AT_abstract_origin` chain, but only through `DW_FORM_ref4`, only to known DIE offsets, with self-reference and chains deeper than eight links rejected deterministically;
+- runtime storage ownership remains concrete: `DW_AT_location` is never inherited from the abstract origin. The selected concrete DIE/location expression remains the sole authority for registers, memory, location lists, and current-PC storage;
+- the final fixture deliberately isolates ownership from new evaluator semantics by copying a runtime seed into the inlined local and pinning the probe to an already-supported register location; direct API and real CLI coverage prove `inline_local == 0x02146638cadcae70` for PIE and non-PIE under GCC and Clang-large;
+- intermediate fixture attempts exposed unrelated compiler-specific value-expression, frame-base, and qualified-type surfaces. Those were intentionally excluded rather than broadening this ownership slice; they remain future candidates only if an independent active current-PC workflow selects them.
+
+Priority 6 does not implement generic DWARF DIE inheritance, arbitrary inline call-stack reconstruction, abstract-origin location inheritance, or new location-expression families. It extends the existing lexical ownership model only far enough to recover compiler-produced inlined locals whose concrete storage is already evaluable.
+
+## Current frontier: next compiler-produced expression or ownership failure
+
+Do not select the next opcode family from the DWARF specification by enumeration. First find a real GCC or Clang current-PC location expression or ownership shape that the existing evaluator rejects in an otherwise valid source-value workflow, preserve the exact compiler evidence, and then add only the minimum semantics and ownership state required by that failure.
+
+Potential surfaces such as dereference chains, richer stack-value combinations, additional piece layouts, additional entry-value registers, qualified-type chains, or deeper inline/call-site ownership remain candidates only when real compiler output makes one independently necessary. A candidate that only appears in an inactive location-list range is not sufficient evidence.
 
 ## Selection rule
 

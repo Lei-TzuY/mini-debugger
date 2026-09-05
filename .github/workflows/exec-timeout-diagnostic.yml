@@ -46,9 +46,12 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          for i in $(seq 1 12); do
+          driver="$(realpath ./build/exec_driver_pie)"
+          target="$(realpath ./build/exec_target_pie)"
+          testbin="$(realpath ./build/exec_image_integration)"
+          for i in $(seq 1 20); do
             echo "=== diagnostic iteration $i ==="
-            timeout --signal=KILL 8s ./build/exec_image_integration ./build/exec_driver_pie ./build/exec_target_pie 2>&1 | tee /tmp/exec-diag-$i.log
+            timeout --signal=KILL 8s "$testbin" "$driver" "$target" 2>&1 | tee /tmp/exec-diag-$i.log
             status=${PIPESTATUS[0]}
             if [ "$status" -ne 0 ]; then
               echo "diagnostic iteration $i failed/status=$status"

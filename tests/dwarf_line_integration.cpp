@@ -19,6 +19,7 @@ namespace {
 
 constexpr std::uint64_t kExpectedLocalRawValue = 0x1020304050607080ULL;
 constexpr const char* kExpectedLocalValue = "local_value = 1161981756646125696";
+constexpr const char* kExpectedParameterValue = "parameter = 1161981756646125696";
 
 void require(bool condition, const std::string& message) {
   if (!condition) throw std::runtime_error(message);
@@ -123,7 +124,42 @@ void test_local_value_api(const std::string& fixture) {
           "local-value fixture did not exit cleanly after inspection");
 }
 
-std::string run_value_cli(const std::string& integration_path, const std::string& fixture) {
+void test_formal_parameter_api(const std::string& fixture) {
+  auto debugger = mdbg::Debugger::launch(fixture, {});
+  const mdbg::ElfFile elf(fixture);
+  const auto probe = elf.find_symbol("formal_parameter_probe");
+  require(probe.has_value(), "formal_parameter_probe symbol missing from optimized fixture");
+  const auto address = static_cast<std::uintptr_t>(elf.runtime_address(debugger.pid(), *probe));
+  debugger.add_breakpoint(address);
+  const auto stop = debugger.continue_execution();
+  require(stop.reason == mdbg::StopReason::Breakpoint && stop.breakpoint_address == address,
+          "formal-parameter fixture did not stop while the parameter was live");
+
+  const auto value = mdbg::inspect_local_integer(debugger, elf, "parameter");
+  require(value.name == "parameter", "formal-parameter API returned the wrong name");
+  require(value.raw_value == kExpectedLocalRawValue,
+          "formal-parameter API returned the wrong register-resident value");
+  require(value.byte_size == sizeof(std::uint64_t) && !value.is_signed,
+          "formal-parameter API returned the wrong uint64_t type metadata");
+  require(std::filesystem::equivalent(value.module_path, fixture),
+          "formal-parameter API did not preserve the owning module identity");
+
+  bool missing_failed = false;
+  try {
+    (void)mdbg::inspect_local_integer(debugger, elf, "missing_parameter");
+  } catch (const std::exception&) {
+    missing_failed = true;
+  }
+  require(missing_failed, "missing formal parameter did not fail explicitly");
+
+  const auto exit = debugger.continue_execution();
+  require(exit.reason == mdbg::StopReason::Exited && exit.value == 0,
+          "formal-parameter fixture did not exit cleanly after inspection");
+}
+
+std::string run_cli_script(const std::string& integration_path, const std::string& fixture,
+                           const char* mode, const std::string& script,
+                           const char* context) {
   const auto mdbg_path =
       (std::filesystem::absolute(integration_path).parent_path() / "mdbg").string();
   require(std::filesystem::exists(mdbg_path), "mdbg executable is missing beside integration test");
@@ -145,18 +181,17 @@ std::string run_value_cli(const std::string& integration_path, const std::string
     ::close(input_pipe[1]);
     ::close(output_pipe[0]);
     ::close(output_pipe[1]);
-    ::execl(mdbg_path.c_str(), mdbg_path.c_str(), fixture.c_str(), "value", nullptr);
+    if (mode != nullptr) {
+      ::execl(mdbg_path.c_str(), mdbg_path.c_str(), fixture.c_str(), mode, nullptr);
+    } else {
+      ::execl(mdbg_path.c_str(), mdbg_path.c_str(), fixture.c_str(), nullptr);
+    }
     _exit(127);
   }
 
   ::close(input_pipe[0]);
   ::close(output_pipe[1]);
 
-  const std::string script =
-      "break local_value_probe\n"
-      "continue\n"
-      "print local_value\n"
-      "continue\n";
   std::size_t written = 0;
   while (written < script.size()) {
     const auto count = ::write(input_pipe[1], script.data() + written, script.size() - written);
@@ -174,7 +209,7 @@ std::string run_value_cli(const std::string& integration_path, const std::string
     if (now >= deadline) {
       ::kill(-child, SIGKILL);
       ::kill(child, SIGKILL);
-      throw std::runtime_error("timed out waiting for value-inspection CLI");
+      throw std::runtime_error(std::string("timed out waiting for ") + context);
     }
     const auto remaining =
         std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now).count();
@@ -184,13 +219,13 @@ std::string run_value_cli(const std::string& integration_path, const std::string
     if (result <= 0) {
       ::kill(-child, SIGKILL);
       ::kill(child, SIGKILL);
-      throw std::runtime_error("timed out reading value-inspection CLI output");
+      throw std::runtime_error(std::string("timed out reading ") + context + " output");
     }
 
     char buffer[512];
     const auto count = ::read(output_pipe[0], buffer, sizeof(buffer));
     if (count == -1 && errno == EINTR) continue;
-    if (count < 0) throw std::runtime_error("failed to read value-inspection CLI output");
+    if (count < 0) throw std::runtime_error(std::string("failed to read ") + context + " output");
     if (count == 0) {
       eof = true;
     } else {
@@ -205,16 +240,40 @@ std::string run_value_cli(const std::string& integration_path, const std::string
     waited = ::waitpid(child, &status, 0);
   } while (waited == -1 && errno == EINTR);
   require(waited == child && WIFEXITED(status) && WEXITSTATUS(status) == 0,
-          "value-inspection CLI did not exit cleanly\n" + output);
+          std::string(context) + " did not exit cleanly\n" + output);
   return output;
 }
 
 void test_cli_local_value(const std::string& integration_path, const std::string& fixture) {
-  const auto output = run_value_cli(integration_path, fixture);
+  const auto output = run_cli_script(
+      integration_path, fixture, "value",
+      "break local_value_probe\n"
+      "continue\n"
+      "print local_value\n"
+      "continue\n",
+      "value-inspection CLI");
   require(output.find("Breakpoint 1") != std::string::npos,
           "CLI did not install the local-value probe breakpoint\n" + output);
   require(output.find(kExpectedLocalValue) != std::string::npos,
           "CLI did not render the compiler-generated local integer value\n" + output);
+}
+
+void test_cli_formal_parameter(const std::string& integration_path,
+                               const std::string& fixture) {
+  const auto output = run_cli_script(
+      integration_path, fixture, nullptr,
+      "break formal_parameter_probe\n"
+      "continue\n"
+      "print parameter\n"
+      "print missing_parameter\n"
+      "continue\n",
+      "formal-parameter CLI");
+  require(output.find("Breakpoint 1") != std::string::npos,
+          "CLI did not install the formal-parameter probe breakpoint\n" + output);
+  require(output.find(kExpectedParameterValue) != std::string::npos,
+          "CLI did not render the register-resident formal parameter\n" + output);
+  require(output.find("print failed:") != std::string::npos,
+          "CLI did not report a missing formal parameter explicitly\n" + output);
 }
 
 void test_missing_debug_line(const std::string& stripped_fixture) {
@@ -229,13 +288,15 @@ void test_missing_debug_line(const std::string& stripped_fixture) {
 }  // namespace
 
 int main(int argc, char** argv) {
-  if (argc != 4) return 2;
+  if (argc != 5) return 2;
   try {
     test_runtime_mapping(argv[1]);
     test_local_value_api(argv[1]);
     test_cli_local_value(argv[0], argv[1]);
     test_missing_debug_line(argv[2]);
     test_runtime_mapping(argv[3]);
+    test_formal_parameter_api(argv[4]);
+    test_cli_formal_parameter(argv[0], argv[4]);
     return 0;
   } catch (const std::exception& error) {
     std::fprintf(stderr, "DWARF line integration failure: %s\n", error.what());

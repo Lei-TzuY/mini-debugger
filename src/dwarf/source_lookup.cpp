@@ -26,6 +26,7 @@
 namespace mdbg {
 namespace {
 
+constexpr std::uint64_t kDwTagFormalParameter = 0x05;
 constexpr std::uint64_t kDwTagTypedef = 0x16;
 constexpr std::uint64_t kDwTagBaseType = 0x24;
 constexpr std::uint64_t kDwTagSubprogram = 0x2e;
@@ -52,6 +53,7 @@ constexpr std::uint64_t kDwFormSecOffset = 0x17;
 constexpr std::uint64_t kDwFormExprloc = 0x18;
 constexpr std::uint64_t kDwFormFlagPresent = 0x19;
 
+constexpr std::uint8_t kDwOpReg5 = 0x55;
 constexpr std::uint8_t kDwOpReg6 = 0x56;
 constexpr std::uint8_t kDwOpFbreg = 0x91;
 constexpr std::uint8_t kDwOpCallFrameCfa = 0x9c;
@@ -62,6 +64,7 @@ struct DebugSections {
   std::vector<std::byte> info;
   std::vector<std::byte> abbrev;
   std::vector<std::byte> strings;
+  std::vector<std::byte> locations;
 };
 
 struct AttributeSpec {
@@ -229,14 +232,18 @@ std::map<std::string, std::vector<std::byte>> read_named_sections(
 }
 
 DebugSections read_debug_sections(const std::string& path) {
-  const auto sections = read_named_sections(path, {".debug_info", ".debug_abbrev", ".debug_str"});
+  const auto sections = read_named_sections(
+      path, {".debug_info", ".debug_abbrev", ".debug_str", ".debug_loc"});
   const auto info = sections.find(".debug_info");
   const auto abbrev = sections.find(".debug_abbrev");
   const auto strings = sections.find(".debug_str");
   if (info == sections.end() || abbrev == sections.end() || strings == sections.end()) {
     throw std::runtime_error("local-value inspection requires .debug_info, .debug_abbrev, and .debug_str");
   }
-  return DebugSections{info->second, abbrev->second, strings->second};
+  const auto locations = sections.find(".debug_loc");
+  return DebugSections{info->second, abbrev->second, strings->second,
+                       locations == sections.end() ? std::vector<std::byte>{}
+                                                   : locations->second};
 }
 
 std::map<std::uint64_t, Abbreviation> parse_abbreviations(
@@ -470,6 +477,53 @@ std::int64_t fbreg_offset(const std::vector<std::byte>& expression) {
   return offset;
 }
 
+std::vector<std::byte> active_location_expression(const DebugSections& sections,
+                                                  std::uint64_t offset,
+                                                  std::uint64_t virtual_pc,
+                                                  std::uint64_t initial_base) {
+  if (sections.locations.empty()) {
+    throw std::runtime_error("formal parameter location list requires .debug_loc");
+  }
+  if (offset >= sections.locations.size()) {
+    throw std::runtime_error("formal parameter location-list offset is out of range");
+  }
+
+  std::size_t cursor = static_cast<std::size_t>(offset);
+  std::uint64_t base_address = initial_base;
+  while (cursor < sections.locations.size()) {
+    const auto begin = read_scalar<std::uint64_t>(sections.locations, cursor,
+                                                  sections.locations.size(),
+                                                  "DWARF4 location-list begin");
+    const auto end = read_scalar<std::uint64_t>(sections.locations, cursor,
+                                                sections.locations.size(),
+                                                "DWARF4 location-list end");
+    if (begin == 0 && end == 0) break;
+    if (begin == std::numeric_limits<std::uint64_t>::max()) {
+      base_address = end;
+      continue;
+    }
+
+    const auto length = read_scalar<std::uint16_t>(sections.locations, cursor,
+                                                   sections.locations.size(),
+                                                   "DWARF4 location expression length");
+    if (length > sections.locations.size() - cursor) {
+      throw std::runtime_error("DWARF4 location expression extends past .debug_loc");
+    }
+    const auto expression_end = cursor + static_cast<std::size_t>(length);
+    const auto range_begin = add_unsigned(base_address, begin, "location-list range begin");
+    const auto range_end = add_unsigned(base_address, end, "location-list range end");
+    if (range_end < range_begin) {
+      throw std::runtime_error("DWARF4 location-list range is reversed");
+    }
+    if (virtual_pc >= range_begin && virtual_pc < range_end) {
+      return std::vector<std::byte>(sections.locations.begin() + cursor,
+                                    sections.locations.begin() + expression_end);
+    }
+    cursor = expression_end;
+  }
+  throw std::runtime_error("formal parameter has no location for the current PC");
+}
+
 std::uint64_t frame_base(const Debugger& debugger, const ElfFile& module,
                          const std::vector<std::byte>& expression) {
   const auto regs = debugger.registers();
@@ -503,6 +557,12 @@ std::uint64_t read_integer(const Debugger& debugger, std::uint64_t address,
   return value;
 }
 
+std::uint64_t truncate_integer(std::uint64_t value, std::size_t byte_size) {
+  if (byte_size == 8) return value;
+  const auto bits = static_cast<unsigned>(byte_size * 8U);
+  return value & ((std::uint64_t{1} << bits) - 1U);
+}
+
 std::optional<LocalIntegerValue> inspect_unit(const DebugSections& sections,
                                               const Debugger& debugger,
                                               const ElfFile& module,
@@ -511,6 +571,16 @@ std::optional<LocalIntegerValue> inspect_unit(const DebugSections& sections,
                                               std::size_t unit_start,
                                               std::size_t& next_unit) {
   const auto dies = parse_unit_dies(sections, unit_start, next_unit);
+  std::uint64_t compilation_unit_base = 0;
+  for (const auto& die : dies) {
+    if (die.parent) continue;
+    const auto* low_pc = attribute(die, kDwAtLowPc);
+    if (low_pc != nullptr && low_pc->form == kDwFormAddr) {
+      compilation_unit_base = low_pc->number;
+      break;
+    }
+  }
+
   std::optional<std::size_t> subprogram;
   for (std::size_t index = 0; index < dies.size(); ++index) {
     if (dies[index].tag != kDwTagSubprogram || !subprogram_contains_pc(dies[index], virtual_pc)) {
@@ -521,46 +591,76 @@ std::optional<LocalIntegerValue> inspect_unit(const DebugSections& sections,
   }
   if (!subprogram) return std::nullopt;
 
-  std::optional<std::size_t> variable;
+  std::optional<std::size_t> value_die_index;
   bool nested_name = false;
   for (std::size_t index = 0; index < dies.size(); ++index) {
-    if (dies[index].tag != kDwTagVariable) continue;
+    const bool supported_value_tag =
+        dies[index].tag == kDwTagVariable || dies[index].tag == kDwTagFormalParameter;
+    if (!supported_value_tag) continue;
     const auto* die_name = attribute(dies[index], kDwAtName);
     if (die_name == nullptr || die_name->text != name) continue;
     if (dies[index].parent == *subprogram) {
-      if (variable) throw std::runtime_error("ambiguous local variable in current subprogram: " +
-                                             std::string(name));
-      variable = index;
-    } else if (is_descendant_of(dies, index, *subprogram)) {
+      if (value_die_index) {
+        throw std::runtime_error("ambiguous local value in current subprogram: " +
+                                 std::string(name));
+      }
+      value_die_index = index;
+    } else if (dies[index].tag == kDwTagVariable &&
+               is_descendant_of(dies, index, *subprogram)) {
       nested_name = true;
     }
   }
-  if (!variable) {
+  if (!value_die_index) {
     if (nested_name) {
       throw std::runtime_error("nested lexical-scope locals are unsupported in this milestone");
     }
-    throw std::runtime_error("local variable is not in the current subprogram: " +
+    throw std::runtime_error("local value is not in the current subprogram: " +
                              std::string(name));
   }
 
   const auto& subprogram_die = dies[*subprogram];
-  const auto& variable_die = dies[*variable];
-  const auto* base_expression = attribute(subprogram_die, kDwAtFrameBase);
-  const auto* location = attribute(variable_die, kDwAtLocation);
-  const auto* type = attribute(variable_die, kDwAtType);
-  if (base_expression == nullptr || base_expression->form != kDwFormExprloc) {
-    throw std::runtime_error("current subprogram has no supported DW_AT_frame_base expression");
-  }
-  if (location == nullptr || location->form != kDwFormExprloc) {
-    throw std::runtime_error("local variable has no supported DW_AT_location expression");
+  const auto& value_die = dies[*value_die_index];
+  const bool is_formal_parameter = value_die.tag == kDwTagFormalParameter;
+  const auto* location = attribute(value_die, kDwAtLocation);
+  const auto* type = attribute(value_die, kDwAtType);
+  if (location == nullptr) {
+    throw std::runtime_error("local value has no DW_AT_location");
   }
   if (type == nullptr || type->form != kDwFormRef4) {
-    throw std::runtime_error("local variable has no supported DW_FORM_ref4 type");
+    throw std::runtime_error("local value has no supported DW_FORM_ref4 type");
   }
 
   const auto integer_type = resolve_integer_type(dies, type->number);
+  std::vector<std::byte> location_expression;
+  if (location->form == kDwFormExprloc) {
+    location_expression = location->expression;
+  } else if (is_formal_parameter && location->form == kDwFormSecOffset) {
+    location_expression = active_location_expression(
+        sections, location->number, virtual_pc, compilation_unit_base);
+  } else if (location->form == kDwFormSecOffset) {
+    throw std::runtime_error(
+        "optimized local-variable location lists are outside this milestone");
+  } else {
+    throw std::runtime_error("local value has no supported DW_AT_location form");
+  }
+
+  if (location_expression.size() == 1 &&
+      std::to_integer<std::uint8_t>(location_expression.front()) == kDwOpReg5) {
+    const auto raw = truncate_integer(debugger.registers().rdi, integer_type.byte_size);
+    return LocalIntegerValue{module.path(), std::string(name), raw,
+                             integer_type.byte_size, integer_type.is_signed};
+  }
+
+  if (location_expression.empty() ||
+      std::to_integer<std::uint8_t>(location_expression.front()) != kDwOpFbreg) {
+    throw std::runtime_error("local value location is not a supported DW_OP_reg5/DW_OP_fbreg form");
+  }
+  const auto* base_expression = attribute(subprogram_die, kDwAtFrameBase);
+  if (base_expression == nullptr || base_expression->form != kDwFormExprloc) {
+    throw std::runtime_error("current subprogram has no supported DW_AT_frame_base expression");
+  }
   const auto base = frame_base(debugger, module, base_expression->expression);
-  const auto address = add_signed(base, fbreg_offset(location->expression),
+  const auto address = add_signed(base, fbreg_offset(location_expression),
                                   "local variable address");
   return LocalIntegerValue{module.path(), std::string(name),
                            read_integer(debugger, address, integer_type.byte_size),

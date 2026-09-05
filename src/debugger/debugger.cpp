@@ -209,6 +209,7 @@ void Debugger::swap_active_process(pid_t pid) {
   pending_signals_.swap(domain.pending_signals);
   breakpoints_by_address_.swap(domain.breakpoints_by_address);
   breakpoint_ids_.swap(domain.breakpoint_ids);
+  breakpoint_register_snapshots_.swap(domain.breakpoint_register_snapshots);
   std::swap(pending_breakpoint_step_, domain.pending_breakpoint_step);
   std::swap(watchpoint_, domain.watchpoint);
   std::swap(watchpoint_register_snapshot_, domain.watchpoint_register_snapshot);
@@ -257,6 +258,13 @@ void Debugger::select_thread(pid_t tid) {
 
 user_regs_struct Debugger::registers() const {
   return lowlevel::get_registers(stopped_tid());
+}
+
+std::optional<user_regs_struct> Debugger::breakpoint_register_snapshot(
+    pid_t tid, std::uintptr_t address) const {
+  const auto it = breakpoint_register_snapshots_.find({tid, address});
+  if (it == breakpoint_register_snapshots_.end()) return std::nullopt;
+  return it->second;
 }
 
 std::vector<std::byte> Debugger::read_memory(std::uintptr_t address,
@@ -447,6 +455,7 @@ void Debugger::detach(SignalPolicy policy) {
   process_.detach(signal);
   breakpoints_by_address_.clear();
   breakpoint_ids_.clear();
+  breakpoint_register_snapshots_.clear();
   pending_breakpoint_step_.reset();
   pending_thread_starts_.clear();
   pending_signals_.clear();
@@ -482,11 +491,23 @@ void Debugger::restore_watchpoint_registers() {
 void Debugger::discard_image_state() noexcept {
   breakpoints_by_address_.clear();
   breakpoint_ids_.clear();
+  breakpoint_register_snapshots_.clear();
   pending_breakpoint_step_.reset();
   watchpoint_.reset();
   watchpoint_register_snapshot_.reset();
   pending_thread_starts_.clear();
   pending_signals_.clear();
+}
+
+void Debugger::discard_breakpoint_register_snapshots(pid_t tid) noexcept {
+  for (auto it = breakpoint_register_snapshots_.begin();
+       it != breakpoint_register_snapshots_.end();) {
+    if (it->first.first == tid) {
+      it = breakpoint_register_snapshots_.erase(it);
+    } else {
+      ++it;
+    }
+  }
 }
 
 std::optional<StopInfo> Debugger::classify_watchpoint_stop(pid_t tid) {
@@ -545,6 +566,7 @@ StopInfo Debugger::wait_and_classify(bool expected_single_step) {
     if (event.kind == WaitEvent::Kind::Exited) {
       pending_thread_starts_.erase(event.tid);
       pending_signals_.erase(event.tid);
+      discard_breakpoint_register_snapshots(event.tid);
       if (watchpoint_register_snapshot_ && watchpoint_register_snapshot_->tid == event.tid) {
         watchpoint_.reset();
         watchpoint_register_snapshot_.reset();
@@ -569,6 +591,7 @@ StopInfo Debugger::wait_and_classify(bool expected_single_step) {
     if (event.kind == WaitEvent::Kind::Signaled) {
       pending_thread_starts_.erase(event.tid);
       pending_signals_.erase(event.tid);
+      discard_breakpoint_register_snapshots(event.tid);
       if (watchpoint_register_snapshot_ && watchpoint_register_snapshot_->tid == event.tid) {
         watchpoint_.reset();
         watchpoint_register_snapshot_.reset();
@@ -776,8 +799,8 @@ StopInfo Debugger::wait_and_classify(bool expected_single_step) {
           const auto inserted = retained_processes_.emplace(
               child, RetainedProcessDomain{
                          Process::adopt_stopped(child, process_.origin()), std::move(child_stop),
-                         executable_path_, {}, {}, {}, {}, std::nullopt, child_watchpoint,
-                         child_watchpoint_snapshot});
+                         executable_path_, {}, {}, {}, {}, {}, std::nullopt,
+                         child_watchpoint, child_watchpoint_snapshot});
           if (!inserted.second) {
             throw std::logic_error("fork child process identity already exists in registry");
           }
@@ -861,6 +884,7 @@ StopInfo Debugger::wait_and_classify(bool expected_single_step) {
           }
           pending_thread_starts_.clear();
           pending_signals_.clear();
+          breakpoint_register_snapshots_.clear();
         } catch (...) {
           if (!child_adopted) {
             try {
@@ -975,6 +999,7 @@ void Debugger::prepare_breakpoint_hit(std::uintptr_t address, user_regs_struct r
   }
 
   regs.rip = address;
+  breakpoint_register_snapshots_[{tid, address}] = regs;
   lowlevel::set_registers(tid, regs);
   lowlevel::write_byte(tid, address, it->second.original_byte);
   it->second.installed = false;

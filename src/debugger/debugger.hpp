@@ -104,6 +104,8 @@ class Debugger {
   void detach(SignalPolicy policy = SignalPolicy::Suppress);
 
   user_regs_struct registers() const;
+  [[nodiscard]] std::optional<user_regs_struct> breakpoint_register_snapshot(
+      pid_t tid, std::uintptr_t address) const;
   void set_register(std::string_view name, std::uint64_t value);
   std::vector<std::byte> read_memory(std::uintptr_t address, std::size_t length) const;
   void write_memory(std::uintptr_t address, const std::vector<std::byte>& bytes);
@@ -137,6 +139,8 @@ class Debugger {
     std::map<pid_t, int> pending_signals;
     std::map<std::uintptr_t, Breakpoint> breakpoints_by_address;
     std::map<std::size_t, std::uintptr_t> breakpoint_ids;
+    std::map<std::pair<pid_t, std::uintptr_t>, user_regs_struct>
+        breakpoint_register_snapshots;
     std::optional<PendingBreakpointStep> pending_breakpoint_step;
     std::optional<Watchpoint> watchpoint;
     std::optional<DebugRegisterSnapshot> watchpoint_register_snapshot;
@@ -158,6 +162,7 @@ class Debugger {
   void restore_all_breakpoints();
   void restore_watchpoint_registers();
   void discard_image_state() noexcept;
+  void discard_breakpoint_register_snapshots(pid_t tid) noexcept;
   [[nodiscard]] std::optional<StopInfo> classify_watchpoint_stop(pid_t tid);
   bool discard_breakpoint(std::size_t id) noexcept;
 
@@ -167,6 +172,8 @@ class Debugger {
   ForkFollowPolicy fork_follow_policy_{ForkFollowPolicy::Parent};
   std::map<std::uintptr_t, Breakpoint> breakpoints_by_address_;
   std::map<std::size_t, std::uintptr_t> breakpoint_ids_;
+  std::map<std::pair<pid_t, std::uintptr_t>, user_regs_struct>
+      breakpoint_register_snapshots_;
   std::size_t next_breakpoint_id_{1};
   std::optional<PendingBreakpointStep> pending_breakpoint_step_;
   std::optional<Watchpoint> watchpoint_;

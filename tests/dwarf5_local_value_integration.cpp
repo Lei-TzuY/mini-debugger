@@ -9,7 +9,6 @@
 #include <cerrno>
 #include <chrono>
 #include <cstdint>
-#include <cstdlib>
 #include <filesystem>
 #include <iostream>
 #include <stdexcept>
@@ -27,26 +26,65 @@ void require(bool condition, const std::string& message) {
   if (!condition) throw std::runtime_error(message);
 }
 
-void dump_location_lists(const std::string& fixture) {
-  const auto command = "readelf --debug-dump=loc --wide \"" + fixture + "\"";
-  (void)std::system(command.c_str());
+void test_missing_entry_snapshot(const std::string& fixture) {
+  auto debugger = mdbg::Debugger::launch(fixture, {});
+  const mdbg::ElfFile elf(fixture);
+  const auto entry_probe = elf.find_symbol("entry_parameter_probe");
+  require(entry_probe.has_value(), "DWARF5 entry-value probe symbol is missing");
+  const auto entry_address = static_cast<std::uintptr_t>(
+      elf.runtime_address(debugger.pid(), *entry_probe));
+  debugger.add_breakpoint(entry_address);
+
+  const auto stop = debugger.continue_execution();
+  require(stop.reason == mdbg::StopReason::Breakpoint &&
+              stop.breakpoint_address == entry_address,
+          "DWARF5 fixture did not stop in the entry-value parameter range");
+  require(debugger.registers().rdi == kExpectedEntryRdiSentinel,
+          "entry-value helper did not leave the expected current RDI sentinel");
+
+  bool missing_snapshot_failed = false;
+  try {
+    (void)mdbg::inspect_local_integer(debugger, elf, "entry_parameter");
+  } catch (const std::runtime_error& error) {
+    missing_snapshot_failed =
+        std::string(error.what()).find("observed function-entry breakpoint snapshot") !=
+        std::string::npos;
+  }
+  require(missing_snapshot_failed,
+          "DW_OP_entry_value must not fall back to the current register state");
+
+  const auto exit = debugger.continue_execution();
+  require(exit.reason == mdbg::StopReason::Exited && exit.value == 0,
+          "missing-snapshot fixture did not exit cleanly");
 }
 
 void test_direct_api(const std::string& fixture) {
   auto debugger = mdbg::Debugger::launch(fixture, {});
   const mdbg::ElfFile elf(fixture);
+  const auto entry_function = elf.find_symbol("inspect_entry_parameter");
   const auto entry_probe = elf.find_symbol("entry_parameter_probe");
   const auto optimized_probe = elf.find_symbol("optimized_local_probe");
+  require(entry_function.has_value(), "DWARF5 entry function symbol is missing");
   require(entry_probe.has_value(), "DWARF5 entry-value probe symbol is missing");
   require(optimized_probe.has_value(), "DWARF5 optimized-local probe symbol is missing");
+  const auto function_address = static_cast<std::uintptr_t>(
+      elf.runtime_address(debugger.pid(), *entry_function));
   const auto entry_address = static_cast<std::uintptr_t>(
       elf.runtime_address(debugger.pid(), *entry_probe));
   const auto optimized_address = static_cast<std::uintptr_t>(
       elf.runtime_address(debugger.pid(), *optimized_probe));
+  debugger.add_breakpoint(function_address);
   debugger.add_breakpoint(entry_address);
   debugger.add_breakpoint(optimized_address);
 
   auto stop = debugger.continue_execution();
+  require(stop.reason == mdbg::StopReason::Breakpoint &&
+              stop.breakpoint_address == function_address,
+          "DWARF5 fixture did not expose the function-entry register state");
+  require(debugger.registers().rdi == kExpectedEntryParameter,
+          "function-entry breakpoint did not observe the original RDI parameter");
+
+  stop = debugger.continue_execution();
   require(stop.reason == mdbg::StopReason::Breakpoint &&
               stop.breakpoint_address == entry_address,
           "DWARF5 fixture did not stop in the entry-value parameter range");
@@ -54,14 +92,7 @@ void test_direct_api(const std::string& fixture) {
   require(current_rdi == kExpectedEntryRdiSentinel,
           "entry-value helper did not leave the expected current RDI sentinel");
 
-  mdbg::LocalScalarValue entry_value;
-  try {
-    entry_value = mdbg::inspect_local_integer(debugger, elf, "entry_parameter");
-  } catch (...) {
-    dump_location_lists(fixture);
-    throw;
-  }
-  require(entry_value.name == "entry_parameter",
+  const auto entry_value =\n      mdbg::inspect_local_integer(debugger, elf, "entry_parameter");\n  require(entry_value.name == "entry_parameter",
           "DWARF5 entry-value lookup returned wrong name");
   require(entry_value.raw_value == kExpectedEntryParameter,
           "DWARF5 entry-value lookup returned " + std::to_string(entry_value.raw_value) +
@@ -123,8 +154,10 @@ std::string run_cli(const std::string& mdbg_path, const std::string& fixture) {
   ::close(input_pipe[0]);
   ::close(output_pipe[1]);
   const std::string script =
+      "break inspect_entry_parameter\n"
       "break entry_parameter_probe\n"
       "break optimized_local_probe\n"
+      "continue\n"
       "continue\n"
       "print entry_parameter\n"
       "continue\n"
@@ -177,8 +210,9 @@ std::string run_cli(const std::string& mdbg_path, const std::string& fixture) {
 void test_cli(const std::string& mdbg_path, const std::string& fixture) {
   const auto output = run_cli(mdbg_path, fixture);
   require(output.find("Breakpoint 1") != std::string::npos &&
-              output.find("Breakpoint 2") != std::string::npos,
-          "DWARF5 CLI did not install both source-value breakpoints\n" + output);
+              output.find("Breakpoint 2") != std::string::npos &&
+              output.find("Breakpoint 3") != std::string::npos,
+          "DWARF5 CLI did not install all source-value breakpoints\n" + output);
   require(output.find(kExpectedEntryCliValue) != std::string::npos,
           "DWARF5 CLI did not print the entry-value parameter\n" + output);
   require(output.find(kExpectedCliValue) != std::string::npos,
@@ -193,6 +227,7 @@ int main(int argc, char** argv) {
     return 2;
   }
   try {
+    test_missing_entry_snapshot(argv[1]);
     test_direct_api(argv[1]);
     test_cli(argv[2], argv[1]);
     std::cout << "DWARF5 optimized local integration passed\n";

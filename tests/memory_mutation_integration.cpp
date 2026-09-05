@@ -201,6 +201,12 @@ struct CliProcess {
   CliProcess() = default;
   CliProcess(const CliProcess&) = delete;
   CliProcess& operator=(const CliProcess&) = delete;
+  CliProcess(CliProcess&& other) noexcept
+      : pid(other.pid), input(other.input), output(other.output) {
+    other.pid = -1;
+    other.input = -1;
+    other.output = -1;
+  }
 
   ~CliProcess() {
     if (input != -1) ::close(input);

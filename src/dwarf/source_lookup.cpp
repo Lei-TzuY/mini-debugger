@@ -26,6 +26,7 @@
 namespace mdbg {
 namespace {
 
+constexpr std::uint64_t kDwTagFormalParameter = 0x05;
 constexpr std::uint64_t kDwTagTypedef = 0x16;
 constexpr std::uint64_t kDwTagBaseType = 0x24;
 constexpr std::uint64_t kDwTagSubprogram = 0x2e;
@@ -52,6 +53,7 @@ constexpr std::uint64_t kDwFormSecOffset = 0x17;
 constexpr std::uint64_t kDwFormExprloc = 0x18;
 constexpr std::uint64_t kDwFormFlagPresent = 0x19;
 
+constexpr std::uint8_t kDwOpReg5 = 0x55;
 constexpr std::uint8_t kDwOpReg6 = 0x56;
 constexpr std::uint8_t kDwOpFbreg = 0x91;
 constexpr std::uint8_t kDwOpCallFrameCfa = 0x9c;
@@ -503,6 +505,12 @@ std::uint64_t read_integer(const Debugger& debugger, std::uint64_t address,
   return value;
 }
 
+std::uint64_t truncate_integer(std::uint64_t value, std::size_t byte_size) {
+  if (byte_size == 8) return value;
+  const auto bits = static_cast<unsigned>(byte_size * 8U);
+  return value & ((std::uint64_t{1} << bits) - 1U);
+}
+
 std::optional<LocalIntegerValue> inspect_unit(const DebugSections& sections,
                                               const Debugger& debugger,
                                               const ElfFile& module,
@@ -521,44 +529,60 @@ std::optional<LocalIntegerValue> inspect_unit(const DebugSections& sections,
   }
   if (!subprogram) return std::nullopt;
 
-  std::optional<std::size_t> variable;
+  std::optional<std::size_t> value_die_index;
   bool nested_name = false;
   for (std::size_t index = 0; index < dies.size(); ++index) {
-    if (dies[index].tag != kDwTagVariable) continue;
+    const bool supported_value_tag =
+        dies[index].tag == kDwTagVariable || dies[index].tag == kDwTagFormalParameter;
+    if (!supported_value_tag) continue;
     const auto* die_name = attribute(dies[index], kDwAtName);
     if (die_name == nullptr || die_name->text != name) continue;
     if (dies[index].parent == *subprogram) {
-      if (variable) throw std::runtime_error("ambiguous local variable in current subprogram: " +
-                                             std::string(name));
-      variable = index;
-    } else if (is_descendant_of(dies, index, *subprogram)) {
+      if (value_die_index) {
+        throw std::runtime_error("ambiguous local value in current subprogram: " +
+                                 std::string(name));
+      }
+      value_die_index = index;
+    } else if (dies[index].tag == kDwTagVariable &&
+               is_descendant_of(dies, index, *subprogram)) {
       nested_name = true;
     }
   }
-  if (!variable) {
+  if (!value_die_index) {
     if (nested_name) {
       throw std::runtime_error("nested lexical-scope locals are unsupported in this milestone");
     }
-    throw std::runtime_error("local variable is not in the current subprogram: " +
+    throw std::runtime_error("local value is not in the current subprogram: " +
                              std::string(name));
   }
 
   const auto& subprogram_die = dies[*subprogram];
-  const auto& variable_die = dies[*variable];
-  const auto* base_expression = attribute(subprogram_die, kDwAtFrameBase);
-  const auto* location = attribute(variable_die, kDwAtLocation);
-  const auto* type = attribute(variable_die, kDwAtType);
-  if (base_expression == nullptr || base_expression->form != kDwFormExprloc) {
-    throw std::runtime_error("current subprogram has no supported DW_AT_frame_base expression");
-  }
+  const auto& value_die = dies[*value_die_index];
+  const auto* location = attribute(value_die, kDwAtLocation);
+  const auto* type = attribute(value_die, kDwAtType);
   if (location == nullptr || location->form != kDwFormExprloc) {
-    throw std::runtime_error("local variable has no supported DW_AT_location expression");
+    throw std::runtime_error("local value has no supported DW_AT_location expression");
   }
   if (type == nullptr || type->form != kDwFormRef4) {
-    throw std::runtime_error("local variable has no supported DW_FORM_ref4 type");
+    throw std::runtime_error("local value has no supported DW_FORM_ref4 type");
   }
 
   const auto integer_type = resolve_integer_type(dies, type->number);
+  if (location->expression.size() == 1 &&
+      std::to_integer<std::uint8_t>(location->expression.front()) == kDwOpReg5) {
+    const auto raw = truncate_integer(debugger.registers().rdi, integer_type.byte_size);
+    return LocalIntegerValue{module.path(), std::string(name), raw,
+                             integer_type.byte_size, integer_type.is_signed};
+  }
+
+  if (location->expression.empty() ||
+      std::to_integer<std::uint8_t>(location->expression.front()) != kDwOpFbreg) {
+    throw std::runtime_error("local value location is not a supported DW_OP_reg5/DW_OP_fbreg form");
+  }
+  const auto* base_expression = attribute(subprogram_die, kDwAtFrameBase);
+  if (base_expression == nullptr || base_expression->form != kDwFormExprloc) {
+    throw std::runtime_error("current subprogram has no supported DW_AT_frame_base expression");
+  }
   const auto base = frame_base(debugger, module, base_expression->expression);
   const auto address = add_signed(base, fbreg_offset(location->expression),
                                   "local variable address");

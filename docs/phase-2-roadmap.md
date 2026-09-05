@@ -8,41 +8,35 @@ The bounded source-`next` near-call recognizer has been extracted from `source_s
 
 This closes the architecture gate for future decoder work without turning the project into a general-purpose disassembler. Evidence and scope boundaries are recorded in `docs/phase-2-p0-decoder.md`.
 
-## Priority 1: dynamic-loader events and deferred breakpoints — current frontier
+## Priority 1: dynamic-loader events and deferred breakpoints — complete
 
-Teach the debugger to handle breakpoints requested for symbols/source locations in modules that are not loaded yet.
+The debugger now retains symbol and source-location breakpoint intent when a target module is absent and drives bounded re-resolution from the runtime linker's real rendezvous lifecycle.
 
 Completed slices:
 
 - P1-A: unresolved symbol requests persist across `dlopen()` and resolve from real runtime-linker rendezvous events;
 - P1-B: the CLI exposes one user breakpoint ID namespace across ordinary and deferred symbol breakpoints;
-- P1-C: resolved deferred symbol requests return to pending on `dlclose()`, stale unmapped breakpoint ownership is discarded without a memory restore, and reload installs a fresh managed backend while preserving the user/request identity.
+- P1-C: resolved deferred symbol requests return to pending on `dlclose()`, stale unmapped breakpoint ownership is discarded without a memory restore, and reload installs a fresh managed backend while preserving the user/request identity;
+- P1-D: `file:line` requests use the same deferred controller, become pending while their module is absent, resolve from DWARF when loaded, and preserve user identity across unload/reload.
 
-Current slice: P1-D — deferred source-location (`file:line`) requests in modules that are not loaded yet, reusing the same loader lifecycle and ownership rules instead of creating a parallel controller.
+The completed integration coverage exercises pending state, loader-triggered resolution, managed breakpoint installation, unload cleanup, reload re-arming, and the shared symbol/source lifecycle. Ambiguous cross-module resolution remains an explicit error rather than an arbitrary choice.
 
-Acceptance criteria:
+## Priority 2: hardware watchpoints — complete
 
-- a breakpoint request can remain pending when its target shared object is absent;
-- loader activity causes a bounded re-resolution attempt;
-- a uniquely resolved target installs through the existing managed breakpoint state machine;
-- ambiguity remains an explicit error;
-- unload/reload behavior has deterministic ownership semantics and regression coverage;
-- both symbol and source-location expressions participate in the same deferred lifecycle.
+The first hardware-watchpoint milestone is intentionally bounded to one x86-64 local write watchpoint backed by DR0/DR6/DR7. Supported lengths are 1, 2, 4, and 8 bytes with natural alignment; an already occupied hardware slot is rejected rather than overwritten.
 
-Why first: this closes a real usability gap in the existing module-aware breakpoint model instead of adding another presentation-only feature.
+Completed capability:
 
-## Priority 2: hardware watchpoints
+- low-level `PTRACE_PEEKUSER` / `PTRACE_POKEUSER` debug-register access with explicit register bounds;
+- write-watchpoint programming preserves and later restores the pre-existing DR0/DR6/DR7 state;
+- DR6 B0 classification produces a distinct watchpoint stop before single-step classification, including when the watched store is the displaced instruction of a managed `INT3` breakpoint;
+- deletion disables the watchpoint and restores prior hardware state;
+- explicit detach and debugger-destructor detach restore debug-register ownership before the tracee resumes;
+- PIE and non-PIE integration runs cover hit, delete/no-hit, software-breakpoint coexistence, bounded length/alignment rules, and lifecycle cleanup.
 
-Add x86-64 debug-register watchpoints without weakening software-breakpoint ownership.
+The one-slot/write-only bound is deliberate. Additional DR1-DR3 allocation or read/read-write mode matrices should be added only when a concrete debugging scenario requires them, not as variant farming.
 
-Acceptance criteria:
-
-- bounded support for read/write or write watchpoints with documented alignment/length rules;
-- trap classification distinguishes hardware-watchpoint stops from managed `INT3` stops;
-- watchpoint state is restored/cleared correctly across detach and teardown;
-- deterministic integration tests cover hit, delete, coexistence with software breakpoints, and lifecycle cleanup.
-
-## Priority 3: DWARF 5 line tables
+## Priority 3: DWARF 5 line tables — current frontier
 
 Extend source mapping beyond the intentionally bounded DWARF v4 reader.
 
@@ -53,6 +47,8 @@ Acceptance criteria:
 - unsupported forms fail explicitly rather than being guessed;
 - address-to-source and file:line reverse lookup share the same parsed representation;
 - fixtures exercise both main executables and shared objects.
+
+Why next: loader and hardware-stop lifecycle correctness are now bounded and executable; DWARF5 removes the next major source-level interoperability limitation without expanding low-value watchpoint variants.
 
 ## Priority 4: multi-thread debugging
 

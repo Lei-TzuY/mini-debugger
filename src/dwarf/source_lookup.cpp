@@ -27,6 +27,7 @@ namespace mdbg {
 namespace {
 
 constexpr std::uint64_t kDwTagFormalParameter = 0x05;
+constexpr std::uint64_t kDwTagLexicalBlock = 0x0b;
 constexpr std::uint64_t kDwTagTypedef = 0x16;
 constexpr std::uint64_t kDwTagBaseType = 0x24;
 constexpr std::uint64_t kDwTagSubprogram = 0x2e;
@@ -426,7 +427,7 @@ std::vector<Die> parse_unit_dies(const DebugSections& sections, std::size_t unit
   return dies;
 }
 
-bool subprogram_contains_pc(const Die& die, std::uint64_t pc) {
+bool die_contains_pc(const Die& die, std::uint64_t pc) {
   const auto* low = attribute(die, kDwAtLowPc);
   const auto* high = attribute(die, kDwAtHighPc);
   if (low == nullptr || high == nullptr || low->form != kDwFormAddr) return false;
@@ -434,6 +435,30 @@ bool subprogram_contains_pc(const Die& die, std::uint64_t pc) {
                            ? high->number
                            : add_unsigned(low->number, high->number, "DWARF high_pc");
   return pc >= low->number && pc < high_pc;
+}
+
+std::optional<std::size_t> active_lexical_depth(const std::vector<Die>& dies,
+                                                std::size_t value_index,
+                                                std::size_t subprogram,
+                                                std::uint64_t pc) {
+  auto parent = dies[value_index].parent;
+  if (!parent) return std::nullopt;
+  std::size_t depth = 0;
+  while (*parent != subprogram) {
+    const auto& scope = dies[*parent];
+    if (scope.tag != kDwTagLexicalBlock) return std::nullopt;
+    const auto* low = attribute(scope, kDwAtLowPc);
+    const auto* high = attribute(scope, kDwAtHighPc);
+    if (low == nullptr || high == nullptr || low->form != kDwFormAddr) {
+      throw std::runtime_error(
+          "lexical block does not use the supported DW_AT_low_pc/DW_AT_high_pc range");
+    }
+    if (!die_contains_pc(scope, pc)) return std::nullopt;
+    ++depth;
+    parent = scope.parent;
+    if (!parent) return std::nullopt;
+  }
+  return depth;
 }
 
 IntegerType resolve_integer_type(const std::vector<Die>& dies, std::uint64_t type_offset) {
@@ -584,7 +609,7 @@ std::optional<LocalIntegerValue> inspect_unit(const DebugSections& sections,
 
   std::optional<std::size_t> subprogram;
   for (std::size_t index = 0; index < dies.size(); ++index) {
-    if (dies[index].tag != kDwTagSubprogram || !subprogram_contains_pc(dies[index], virtual_pc)) {
+    if (dies[index].tag != kDwTagSubprogram || !die_contains_pc(dies[index], virtual_pc)) {
       continue;
     }
     if (subprogram) throw std::runtime_error("current PC matches multiple DWARF subprograms");
@@ -593,6 +618,7 @@ std::optional<LocalIntegerValue> inspect_unit(const DebugSections& sections,
   if (!subprogram) return std::nullopt;
 
   std::optional<std::size_t> value_die_index;
+  std::optional<std::size_t> best_depth;
   bool nested_name = false;
   for (std::size_t index = 0; index < dies.size(); ++index) {
     const bool supported_value_tag =
@@ -600,20 +626,30 @@ std::optional<LocalIntegerValue> inspect_unit(const DebugSections& sections,
     if (!supported_value_tag) continue;
     const auto* die_name = attribute(dies[index], kDwAtName);
     if (die_name == nullptr || die_name->text != name) continue;
-    if (dies[index].parent == *subprogram) {
-      if (value_die_index) {
-        throw std::runtime_error("ambiguous local value in current subprogram: " +
-                                 std::string(name));
-      }
+
+    std::optional<std::size_t> depth;
+    if (dies[index].tag == kDwTagFormalParameter) {
+      if (dies[index].parent == *subprogram) depth = 0;
+    } else {
+      depth = active_lexical_depth(dies, index, *subprogram, virtual_pc);
+      if (!depth && is_descendant_of(dies, index, *subprogram)) nested_name = true;
+    }
+    if (!depth) continue;
+
+    if (!value_die_index || *depth > *best_depth) {
       value_die_index = index;
-    } else if (dies[index].tag == kDwTagVariable &&
-               is_descendant_of(dies, index, *subprogram)) {
-      nested_name = true;
+      best_depth = *depth;
+      continue;
+    }
+    if (*depth == *best_depth) {
+      throw std::runtime_error("ambiguous local value in current lexical scope: " +
+                               std::string(name));
     }
   }
   if (!value_die_index) {
     if (nested_name) {
-      throw std::runtime_error("nested lexical-scope locals are unsupported in this milestone");
+      throw std::runtime_error("local value is outside the current lexical scope: " +
+                               std::string(name));
     }
     throw std::runtime_error("local value is not in the current subprogram: " +
                              std::string(name));

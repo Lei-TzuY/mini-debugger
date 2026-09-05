@@ -1292,7 +1292,23 @@ std::uint64_t evaluate_breg5_stack_value(const std::vector<std::byte>& expressio
     throw std::runtime_error(
         "DW_OP_breg5 value is not the compiler-proven stack/dereference form");
   }
-  ++cursor;
+
+  auto value = add_signed(debugger.registers().rdi, offset,
+                          "DW_OP_breg5 dereference address");
+  std::size_t dereference_count = 0;
+  while (cursor < expression.size() &&
+         std::to_integer<std::uint8_t>(expression[cursor]) == kDwOpDeref) {
+    if (dereference_count >= 2) {
+      throw std::runtime_error(
+          "DW_OP_breg5 dereference chain exceeds the compiler-proven two-level bound");
+    }
+    ++cursor;
+    value = read_integer(debugger, value, sizeof(std::uint64_t));
+    ++dereference_count;
+  }
+  if (dereference_count == 0) {
+    throw std::runtime_error("DW_OP_breg5 dereference value is missing DW_OP_deref");
+  }
   if (cursor >= expression.size() ||
       std::to_integer<std::uint8_t>(expression[cursor]) != kDwOpConstu) {
     throw std::runtime_error(
@@ -1317,10 +1333,7 @@ std::uint64_t evaluate_breg5_stack_value(const std::vector<std::byte>& expressio
     throw std::runtime_error(
         "unsupported trailing operations after DW_OP_breg5 dereference value");
   }
-
-  const auto address = add_signed(debugger.registers().rdi, offset,
-                                  "DW_OP_breg5 dereference address");
-  return read_integer(debugger, address, sizeof(std::uint64_t)) ^ constant;
+  return value ^ constant;
 }
 
 std::uint64_t evaluate_breg5_memory_address(

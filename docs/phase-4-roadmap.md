@@ -72,23 +72,39 @@ The fifth source-value slice extends the existing typed-value path across one co
 
 Priority 4 therefore closes the bounded scalar type-model gap without turning `print` into an aggregate renderer or a general DWARF expression engine.
 
-## Priority 5: bounded struct aggregate presentation — current frontier
+## Priority 5: bounded struct aggregate presentation — complete
 
-The next architectural gap is aggregate type/value shaping rather than another scalar variant. The current source-value resolver explicitly rejects `DW_TAG_structure_type`, even though a normal O0 local struct can be owned by the already supported lexical and `DW_OP_fbreg` location path.
+The sixth source-value slice closes the first compiler-produced aggregate shaping gap while preserving the existing ownership model:
 
-Current Priority 5 acceptance:
+- the existing `-O0 -g -gdwarf-4` pointer fixture now also contains a real stack-resident `struct LocalPair local_struct` with an unsigned 32-bit `count` member and a signed 64-bit `delta` member, both independently verifiable and live at `local_struct_probe`;
+- test-first CI #609 was exact under both permanent compiler lanes: Configure and Build succeeded, 42/44 tests stayed green, and only `pointer_value_integration_{pie,nopie}` failed with `local variable type is not a supported typedef/base-type/pointer chain`, proving module routing, lexical ownership, location evaluation, breakpoint handling, and the prior scalar paths had already succeeded and the rejected boundary was `DW_TAG_structure_type`;
+- the existing typed result grows `LocalValueKind::Structure` plus bounded named member metadata; integer and pointer results keep their prior scalar fields and behavior, and `inspect_local_integer` continues to reject non-integer values rather than silently accepting aggregates;
+- type resolution accepts only the concrete compiler-produced `DW_TAG_structure_type` with direct-child `DW_TAG_member` DIEs, a structure byte size bounded to 256 bytes, at most 32 named direct members, `DW_FORM_ref4` member types that resolve through the existing signed/unsigned integer chain, and constant `DW_AT_data_member_location` forms already understood by the parser;
+- every member is bounds-checked against the owned aggregate storage; anonymous members, non-member direct children, non-integer member types, expression-based member locations, nested aggregates, unions, arrays, bitfields, inheritance, and value pieces remain explicit failures rather than implied support;
+- the aggregate itself must use the already-proven `DW_OP_fbreg` memory-backed location path. Production performs one bounded `Debugger::read_memory` for the complete structure and decodes direct members from that owned byte range, so there is no per-field raw-ptrace path or duplicate location engine;
+- direct API integration verifies structure kind, 16-byte aggregate size, module identity, exactly two members, `count = 0x11223344`, signed `delta = -123456789`, integer-only API rejection, and clean exit; the real CLI renders `local_struct = { count = 287454020, delta = -123456789 }` deterministically;
+- exact implementation head `a4c8bb4e...` passes all 44 tests under both GCC 13.3 and Clang 18.1 large-model lanes, while all earlier integer, pointer, optimized-location, lexical, process-domain, breakpoint, and mutation coverage remains green.
 
-- add one deterministic compiler-produced local struct with at least two independently verifiable integer members that remain live at an exported probe, and first prove the current evaluator reaches the struct type boundary while all pre-existing source-value and debugger tests remain green under GCC and Clang-large;
-- extend the existing typed source-value model rather than introducing an aggregate-specific ptrace path: preserve owning module, local name, lexical ownership, selected process/TID, and the same location evaluator used by Priorities 0–4;
-- support only the concrete `DW_TAG_structure_type` / direct-child `DW_TAG_member` shape emitted by that fixture, including bounded structure byte size, member names, `DW_FORM_ref4` integer member types, constant `DW_AT_data_member_location` offsets, and strict member-in-structure bounds validation;
-- read the aggregate storage through the existing debugger memory API and decode the proven direct members from that owned byte range; do not separately peek each field through raw ptrace or duplicate the location engine;
-- expose deterministic CLI presentation for the named members and prove the decoded values match the live runtime struct; padding may be skipped by offsets, but unions, arrays, bitfields, anonymous members, inheritance, nested aggregates, value pieces, and arbitrary expression-based member locations remain outside this slice;
-- preserve pointer/integer scalar behavior, lexical shadowing, optimized location-list ownership, formal parameters, PIE/non-PIE execution, GCC/Clang-large compatibility, module identity, and clean exit.
+Priority 5 therefore completes the bounded aggregate milestone without using struct support as a pretext for speculative aggregate recursion or a general DWARF VM.
+
+## Priority 6: DWARF5 optimized source-value location ownership — current frontier
+
+The next architectural gap is debug-format generation rather than another scalar or aggregate variant. The source-value evaluator still rejects every compilation unit whose header version is not 4, and the optimized source-value fixtures are therefore deliberately pinned to `-gdwarf-4` even though the repository already has bounded DWARF5 line-table support.
+
+Current Priority 6 acceptance:
+
+- add one separate real `-O1 -g -gdwarf-5` source-value fixture based on an already-proven optimized value workflow, and first demonstrate that the current evaluator reaches the DWARF5 compilation-unit/location-list boundary while the permanent GCC and Clang-large lanes keep all earlier source-value and debugger tests green;
+- extend the existing source-value parser rather than introducing a DWARF5-only evaluator: preserve module ownership, lexical lookup, selected process/TID register and memory access, the typed integer/pointer/structure model, and existing expression evaluation;
+- accept only the concrete DWARF5 unit header, attribute forms, `.debug_loclists` contribution/header, address-index/base-address, range selection, and location expression shape emitted by that compiler fixture; malformed offsets, unsupported index forms, uncovered PCs, and unknown expression opcodes remain deterministic failures;
+- route the selected current PC through the same load-bias and active-scope ownership model before choosing the DWARF5 location description, and continue to read register/memory state only through the existing Debugger API;
+- prove the optimized value through direct API and real CLI presentation in PIE and non-PIE under both permanent compiler lanes, then continue to clean exit without regressing the DWARF4 location-list, formal-parameter, lexical-shadowing, pointer, or struct workflows.
+
+Priority 6 is not a mandate to implement all DWARF5 forms or a general loclists VM. The first slice must be driven by one exact GCC/Clang compiler-produced failure, and production may add only the forms/indexing/location semantics required by that evidence.
 
 ## Later priorities
 
-After Priority 5, richer expression evaluation, inlined-scope ownership, DWARF5 location-list ownership, and broader aggregate/type presentation remain candidates. They must continue to be ordered by concrete compiler-produced failures rather than surface-area breadth.
+After Priority 6, richer expression evaluation, inlined-scope ownership, and broader aggregate/type presentation remain candidates. They must continue to be ordered by concrete compiler-produced failures rather than surface-area breadth.
 
 ## Selection rule
 
-Priority 5 is the current frontier. Select the smallest real local-struct workflow whose variable location is already representable by the existing evaluator but whose compiler-produced `DW_TAG_structure_type` is rejected by the scalar type model. Prove that exact failure first under the permanent GCC and Clang-large gates, then add only the structure/member metadata and owned-byte decoding needed by that workflow. Do not use aggregate support as a reason to add unions, arrays, bitfields, nested aggregate recursion, arbitrary dereference, or a general DWARF VM.
+Priority 6 is the current frontier. Select the smallest existing optimized source-value workflow that becomes a real DWARF5 `.debug_info` / `.debug_loclists` consumer when compiled with `-gdwarf-5`, prove the exact unsupported boundary first under GCC and Clang-large, then extend only the shared parser and current-PC location ownership needed by that compiler output. Do not return to struct-member variants, add speculative DWARF5 forms, or broaden the expression VM without independent executable evidence.

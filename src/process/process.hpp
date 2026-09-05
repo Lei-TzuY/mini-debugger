@@ -49,6 +49,7 @@ class Process {
   WaitEvent wait();
   void mark_running() noexcept { mark_running(current_tid_); }
   void mark_running(pid_t tid) noexcept;
+  void select_tid(pid_t tid);
   void detach(int signal = 0);
 
  private:

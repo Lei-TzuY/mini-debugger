@@ -36,21 +36,22 @@ Completed capability:
 
 The one-slot/write-only bound is deliberate. Additional DR1-DR3 allocation or read/read-write mode matrices should be added only when a concrete debugging scenario requires them, not as variant farming.
 
-## Priority 3: DWARF 5 line tables — current frontier
+## Priority 3: DWARF 5 line tables — complete
 
-Extend source mapping beyond the intentionally bounded DWARF v4 reader.
+The line-table reader now supports the bounded GCC DWARF5 surface used by the repository while preserving the existing DWARF4 path.
 
-Acceptance criteria:
+Completed capability:
 
-- v4 behavior remains unchanged;
-- supported v5 directory/file table forms are parsed with explicit bounds;
-- unsupported forms fail explicitly rather than being guessed;
-- address-to-source and file:line reverse lookup share the same parsed representation;
-- fixtures exercise both main executables and shared objects.
+- DWARF5 address-size and segment-selector header fields are validated explicitly;
+- descriptor-driven directory/file tables support bounded path and directory-index forms, including `.debug_line_str` references with section bounds;
+- unsupported descriptor forms remain explicit errors instead of guessed byte widths;
+- DWARF4 and DWARF5 both populate the same range representation used by address-to-source and file:line reverse lookup;
+- the existing GCC `-gdwarf-5` executable fixture now passes virtual/runtime address-to-source, reverse source lookup, and a source-derived managed breakpoint hit;
+- the shared CFI library is compiled as DWARF5 while its PIE/non-PIE drivers remain DWARF4, exercising mixed-version module routing, shared-object source breakpoints, source step/next, unwind source mapping, and finish.
 
-Why next: loader and hardware-stop lifecycle correctness are now bounded and executable; DWARF5 removes the next major source-level interoperability limitation without expanding low-value watchpoint variants.
+This closes the major source-level interoperability gap without claiming support for arbitrary DWARF5 forms or DWARF64.
 
-## Priority 4: multi-thread debugging
+## Priority 4: multi-thread debugging — current frontier
 
 Move from one traced thread to a deliberate thread model.
 
@@ -62,7 +63,7 @@ Acceptance criteria:
 - thread creation/exit and signal routing have regression coverage;
 - detach/teardown leaves no traced thread behind.
 
-This milestone should not be attempted as an incidental extension of the current single-thread state machine.
+First architectural slice should establish a real two-thread tracee lifecycle and per-TID stop identity before broadening CLI presentation. It must not fake thread support by merely listing `/proc/<pid>/task` while continuing to wait/resume only the original PID.
 
 ## Priority 5: broader CFI recovery
 

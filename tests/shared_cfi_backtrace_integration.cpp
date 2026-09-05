@@ -277,19 +277,29 @@ void test_shared_library_cfi(const std::string& driver, const std::string& libra
           "shared-library CFI fixture did not exit cleanly");
 }
 
-void test_unsupported_module_source(const std::string& dwarf5_fixture) {
+void test_dwarf5_module_source(const std::string& dwarf5_fixture) {
   auto debugger = mdbg::Debugger::launch(dwarf5_fixture, {});
   const mdbg::ElfFile executable(dwarf5_fixture);
   const auto probe = executable.find_symbol("line_probe");
   require(probe.has_value(), "DWARF5 fixture line_probe symbol is missing");
   const auto address =
       static_cast<std::uintptr_t>(executable.runtime_address(debugger.pid(), *probe));
-  require(!mdbg::find_module_source_by_runtime_address(
-              debugger.pid(), address, executable),
-          "unsupported DWARF module source must degrade to no source information");
-  require(!mdbg::find_module_source_by_file_line(
-              debugger.pid(), "mapped_source.c", 400, executable),
-          "unsupported DWARF reverse lookup must degrade to no source information");
+
+  const auto resolved = mdbg::find_module_source_by_runtime_address(
+      debugger.pid(), address, executable);
+  require(resolved && resolved->line == 400 &&
+              std::filesystem::path(resolved->file).filename() == "mapped_source.c",
+          "DWARF5 module runtime source lookup did not resolve line_probe");
+  require_same_module(resolved->module_path, dwarf5_fixture,
+                      "DWARF5 runtime source lookup resolved the wrong module");
+
+  const auto reverse = mdbg::find_module_source_by_file_line(
+      debugger.pid(), "mapped_source.c", 400, executable);
+  require(reverse && reverse->line == 400 &&
+              std::filesystem::path(reverse->file).filename() == "mapped_source.c",
+          "DWARF5 module reverse source lookup did not resolve mapped_source.c:400");
+  require_same_module(reverse->module_path, dwarf5_fixture,
+                      "DWARF5 reverse source lookup resolved the wrong module");
 }
 
 }  // namespace
@@ -298,7 +308,7 @@ int main(int argc, char** argv) {
   if (argc != 4) return 2;
   try {
     test_shared_library_cfi(argv[1], argv[2]);
-    test_unsupported_module_source(argv[3]);
+    test_dwarf5_module_source(argv[3]);
     return 0;
   } catch (const std::exception& error) {
     std::fprintf(stderr, "shared-CFI backtrace integration failure: %s\n", error.what());

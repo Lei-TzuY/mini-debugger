@@ -7,11 +7,19 @@ volatile uint64_t value_seed = UINT64_C(0x1122334455667788);
 __attribute__((noinline)) uint64_t inspect_local_value(void) {
   uint64_t local_value = value_seed ^ UINT64_C(0xf0e0d0c0b0a09080);
   uint64_t result = 0;
+  __asm__ volatile(".globl outer_local_before_probe\n"
+                   "outer_local_before_probe:\n"
+                   "nop"
+                   ::: "memory");
   {
     uint64_t local_value = value_seed ^ UINT64_C(0x0102030405060708);
     __asm__ volatile(".globl local_value_probe\nlocal_value_probe:\nnop" ::: "memory");
     result = local_value;
   }
+  __asm__ volatile(".globl outer_local_after_probe\n"
+                   "outer_local_after_probe:\n"
+                   "nop"
+                   ::: "memory");
   if (local_value != OUTER_LOCAL_VALUE_EXPECTED) return 0;
   return result;
 }

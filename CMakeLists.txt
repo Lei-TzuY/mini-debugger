@@ -173,6 +173,17 @@ if(BUILD_TESTING)
       $<TARGET_FILE:exec_driver_nopie>
       $<TARGET_FILE:exec_target_nopie>)
 
+  add_executable(follow_child_cli_integration tests/follow_child_cli_integration.cpp)
+  target_compile_options(follow_child_cli_integration PRIVATE -Wall -Wextra -Wpedantic -Werror)
+  add_test(NAME follow_child_cli_integration_pie
+    COMMAND follow_child_cli_integration
+      $<TARGET_FILE:exec_driver_pie>
+      $<TARGET_FILE:mdbg>)
+  add_test(NAME follow_child_cli_integration_nopie
+    COMMAND follow_child_cli_integration
+      $<TARGET_FILE:exec_driver_nopie>
+      $<TARGET_FILE:mdbg>)
+
   add_executable(memory_mutation_integration tests/memory_mutation_integration.cpp)
   target_link_libraries(memory_mutation_integration PRIVATE mdbg_core)
   target_compile_options(memory_mutation_integration PRIVATE -Wall -Wextra -Wpedantic -Werror)

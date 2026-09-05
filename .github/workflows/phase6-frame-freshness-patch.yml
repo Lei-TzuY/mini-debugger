@@ -25,22 +25,15 @@ jobs:
 
           path = Path('src/dwarf/source_lookup.cpp')
           text = path.read_text()
-          old = '''  if (frame.process_pid != debugger.pid() || frame.tid != debugger.active_tid()) {
-            throw std::logic_error("inspection frame belongs to a different process/TID domain");
-          }
-          const auto live = debugger.registers();
-          '''
-          new = '''  if (frame.process_pid != debugger.pid() || frame.tid != debugger.active_tid()) {
-            throw std::logic_error("inspection frame belongs to a different process/TID domain");
-          }
-          if (frame.origin_stop_sequence != debugger.stop_info().sequence) {
-            throw std::logic_error("inspection frame is stale after debugger stop changed");
-          }
-          const auto live = debugger.registers();
-          '''
-          if text.count(old) != 1:
-              raise SystemExit('expected validation snippet exactly once')
-          path.write_text(text.replace(old, new, 1))
+          anchor = '  const auto live = debugger.registers();\n'
+          insertion = (
+              '  if (frame.origin_stop_sequence != debugger.stop_info().sequence) {\n'
+              '    throw std::logic_error("inspection frame is stale after debugger stop changed");\n'
+              '  }\n'
+          )
+          if text.count(anchor) != 1:
+              raise SystemExit('expected live-register validation anchor exactly once')
+          path.write_text(text.replace(anchor, insertion + anchor, 1))
           PY
       - name: Commit exact fix and remove construction workflow
         shell: bash

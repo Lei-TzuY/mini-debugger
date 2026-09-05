@@ -550,6 +550,7 @@ StopInfo Debugger::wait_and_classify(bool expected_single_step) {
 
       stop_info_ = make_stop(StopReason::Trap, SIGTRAP, event.tid);
       stop_info_.process_event = ProcessEventKind::Vfork;
+      stop_info_.parent_pid = process_.pid();
       stop_info_.child_pid = child;
       return stop_info_;
     }
@@ -565,7 +566,74 @@ StopInfo Debugger::wait_and_classify(bool expected_single_step) {
         throw std::runtime_error("PTRACE_EVENT_FORK returned an invalid child process id");
       }
       const auto child = static_cast<pid_t>(message);
+      const auto parent = process_.pid();
       wait_for_unfollowed_child_stop(child);
+
+      if (fork_follow_policy_ == ForkFollowPolicy::Child) {
+        if (process_.origin() != ProcessOrigin::Launched) {
+          try {
+            lowlevel::detach(child, SIGKILL);
+          } catch (...) {
+            (void)::kill(child, SIGKILL);
+          }
+          throw std::runtime_error(
+              "follow-child fork handoff is currently supported for launched tracees only");
+        }
+        const auto parent_tids = process_.tids();
+        if (parent_tids.size() != 1 || parent_tids.front() != event.tid || event.tid != parent) {
+          try {
+            lowlevel::detach(child, SIGKILL);
+          } catch (...) {
+            (void)::kill(child, SIGKILL);
+          }
+          throw std::runtime_error(
+              "follow-child fork handoff currently requires a single-thread parent");
+        }
+
+        bool child_adopted = false;
+        try {
+          lowlevel::set_options(child, tracing_options(process_.origin()));
+
+          for (const auto& [address, breakpoint] : breakpoints_by_address_) {
+            if (!breakpoint.installed) continue;
+            lowlevel::write_byte(event.tid, address, breakpoint.original_byte);
+          }
+
+          const bool transfer_watchpoint =
+              watchpoint_register_snapshot_ && watchpoint_register_snapshot_->tid == event.tid;
+          if (watchpoint_register_snapshot_) {
+            restore_watchpoint_registers();
+          }
+
+          lowlevel::detach(event.tid);
+          process_.adopt_stopped_process(child);
+          child_adopted = true;
+
+          if (transfer_watchpoint) {
+            watchpoint_register_snapshot_->tid = child;
+          } else {
+            watchpoint_.reset();
+            watchpoint_register_snapshot_.reset();
+          }
+          pending_thread_starts_.clear();
+          pending_signals_.clear();
+        } catch (...) {
+          if (!child_adopted) {
+            try {
+              lowlevel::detach(child, SIGKILL);
+            } catch (...) {
+              (void)::kill(child, SIGKILL);
+            }
+          }
+          throw;
+        }
+
+        stop_info_ = make_stop(StopReason::Trap, SIGTRAP, child);
+        stop_info_.process_event = ProcessEventKind::Fork;
+        stop_info_.parent_pid = parent;
+        stop_info_.child_pid = child;
+        return stop_info_;
+      }
 
       bool detached = false;
       try {
@@ -599,6 +667,7 @@ StopInfo Debugger::wait_and_classify(bool expected_single_step) {
 
       stop_info_ = make_stop(StopReason::Trap, SIGTRAP, event.tid);
       stop_info_.process_event = ProcessEventKind::Fork;
+      stop_info_.parent_pid = parent;
       stop_info_.child_pid = child;
       return stop_info_;
     }

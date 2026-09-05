@@ -282,6 +282,26 @@ void Process::mark_running(pid_t tid) noexcept {
   update_aggregate_state();
 }
 
+void Process::select_tid(pid_t tid) {
+  if (state_ != ProcessState::Stopped) {
+    throw std::logic_error("thread selection requires a stopped tracee");
+  }
+  for (const auto& [tracked_tid, task_state] : task_states_) {
+    static_cast<void>(tracked_tid);
+    if (task_state != ProcessState::Stopped) {
+      throw std::logic_error("thread selection requires every traced thread to be stopped");
+    }
+  }
+  const auto it = task_states_.find(tid);
+  if (it == task_states_.end()) {
+    throw std::invalid_argument("cannot select an untracked thread");
+  }
+  if (it->second != ProcessState::Stopped) {
+    throw std::logic_error("cannot select a running thread");
+  }
+  current_tid_ = tid;
+}
+
 void Process::update_aggregate_state() noexcept {
   if (task_states_.empty()) return;
   for (const auto& [tid, state] : task_states_) {

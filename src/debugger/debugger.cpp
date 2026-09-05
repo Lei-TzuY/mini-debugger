@@ -77,6 +77,24 @@ pid_t Debugger::stopped_tid() const {
   return tid;
 }
 
+std::vector<ThreadInfo> Debugger::threads() const {
+  std::vector<ThreadInfo> result;
+  for (const auto tid : process_.tids()) {
+    const auto state = process_.task_state(tid);
+    if (!state) continue;
+    result.push_back(ThreadInfo{tid, *state, tid == process_.current_tid()});
+  }
+  return result;
+}
+
+void Debugger::select_thread(pid_t tid) {
+  if (pending_breakpoint_step_ && pending_breakpoint_step_->tid != tid) {
+    throw std::logic_error(
+        "cannot switch threads while a breakpoint displaced step is pending");
+  }
+  process_.select_tid(tid);
+}
+
 user_regs_struct Debugger::registers() const {
   return lowlevel::get_registers(stopped_tid());
 }
@@ -159,7 +177,7 @@ std::size_t Debugger::add_write_watchpoint(std::uintptr_t address, std::size_t l
                                        lowlevel::get_debug_register(tid, 6),
                                        lowlevel::get_debug_register(tid, 7)};
   if ((snapshot.dr7 & kDr7Slot0EnableMask) != 0) {
-    throw std::runtime_error("hardwar debug-register slot 0 is already in use");
+    throw std::runtime_error("hardware debug-register slot 0 is already in use");
   }
 
   const auto disabled_dr7 =
@@ -204,14 +222,11 @@ std::vector<Watchpoint> Debugger::watchpoints() const {
   return {*watchpoint_};
 }
 
-int Debugger::resume_signal(SignalPolicy policy) const {
-  if (policy != SignalPolicy::Forward || stop_info_.reason != StopReason::Signal) {
-    return 0;
-  }
-  if (stop_info_.tid != stopped_tid()) {
-    throw std::logic_error("forwarded signal belongs to a different stopped thread");
-  }
-  return stop_info_.value;
+int Debugger::resume_signal(SignalPolicy policy, pid_t tid) const {
+  if (policy != SignalPolicy::Forward) return 0;
+  const auto pending = pending_signals_.find(tid);
+  if (pending == pending_signals_.end()) return 0;
+  return pending->second;
 }
 
 StopInfo Debugger::continue_execution(SignalPolicy policy) {
@@ -228,8 +243,9 @@ StopInfo Debugger::continue_execution(SignalPolicy policy) {
   }
 
   const auto tid = stopped_tid();
-  const int signal = resume_signal(policy);
+  const int signal = resume_signal(policy, tid);
   lowlevel::continue_process(tid, signal);
+  pending_signals_.erase(tid);
   process_.mark_running(tid);
   return wait_and_classify(false);
 }
@@ -246,8 +262,9 @@ StopInfo Debugger::single_step(SignalPolicy policy) {
   }
 
   const auto tid = stopped_tid();
-  const int signal = resume_signal(policy);
+  const int signal = resume_signal(policy, tid);
   lowlevel::single_step(tid, signal);
+  pending_signals_.erase(tid);
   process_.mark_running(tid);
   return wait_and_classify(true);
 }
@@ -260,7 +277,8 @@ void Debugger::detach(SignalPolicy policy) {
     throw std::logic_error("detach requires a stopped tracee");
   }
 
-  const int signal = resume_signal(policy);
+  const auto tid = stopped_tid();
+  const int signal = resume_signal(policy, tid);
   restore_all_breakpoints();
   restore_watchpoint_registers();
   process_.detach(signal);
@@ -268,6 +286,7 @@ void Debugger::detach(SignalPolicy policy) {
   breakpoint_ids_.clear();
   pending_breakpoint_step_.reset();
   pending_thread_starts_.clear();
+  pending_signals_.clear();
   watchpoint_.reset();
   watchpoint_register_snapshot_.reset();
 }
@@ -342,10 +361,11 @@ void Debugger::reinsert_breakpoint(std::uintptr_t address, pid_t tid) {
 }
 
 StopInfo Debugger::wait_and_classify(bool expected_single_step) {
-  for (; ;) {
+  for (;;) {
     const auto event = process_.wait();
     if (event.kind == WaitEvent::Kind::Exited) {
       pending_thread_starts_.erase(event.tid);
+      pending_signals_.erase(event.tid);
       if (process_.tids().empty()) {
         stop_info_ = make_stop(StopReason::Exited, event.value, event.tid);
         return stop_info_;
@@ -356,6 +376,7 @@ StopInfo Debugger::wait_and_classify(bool expected_single_step) {
     }
     if (event.kind == WaitEvent::Kind::Signaled) {
       pending_thread_starts_.erase(event.tid);
+      pending_signals_.erase(event.tid);
       if (process_.tids().empty()) {
         stop_info_ = make_stop(StopReason::Signaled, event.value, event.tid);
         return stop_info_;
@@ -385,6 +406,7 @@ StopInfo Debugger::wait_and_classify(bool expected_single_step) {
 
     const int signal = event.value;
     if (signal != SIGTRAP) {
+      pending_signals_[event.tid] = signal;
       stop_info_ = make_stop(StopReason::Signal, signal, event.tid);
       return stop_info_;
     }

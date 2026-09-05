@@ -57,6 +57,7 @@ struct InspectionFrameContext {
   std::size_t index;
   pid_t process_pid;
   pid_t tid;
+  std::uint64_t origin_stop_sequence;
   std::uintptr_t origin_runtime_pc;
   std::uintptr_t origin_stack_pointer;
   std::optional<std::uintptr_t> origin_frame_pointer;

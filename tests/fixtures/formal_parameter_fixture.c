@@ -84,7 +84,7 @@ static __attribute__((always_inline)) inline uint64_t inspect_inlined_local(
   __asm__ volatile(".globl inlined_local_probe\n"
                    "inlined_local_probe:\n"
                    "nop\n"
-                   : "+a"(inline_local)
+                   : "+D"(inline_local)
                    :
                    : "memory");
   return inline_local;

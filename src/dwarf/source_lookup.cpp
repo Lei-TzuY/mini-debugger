@@ -1289,52 +1289,52 @@ std::uint64_t evaluate_breg5_stack_value(const std::vector<std::byte>& expressio
   }
 
   if (next != kDwOpDeref || offset != 0) {
-  throw std::runtime_error(
-      "DW_OP_breg5 value is not the compiler-proven stack/dereference form");
-}
-
-auto value = add_signed(debugger.registers().rdi, offset,
-                        "DW_OP_breg5 dereference address");
-std::size_t dereference_count = 0;
-while (cursor < expression.size() &&
-       std::to_integer<std::uint8_t>(expression[cursor]) == kDwOpDeref) {
-  if (dereference_count >= 2) {
     throw std::runtime_error(
-        "DW_OP_breg5 dereference chain exceeds the compiler-proven two-level bound");
+        "DW_OP_breg5 value is not the compiler-proven stack/dereference form");
+  }
+
+  auto value = add_signed(debugger.registers().rdi, offset,
+                          "DW_OP_breg5 dereference address");
+  std::size_t dereference_count = 0;
+  while (cursor < expression.size() &&
+         std::to_integer<std::uint8_t>(expression[cursor]) == kDwOpDeref) {
+    if (dereference_count >= 2) {
+      throw std::runtime_error(
+          "DW_OP_breg5 dereference chain exceeds the compiler-proven two-level bound");
+    }
+    ++cursor;
+    value = read_integer(debugger, value, sizeof(std::uint64_t));
+    ++dereference_count;
+  }
+  if (dereference_count == 0) {
+    throw std::runtime_error("DW_OP_breg5 dereference value is missing DW_OP_deref");
+  }
+  if (cursor >= expression.size() ||
+      std::to_integer<std::uint8_t>(expression[cursor]) != kDwOpConstu) {
+    throw std::runtime_error(
+        "DW_OP_breg5 dereference value requires the compiler-proven DW_OP_constu");
   }
   ++cursor;
-  value = read_integer(debugger, value, sizeof(std::uint64_t));
-  ++dereference_count;
-}
-if (dereference_count == 0) {
-  throw std::runtime_error("DW_OP_breg5 dereference value is missing DW_OP_deref");
-}
-if (cursor >= expression.size() ||
-    std::to_integer<std::uint8_t>(expression[cursor]) != kDwOpConstu) {
-  throw std::runtime_error(
-      "DW_OP_breg5 dereference value requires the compiler-proven DW_OP_constu");
-}
-++cursor;
-const auto constant =
-    read_uleb(expression, cursor, expression.size(), "DW_OP_constu value");
-if (cursor >= expression.size() ||
-    std::to_integer<std::uint8_t>(expression[cursor]) != kDwOpXor) {
-  throw std::runtime_error(
-      "DW_OP_breg5 dereference value requires the compiler-proven DW_OP_xor");
-}
-++cursor;
-if (cursor >= expression.size() ||
-    std::to_integer<std::uint8_t>(expression[cursor]) != kDwOpStackValue) {
-  throw std::runtime_error(
-      "DW_OP_breg5 dereference value requires the compiler-proven trailing DW_OP_stack_value");
-}
-++cursor;
-if (cursor != expression.size()) {
-  throw std::runtime_error(
-      "unsupported trailing operations after DW_OP_breg5 dereference value");
-}
-return value ^ constant;
-}
+  const auto constant =
+      read_uleb(expression, cursor, expression.size(), "DW_OP_constu value");
+  if (cursor >= expression.size() ||
+      std::to_integer<std::uint8_t>(expression[cursor]) != kDwOpXor) {
+    throw std::runtime_error(
+        "DW_OP_breg5 dereference value requires the compiler-proven DW_OP_xor");
+  }
+  ++cursor;
+  if (cursor >= expression.size() ||
+      std::to_integer<std::uint8_t>(expression[cursor]) != kDwOpStackValue) {
+    throw std::runtime_error(
+        "DW_OP_breg5 dereference value requires the compiler-proven trailing DW_OP_stack_value");
+  }
+  ++cursor;
+  if (cursor != expression.size()) {
+    throw std::runtime_error(
+        "unsupported trailing operations after DW_OP_breg5 dereference value");
+  }
+  return value ^ constant;
+  }
 
 std::uint64_t evaluate_breg5_memory_address(
     const std::vector<std::byte>& expression, const Debugger& debugger) {

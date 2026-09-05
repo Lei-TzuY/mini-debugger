@@ -185,6 +185,21 @@ std::optional<EhFrameCursor> caller_for_cursor(
   return module.cfi.caller_frame(debugger, module.elf, current);
 }
 
+InspectionRegisterState live_register_state(const user_regs_struct& regs) {
+  return InspectionRegisterState{regs.rax, regs.rbx, regs.rcx, regs.rdx, regs.rsi, regs.rdi,
+                                 regs.rbp, regs.rsp, regs.r8, regs.r9, regs.r10, regs.r11,
+                                 regs.r12, regs.r13, regs.r14, regs.r15};
+}
+
+InspectionRegisterState caller_register_state(const EhFrameCursor& caller) {
+  InspectionRegisterState result{};
+  result.rsp = static_cast<std::uint64_t>(caller.stack_pointer);
+  if (caller.frame_pointer) {
+    result.rbp = static_cast<std::uint64_t>(*caller.frame_pointer);
+  }
+  return result;
+}
+
 }  // namespace
 
 std::optional<ModuleResolvedSymbol> find_module_symbol_by_runtime_address(
@@ -281,6 +296,69 @@ std::optional<std::uintptr_t> module_caller_return_address(
   ModuleCfi module(*path);
   if (!module.cfi.available()) return std::nullopt;
   return module.cfi.caller_return_address(debugger, module.elf);
+}
+
+InspectionFrameContext current_inspection_frame(const Debugger& debugger,
+                                                const ElfFile& preferred_elf) {
+  if (debugger.state() != ProcessState::Stopped) {
+    throw std::logic_error("inspection-frame construction requires a stopped tracee");
+  }
+  const auto regs = debugger.registers();
+  const auto runtime_pc = static_cast<std::uintptr_t>(regs.rip);
+  const auto module = mapped_module_path(debugger.pid(), runtime_pc);
+  if (!module) {
+    throw std::runtime_error("current frame is not owned by a file-backed module");
+  }
+  (void)preferred_elf;
+  return InspectionFrameContext{0,
+                                debugger.pid(),
+                                debugger.active_tid(),
+                                runtime_pc,
+                                static_cast<std::uintptr_t>(regs.rsp),
+                                static_cast<std::uintptr_t>(regs.rbp),
+                                runtime_pc,
+                                static_cast<std::uintptr_t>(regs.rsp),
+                                static_cast<std::uintptr_t>(regs.rbp),
+                                *module,
+                                live_register_state(regs)};
+}
+
+std::vector<InspectionFrameContext> build_inspection_frames(
+    const Debugger& debugger, const ElfFile& preferred_elf,
+    const EhFrame& preferred_cfi, std::size_t max_frames) {
+  if (max_frames == 0) {
+    throw std::invalid_argument("inspection-frame construction requires a non-zero frame limit");
+  }
+  auto current_context = current_inspection_frame(debugger, preferred_elf);
+  std::vector<InspectionFrameContext> result{current_context};
+  if (max_frames == 1) return result;
+
+  EhFrameCursor current{current_context.runtime_pc, current_context.stack_pointer,
+                        current_context.frame_pointer};
+  std::vector<ModuleCfi> modules;
+  while (result.size() < max_frames) {
+    std::optional<EhFrameCursor> caller;
+    try {
+      caller = caller_for_cursor(debugger, preferred_elf, preferred_cfi, current, modules);
+    } catch (const std::exception&) {
+      break;
+    }
+    if (!caller || caller->instruction_pointer == current.instruction_pointer ||
+        caller->stack_pointer <= current.stack_pointer) {
+      break;
+    }
+    const auto module = mapped_module_path(debugger.pid(), caller->instruction_pointer);
+    if (!module) break;
+
+    result.push_back(InspectionFrameContext{
+        result.size(), current_context.process_pid, current_context.tid,
+        current_context.origin_runtime_pc, current_context.origin_stack_pointer,
+        current_context.origin_frame_pointer, caller->instruction_pointer,
+        caller->stack_pointer, caller->frame_pointer, *module,
+        caller_register_state(*caller)});
+    current = *caller;
+  }
+  return result;
 }
 
 CfiBacktrace unwind_eh_frame(const Debugger& debugger, const ElfFile& elf,

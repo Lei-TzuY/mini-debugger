@@ -52,6 +52,22 @@ if(BUILD_TESTING)
   add_custom_command(TARGET debugger_fixture_stripped POST_BUILD
     COMMAND ${CMAKE_STRIP} --strip-all $<TARGET_FILE:debugger_fixture_stripped>)
 
+  add_executable(exec_driver_pie tests/fixtures/exec_driver.c)
+  target_compile_options(exec_driver_pie PRIVATE -O0 -g -fPIE)
+  target_link_options(exec_driver_pie PRIVATE -pie)
+
+  add_executable(exec_driver_nopie tests/fixtures/exec_driver.c)
+  target_compile_options(exec_driver_nopie PRIVATE -O0 -g -fno-pie)
+  target_link_options(exec_driver_nopie PRIVATE -no-pie)
+
+  add_executable(exec_target_pie tests/fixtures/exec_target.c)
+  target_compile_options(exec_target_pie PRIVATE -O0 -g -fPIE)
+  target_link_options(exec_target_pie PRIVATE -pie)
+
+  add_executable(exec_target_nopie tests/fixtures/exec_target.c)
+  target_compile_options(exec_target_nopie PRIVATE -O0 -g -fno-pie)
+  target_link_options(exec_target_nopie PRIVATE -no-pie)
+
   add_executable(debug_line_fixture_pie tests/fixtures/debug_line_fixture.c)
   target_compile_options(debug_line_fixture_pie PRIVATE -O0 -g -gdwarf-4 -fPIE)
   target_link_options(debug_line_fixture_pie PRIVATE -pie)
@@ -144,6 +160,18 @@ if(BUILD_TESTING)
     COMMAND debugger_integration $<TARGET_FILE:debugger_fixture_pie>)
   add_test(NAME debugger_integration_nopie
     COMMAND debugger_integration $<TARGET_FILE:debugger_fixture_nopie>)
+
+  add_executable(exec_image_integration tests/exec_image_integration.cpp)
+  target_link_libraries(exec_image_integration PRIVATE mdbg_core)
+  target_compile_options(exec_image_integration PRIVATE -Wall -Wextra -Wpedantic -Werror)
+  add_test(NAME exec_image_integration_pie
+    COMMAND exec_image_integration
+      $<TARGET_FILE:exec_driver_pie>
+      $<TARGET_FILE:exec_target_pie>)
+  add_test(NAME exec_image_integration_nopie
+    COMMAND exec_image_integration
+      $<TARGET_FILE:exec_driver_nopie>
+      $<TARGET_FILE:exec_target_nopie>)
 
   add_executable(memory_mutation_integration tests/memory_mutation_integration.cpp)
   target_link_libraries(memory_mutation_integration PRIVATE mdbg_core)

@@ -479,7 +479,8 @@ std::int64_t fbreg_offset(const std::vector<std::byte>& expression) {
 
 std::vector<std::byte> active_location_expression(const DebugSections& sections,
                                                   std::uint64_t offset,
-                                                  std::uint64_t virtual_pc) {
+                                                  std::uint64_t virtual_pc,
+                                                  std::uint64_t initial_base) {
   if (sections.locations.empty()) {
     throw std::runtime_error("formal parameter location list requires .debug_loc");
   }
@@ -488,7 +489,7 @@ std::vector<std::byte> active_location_expression(const DebugSections& sections,
   }
 
   std::size_t cursor = static_cast<std::size_t>(offset);
-  std::optional<std::uint64_t> base_address;
+  std::uint64_t base_address = initial_base;
   while (cursor < sections.locations.size()) {
     const auto begin = read_scalar<std::uint64_t>(sections.locations, cursor,
                                                   sections.locations.size(),
@@ -509,12 +510,8 @@ std::vector<std::byte> active_location_expression(const DebugSections& sections,
       throw std::runtime_error("DWARF4 location expression extends past .debug_loc");
     }
     const auto expression_end = cursor + static_cast<std::size_t>(length);
-    const auto range_begin = base_address ? add_unsigned(*base_address, begin,
-                                                         "location-list range begin")
-                                          : begin;
-    const auto range_end = base_address ? add_unsigned(*base_address, end,
-                                                       "location-list range end")
-                                        : end;
+    const auto range_begin = add_unsigned(base_address, begin, "location-list range begin");
+    const auto range_end = add_unsigned(base_address, end, "location-list range end");
     if (range_end < range_begin) {
       throw std::runtime_error("DWARF4 location-list range is reversed");
     }
@@ -574,6 +571,16 @@ std::optional<LocalIntegerValue> inspect_unit(const DebugSections& sections,
                                               std::size_t unit_start,
                                               std::size_t& next_unit) {
   const auto dies = parse_unit_dies(sections, unit_start, next_unit);
+  std::uint64_t compilation_unit_base = 0;
+  for (const auto& die : dies) {
+    if (die.parent) continue;
+    const auto* low_pc = attribute(die, kDwAtLowPc);
+    if (low_pc != nullptr && low_pc->form == kDwFormAddr) {
+      compilation_unit_base = low_pc->number;
+      break;
+    }
+  }
+
   std::optional<std::size_t> subprogram;
   for (std::size_t index = 0; index < dies.size(); ++index) {
     if (dies[index].tag != kDwTagSubprogram || !subprogram_contains_pc(dies[index], virtual_pc)) {
@@ -628,7 +635,8 @@ std::optional<LocalIntegerValue> inspect_unit(const DebugSections& sections,
   if (location->form == kDwFormExprloc) {
     location_expression = location->expression;
   } else if (is_formal_parameter && location->form == kDwFormSecOffset) {
-    location_expression = active_location_expression(sections, location->number, virtual_pc);
+    location_expression = active_location_expression(
+        sections, location->number, virtual_pc, compilation_unit_base);
   } else if (location->form == kDwFormSecOffset) {
     throw std::runtime_error(
         "optimized local-variable location lists are outside this milestone");

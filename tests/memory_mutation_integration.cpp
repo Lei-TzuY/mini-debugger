@@ -1,6 +1,11 @@
 #include "debugger/debugger.hpp"
 #include "ptrace/ptrace.hpp"
 
+#include <poll.h>
+#include <sys/wait.h>
+
+#include <cerrno>
+#include <chrono>
 #include <csignal>
 #include <cstddef>
 #include <cstdint>
@@ -188,18 +193,142 @@ void test_pending_displaced_step_overlap_is_rejected(const std::string& fixture)
           "fixture did not exit cleanly after pending-step rejection");
 }
 
+struct CliProcess {
+  pid_t pid{-1};
+  int input{-1};
+  int output{-1};
+
+  CliProcess() = default;
+  CliProcess(const CliProcess&) = delete;
+  CliProcess& operator=(const CliProcess&) = delete;
+
+  ~CliProcess() {
+    if (input != -1) ::close(input);
+    if (output != -1) ::close(output);
+    if (pid > 0) {
+      ::kill(-pid, SIGKILL);
+      ::kill(pid, SIGKILL);
+      int status = 0;
+      while (::waitpid(pid, &status, 0) == -1 && errno == EINTR) {
+      }
+    }
+  }
+};
+
+CliProcess spawn_cli(const std::string& mdbg, const std::string& fixture,
+                     const std::string& address_path) {
+  int input_pipe[2];
+  int output_pipe[2];
+  if (::pipe(input_pipe) != 0 || ::pipe(output_pipe) != 0) {
+    throw std::runtime_error("failed to create CLI pipes");
+  }
+
+  const pid_t pid = ::fork();
+  if (pid == -1) throw std::runtime_error("failed to fork CLI");
+  if (pid == 0) {
+    ::setpgid(0, 0);
+    ::dup2(input_pipe[0], STDIN_FILENO);
+    ::dup2(output_pipe[1], STDOUT_FILENO);
+    ::dup2(output_pipe[1], STDERR_FILENO);
+    ::close(input_pipe[0]);
+    ::close(input_pipe[1]);
+    ::close(output_pipe[0]);
+    ::close(output_pipe[1]);
+    ::execl(mdbg.c_str(), mdbg.c_str(), fixture.c_str(), address_path.c_str(), "sequence",
+            nullptr);
+    _exit(127);
+  }
+
+  ::close(input_pipe[0]);
+  ::close(output_pipe[1]);
+  CliProcess process;
+  process.pid = pid;
+  process.input = input_pipe[1];
+  process.output = output_pipe[0];
+  return process;
+}
+
+void write_all(int fd, const std::string& data) {
+  std::size_t offset = 0;
+  while (offset < data.size()) {
+    const auto written = ::write(fd, data.data() + offset, data.size() - offset);
+    if (written == -1 && errno == EINTR) continue;
+    if (written <= 0) throw std::runtime_error("failed to write CLI command script");
+    offset += static_cast<std::size_t>(written);
+  }
+}
+
+std::string read_to_eof(int fd) {
+  std::string output;
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  for (;;) {
+    const auto now = std::chrono::steady_clock::now();
+    if (now >= deadline) throw std::runtime_error("timed out waiting for CLI exit");
+    const auto remaining =
+        std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now).count();
+    pollfd descriptor{fd, POLLIN | POLLHUP, 0};
+    const int result = ::poll(&descriptor, 1, static_cast<int>(remaining));
+    if (result == -1 && errno == EINTR) continue;
+    if (result <= 0) throw std::runtime_error("timed out reading CLI output");
+
+    char buffer[1024];
+    const auto count = ::read(fd, buffer, sizeof(buffer));
+    if (count == -1 && errno == EINTR) continue;
+    if (count < 0) throw std::runtime_error("failed reading CLI output");
+    if (count == 0) return output;
+    output.append(buffer, static_cast<std::size_t>(count));
+  }
+}
+
+void test_cli_memory_write_round_trip(const std::string& fixture, const std::string& mdbg) {
+  const auto path = temp_path();
+  auto cli = spawn_cli(mdbg, fixture, path);
+  const std::string script =
+      "continue\n"
+      "set memory fixture_value 0x11 0x22 0x33 0x44 0x55 0x66 0x77 0x88\n"
+      "x fixture_value 8\n"
+      "set memory fixture_value 0x88 0x77 0x66 0x55 0x44 0x33 0x22 0x11\n"
+      "continue\n";
+  write_all(cli.input, script);
+  ::close(cli.input);
+  cli.input = -1;
+
+  const auto output = read_to_eof(cli.output);
+  ::close(cli.output);
+  cli.output = -1;
+
+  int status = 0;
+  pid_t result;
+  do {
+    result = ::waitpid(cli.pid, &status, 0);
+  } while (result == -1 && errno == EINTR);
+  require(result == cli.pid && WIFEXITED(status) && WEXITSTATUS(status) == 0,
+          "mdbg CLI did not exit cleanly after memory mutation workflow");
+  cli.pid = -1;
+  std::remove(path.c_str());
+
+  require(output.find("wrote 8 bytes at 0x") != std::string::npos,
+          "CLI did not report the memory write");
+  require(output.find(": 11 22 33 44 55 66 77 88") != std::string::npos,
+          "CLI x command did not read back the mutated byte sequence");
+  require(output.find("process exited with code 0") != std::string::npos,
+          "CLI tracee did not exit cleanly after restoring original data");
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
-  if (argc != 2) {
-    std::cerr << "usage: memory_mutation_integration <fixture>\n";
+  if (argc != 3) {
+    std::cerr << "usage: memory_mutation_integration <fixture> <mdbg>\n";
     return 2;
   }
   try {
     const std::string fixture = argv[1];
+    const std::string mdbg = argv[2];
     test_bounded_data_write(fixture);
     test_installed_breakpoint_overlap(fixture);
     test_pending_displaced_step_overlap_is_rejected(fixture);
+    test_cli_memory_write_round_trip(fixture, mdbg);
     std::cout << "memory mutation integration tests passed\n";
   } catch (const std::exception& error) {
     std::cerr << "memory mutation integration failure: " << error.what() << '\n';

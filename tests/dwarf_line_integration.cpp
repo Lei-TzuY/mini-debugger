@@ -18,8 +18,11 @@
 namespace {
 
 constexpr std::uint64_t kExpectedLocalRawValue = 0x1020304050607080ULL;
+constexpr std::uint64_t kExpectedOptimizedLocalRawValue = 0x1e3c1e781e3c1ef0ULL;
 constexpr const char* kExpectedLocalValue = "local_value = 1161981756646125696";
 constexpr const char* kExpectedParameterValue = "parameter = 1161981756646125696";
+constexpr const char* kExpectedOptimizedLocalValue =
+    "optimized_local = 2178649820992642800";
 
 void require(bool condition, const std::string& message) {
   if (!condition) throw std::runtime_error(message);
@@ -157,6 +160,39 @@ void test_formal_parameter_api(const std::string& fixture) {
           "formal-parameter fixture did not exit cleanly after inspection");
 }
 
+void test_optimized_local_api(const std::string& fixture) {
+  auto debugger = mdbg::Debugger::launch(fixture, {});
+  const mdbg::ElfFile elf(fixture);
+  const auto probe = elf.find_symbol("optimized_local_probe");
+  require(probe.has_value(), "optimized_local_probe symbol missing from optimized fixture");
+  const auto address = static_cast<std::uintptr_t>(elf.runtime_address(debugger.pid(), *probe));
+  debugger.add_breakpoint(address);
+  const auto stop = debugger.continue_execution();
+  require(stop.reason == mdbg::StopReason::Breakpoint && stop.breakpoint_address == address,
+          "optimized-local fixture did not stop while the local was live");
+
+  const auto value = mdbg::inspect_local_integer(debugger, elf, "optimized_local");
+  require(value.name == "optimized_local", "optimized-local API returned the wrong name");
+  require(value.raw_value == kExpectedOptimizedLocalRawValue,
+          "optimized-local API returned the wrong register-resident value");
+  require(value.byte_size == sizeof(std::uint64_t) && !value.is_signed,
+          "optimized-local API returned the wrong uint64_t type metadata");
+  require(std::filesystem::equivalent(value.module_path, fixture),
+          "optimized-local API did not preserve the owning module identity");
+
+  bool missing_failed = false;
+  try {
+    (void)mdbg::inspect_local_integer(debugger, elf, "missing_optimized_local");
+  } catch (const std::exception&) {
+    missing_failed = true;
+  }
+  require(missing_failed, "missing optimized local did not fail explicitly");
+
+  const auto exit = debugger.continue_execution();
+  require(exit.reason == mdbg::StopReason::Exited && exit.value == 0,
+          "optimized-local fixture did not exit cleanly after inspection");
+}
+
 std::string run_cli_script(const std::string& integration_path, const std::string& fixture,
                            const char* mode, const std::string& script,
                            const char* context) {
@@ -276,6 +312,24 @@ void test_cli_formal_parameter(const std::string& integration_path,
           "CLI did not report a missing formal parameter explicitly\n" + output);
 }
 
+void test_cli_optimized_local(const std::string& integration_path,
+                              const std::string& fixture) {
+  const auto output = run_cli_script(
+      integration_path, fixture, nullptr,
+      "break optimized_local_probe\n"
+      "continue\n"
+      "print optimized_local\n"
+      "print missing_optimized_local\n"
+      "continue\n",
+      "optimized-local CLI");
+  require(output.find("Breakpoint 1") != std::string::npos,
+          "CLI did not install the optimized-local probe breakpoint\n" + output);
+  require(output.find(kExpectedOptimizedLocalValue) != std::string::npos,
+          "CLI did not render the optimized local integer value\n" + output);
+  require(output.find("print failed:") != std::string::npos,
+          "CLI did not report a missing optimized local explicitly\n" + output);
+}
+
 void test_missing_debug_line(const std::string& stripped_fixture) {
   const mdbg::DwarfLineTable lines(stripped_fixture);
   require(!lines.available(), "stripped fixture must not claim DWARF line coverage");
@@ -297,6 +351,8 @@ int main(int argc, char** argv) {
     test_runtime_mapping(argv[3]);
     test_formal_parameter_api(argv[4]);
     test_cli_formal_parameter(argv[0], argv[4]);
+    test_optimized_local_api(argv[4]);
+    test_cli_optimized_local(argv[0], argv[4]);
     return 0;
   } catch (const std::exception& error) {
     std::fprintf(stderr, "DWARF line integration failure: %s\n", error.what());

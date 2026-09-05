@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/prctl.h>
 #include <sys/syscall.h>
 #include <unistd.h>
 
@@ -229,16 +230,17 @@ static int run_threaded_register_mutation_attach(const char* path) {
   action.sa_handler = release_register_worker;
   sigemptyset(&action.sa_mask);
   if (sigaction(SIGUSR2, &action, NULL) != 0) return 109;
+  if (prctl(PR_SET_PTRACER, PR_SET_PTRACER_ANY, 0, 0, 0) != 0) return 110;
 
   register_release = 0;
   register_worker_ready = 0;
   pthread_t thread;
-  if (pthread_create(&thread, NULL, register_mutation_worker, NULL) != 0) return 110;
+  if (pthread_create(&thread, NULL, register_mutation_worker, NULL) != 0) return 111;
   while (!register_worker_ready) usleep(1000);
   publish_addresses(path);
   void* result = NULL;
-  if (pthread_join(thread, &result) != 0) return 111;
-  return result == NULL ? 0 : 112;
+  if (pthread_join(thread, &result) != 0) return 112;
+  return result == NULL ? 0 : 113;
 }
 
 int main(int argc, char** argv) {

@@ -1729,6 +1729,9 @@ void validate_inspection_frame(const Debugger& debugger,
   if (frame.process_pid != debugger.pid() || frame.tid != debugger.active_tid()) {
     throw std::logic_error("inspection frame belongs to a different process/TID domain");
   }
+  if (frame.origin_stop_sequence != debugger.stop_info().sequence) {
+    throw std::logic_error("inspection frame is stale after debugger stop changed");
+  }
   const auto live = debugger.registers();
   if (static_cast<std::uintptr_t>(live.rip) != frame.origin_runtime_pc ||
       static_cast<std::uintptr_t>(live.rsp) != frame.origin_stack_pointer ||

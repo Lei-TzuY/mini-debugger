@@ -57,6 +57,14 @@ void set_options(pid_t pid, unsigned long options) {
   }
 }
 
+std::uint64_t get_event_message(pid_t pid) {
+  unsigned long message = 0;
+  if (::ptrace(PTRACE_GETEVENTMSG, pid, nullptr, &message) == -1) {
+    throw_errno("PTRACE_GETEVENTMSG");
+  }
+  return static_cast<std::uint64_t>(message);
+}
+
 void continue_process(pid_t pid, int signal) {
   if (::ptrace(PTRACE_CONT, pid, nullptr,
                reinterpret_cast<void*>(static_cast<intptr_t>(signal))) == -1) {

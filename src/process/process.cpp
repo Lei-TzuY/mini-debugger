@@ -9,6 +9,8 @@
 #include <cerrno>
 #include <csignal>
 #include <cstring>
+#include <filesystem>
+#include <limits>
 #include <stdexcept>
 #include <utility>
 
@@ -19,14 +21,23 @@ std::runtime_error system_error(const char* operation) {
   return std::runtime_error(std::string(operation) + " failed: " + std::strerror(errno));
 }
 
+bool is_tracee_task(pid_t leader, pid_t tid) noexcept {
+  std::error_code error;
+  const auto task_path = std::filesystem::path("/proc") / std::to_string(leader) /
+                         "task" / std::to_string(tid);
+  return std::filesystem::exists(task_path, error) && !error;
+}
+
 }  // namespace
 
 Process::~Process() { cleanup(); }
 
 Process::Process(Process&& other) noexcept
     : pid_(std::exchange(other.pid_, -1)),
+      current_tid_(std::exchange(other.current_tid_, -1)),
       state_(other.state_),
       origin_(other.origin_),
+      task_states_(std::move(other.task_states_)),
       exit_code_(other.exit_code_),
       termination_signal_(other.termination_signal_) {}
 
@@ -34,8 +45,10 @@ Process& Process::operator=(Process&& other) noexcept {
   if (this != &other) {
     cleanup();
     pid_ = std::exchange(other.pid_, -1);
+    current_tid_ = std::exchange(other.current_tid_, -1);
     state_ = other.state_;
     origin_ = other.origin_;
+    task_states_ = std::move(other.task_states_);
     exit_code_ = other.exit_code_;
     termination_signal_ = other.termination_signal_;
   }
@@ -69,10 +82,11 @@ Process Process::launch(const std::string& executable,
 
   Process process(child, ProcessOrigin::Launched);
   const auto initial = process.wait();
-  if (initial.kind != WaitEvent::Kind::Stopped || initial.value != SIGTRAP) {
+  if (initial.kind != WaitEvent::Kind::Stopped || initial.value != SIGTRAP ||
+      initial.tid != child) {
     throw std::runtime_error("tracee did not stop with SIGTRAP after exec");
   }
-  lowlevel::set_options(child, PTRACE_O_EXITKILL);
+  lowlevel::set_options(child, PTRACE_O_EXITKILL | PTRACE_O_TRACECLONE);
   return process;
 }
 
@@ -85,7 +99,8 @@ Process Process::attach(pid_t pid) {
   Process process(pid, ProcessOrigin::Attached);
   try {
     const auto initial = process.wait();
-    if (initial.kind != WaitEvent::Kind::Stopped || initial.value != SIGSTOP) {
+    if (initial.kind != WaitEvent::Kind::Stopped || initial.value != SIGSTOP ||
+        initial.tid != pid) {
       throw std::runtime_error("attached tracee did not stop with SIGSTOP");
     }
   } catch (...) {
@@ -95,31 +110,101 @@ Process Process::attach(pid_t pid) {
   return process;
 }
 
+std::vector<pid_t> Process::tids() const {
+  std::vector<pid_t> result;
+  result.reserve(task_states_.size());
+  for (const auto& [tid, state] : task_states_) {
+    static_cast<void>(state);
+    result.push_back(tid);
+  }
+  return result;
+}
+
+std::optional<ProcessState> Process::task_state(pid_t tid) const noexcept {
+  const auto it = task_states_.find(tid);
+  if (it == task_states_.end()) return std::nullopt;
+  return it->second;
+}
+
 WaitEvent Process::wait() {
   int status = 0;
   pid_t result;
   do {
-    result = ::waitpid(pid_, &status, 0);
+    result = ::waitpid(-1, &status, __WALL);
   } while (result == -1 && errno == EINTR);
   if (result == -1) {
     throw system_error("waitpid");
   }
 
+  auto task = task_states_.find(result);
+  if (task == task_states_.end() && WIFSTOPPED(status) && is_tracee_task(pid_, result)) {
+    task = task_states_.emplace(result, ProcessState::Running).first;
+  }
+  if (task == task_states_.end()) {
+    throw std::runtime_error("waitpid returned an event for an untracked task");
+  }
+
+  current_tid_ = result;
+
   if (WIFEXITED(status)) {
-    state_ = ProcessState::Exited;
-    exit_code_ = WEXITSTATUS(status);
-    return {WaitEvent::Kind::Exited, *exit_code_};
+    const int code = WEXITSTATUS(status);
+    if (result == pid_) exit_code_ = code;
+    task_states_.erase(task);
+    if (task_states_.empty()) {
+      state_ = ProcessState::Exited;
+    } else {
+      update_aggregate_state();
+    }
+    return {WaitEvent::Kind::Exited, code, result};
   }
   if (WIFSIGNALED(status)) {
-    state_ = ProcessState::Signaled;
-    termination_signal_ = WTERMSIG(status);
-    return {WaitEvent::Kind::Signaled, *termination_signal_};
+    const int signal = WTERMSIG(status);
+    if (result == pid_) termination_signal_ = signal;
+    task_states_.erase(task);
+    if (task_states_.empty()) {
+      state_ = ProcessState::Signaled;
+    } else {
+      update_aggregate_state();
+    }
+    return {WaitEvent::Kind::Signaled, signal, result};
   }
   if (WIFSTOPPED(status)) {
+    task->second = ProcessState::Stopped;
     state_ = ProcessState::Stopped;
-    return {WaitEvent::Kind::Stopped, WSTOPSIG(status)};
+    const auto ptrace_event = static_cast<unsigned int>(status >> 16);
+    std::optional<pid_t> new_tid;
+    if (ptrace_event == PTRACE_EVENT_CLONE) {
+      const auto message = lowlevel::get_event_message(result);
+      if (message == 0 ||
+          message > static_cast<std::uint64_t>(std::numeric_limits<pid_t>::max())) {
+        throw std::runtime_error("PTRACE_EVENT_CLONE returned an invalid task id");
+      }
+      const auto child_tid = static_cast<pid_t>(message);
+      task_states_.try_emplace(child_tid, ProcessState::Running);
+      new_tid = child_tid;
+    }
+    return {WaitEvent::Kind::Stopped, WSTOPSIG(status), result, ptrace_event, new_tid};
   }
   throw std::runtime_error("waitpid returned an unsupported process state");
+}
+
+void Process::mark_running(pid_t tid) noexcept {
+  const auto it = task_states_.find(tid);
+  if (it == task_states_.end()) return;
+  it->second = ProcessState::Running;
+  update_aggregate_state();
+}
+
+void Process::update_aggregate_state() noexcept {
+  if (task_states_.empty()) return;
+  for (const auto& [tid, state] : task_states_) {
+    static_cast<void>(tid);
+    if (state == ProcessState::Stopped) {
+      state_ = ProcessState::Stopped;
+      return;
+    }
+  }
+  state_ = ProcessState::Running;
 }
 
 void Process::detach(int signal) {
@@ -131,6 +216,8 @@ void Process::detach(int signal) {
   }
   lowlevel::detach(pid_, signal);
   state_ = ProcessState::Detached;
+  task_states_.clear();
+  current_tid_ = -1;
   pid_ = -1;
 }
 
@@ -147,6 +234,8 @@ void Process::cleanup() noexcept {
       } catch (...) {
       }
     }
+    task_states_.clear();
+    current_tid_ = -1;
     pid_ = -1;
     state_ = ProcessState::Detached;
     return;
@@ -154,9 +243,17 @@ void Process::cleanup() noexcept {
 
   ::kill(pid_, SIGKILL);
   int status = 0;
-  while (::waitpid(pid_, &status, 0) == -1 && errno == EINTR) {
+  while (!task_states_.empty()) {
+    pid_t result;
+    do {
+      result = ::waitpid(-1, &status, __WALL);
+    } while (result == -1 && errno == EINTR);
+    if (result == -1) break;
+    task_states_.erase(result);
   }
+  current_tid_ = -1;
   pid_ = -1;
+  state_ = ProcessState::Exited;
 }
 
 }  // namespace mdbg

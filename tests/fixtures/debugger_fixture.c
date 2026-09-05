@@ -71,6 +71,21 @@ static int run_thread_lifecycle(void) {
   return worker_marker == 1 ? 0 : 88;
 }
 
+static void* breakpoint_worker(void* argument) {
+  (void)argument;
+  breakpoint_one();
+  breakpoint_one();
+  worker_marker = 2;
+  return NULL;
+}
+
+static int run_thread_breakpoint(void) {
+  pthread_t thread;
+  if (pthread_create(&thread, NULL, breakpoint_worker, NULL) != 0) return 89;
+  if (pthread_join(thread, NULL) != 0) return 90;
+  return worker_marker == 2 && fixture_value == 0x112233445566778aULL ? 0 : 91;
+}
+
 int main(int argc, char** argv) {
   if (argc == 2 && strcmp(argv[1], "thread-lifecycle") == 0) {
     return run_thread_lifecycle();
@@ -112,6 +127,9 @@ int main(int argc, char** argv) {
     watched_write();
     watched_write();
     return fixture_value == 0x112233445566778aULL ? 0 : 85;
+  }
+  if (strcmp(argv[2], "thread-breakpoint") == 0) {
+    return run_thread_breakpoint();
   }
 
   breakpoint_one();

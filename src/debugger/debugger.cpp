@@ -2,6 +2,8 @@
 
 #include "ptrace/ptrace.hpp"
 
+#include <sys/ptrace.h>
+
 #include <csignal>
 #include <stdexcept>
 #include <utility>
@@ -27,16 +29,25 @@ std::uint64_t watchpoint_length_encoding(std::size_t length) {
       throw std::invalid_argument("write watchpoint length must be 1, 2, 4, or 8 bytes");
   }
 }
+
+StopInfo make_stop(StopReason reason, int value, pid_t tid) {
+  StopInfo info{reason, value};
+  info.tid = tid;
+  return info;
+}
 }  // namespace
 
 Debugger Debugger::launch(const std::string& executable,
                           const std::vector<std::string>& arguments) {
-  return Debugger(Process::launch(executable, arguments),
-                  {StopReason::InitialExec, SIGTRAP, std::nullopt});
+  auto process = Process::launch(executable, arguments);
+  auto initial = make_stop(StopReason::InitialExec, SIGTRAP, process.current_tid());
+  return Debugger(std::move(process), std::move(initial));
 }
 
 Debugger Debugger::attach(pid_t pid) {
-  return Debugger(Process::attach(pid), {StopReason::Attached, SIGSTOP, std::nullopt});
+  auto process = Process::attach(pid);
+  auto initial = make_stop(StopReason::Attached, SIGSTOP, process.current_tid());
+  return Debugger(std::move(process), std::move(initial));
 }
 
 Debugger::Debugger(Process process, StopInfo initial_stop)
@@ -55,31 +66,34 @@ Debugger::~Debugger() {
   }
 }
 
-user_regs_struct Debugger::registers() const {
+pid_t Debugger::stopped_tid() const {
   if (process_.state() != ProcessState::Stopped) {
-    throw std::logic_error("registers are only available while the tracee is stopped");
+    throw std::logic_error("operation requires a stopped tracee");
   }
-  return lowlevel::get_registers(process_.pid());
+  const auto tid = process_.current_tid();
+  if (tid <= 0 || process_.task_state(tid) != ProcessState::Stopped) {
+    throw std::logic_error("no active stopped tracee thread");
+  }
+  return tid;
+}
+
+user_regs_struct Debugger::registers() const {
+  return lowlevel::get_registers(stopped_tid());
 }
 
 std::vector<std::byte> Debugger::read_memory(std::uintptr_t address,
                                              std::size_t length) const {
-  if (process_.state() != ProcessState::Stopped) {
-    throw std::logic_error("memory is only available while the tracee is stopped");
-  }
-  return lowlevel::read_memory(process_.pid(), address, length);
+  return lowlevel::read_memory(stopped_tid(), address, length);
 }
 
 std::size_t Debugger::add_breakpoint(std::uintptr_t address) {
-  if (process_.state() != ProcessState::Stopped) {
-    throw std::logic_error("breakpoints can only be modified while the tracee is stopped");
-  }
+  const auto tid = stopped_tid();
   if (breakpoints_by_address_.count(address) != 0) {
     throw std::invalid_argument("a breakpoint already exists at that address");
   }
 
-  const auto original = lowlevel::read_byte(process_.pid(), address);
-  lowlevel::write_byte(process_.pid(), address, kInt3);
+  const auto original = lowlevel::read_byte(tid, address);
+  lowlevel::write_byte(tid, address, kInt3);
   const auto id = next_breakpoint_id_++;
   breakpoints_by_address_.emplace(address, Breakpoint{id, address, original, true});
   breakpoint_ids_.emplace(id, address);
@@ -95,9 +109,9 @@ bool Debugger::remove_breakpoint(std::size_t id) {
   auto bp_it = breakpoints_by_address_.find(address);
   if (bp_it != breakpoints_by_address_.end() && bp_it->second.installed &&
       process_.state() == ProcessState::Stopped) {
-    lowlevel::write_byte(process_.pid(), address, bp_it->second.original_byte);
+    lowlevel::write_byte(stopped_tid(), address, bp_it->second.original_byte);
   }
-  if (pending_breakpoint_step_ == address) {
+  if (pending_breakpoint_step_ && pending_breakpoint_step_->address == address) {
     pending_breakpoint_step_.reset();
   }
   breakpoints_by_address_.erase(address);
@@ -109,7 +123,9 @@ bool Debugger::discard_breakpoint(std::size_t id) noexcept {
   const auto id_it = breakpoint_ids_.find(id);
   if (id_it == breakpoint_ids_.end()) return false;
   const auto address = id_it->second;
-  if (pending_breakpoint_step_ == address) pending_breakpoint_step_.reset();
+  if (pending_breakpoint_step_ && pending_breakpoint_step_->address == address) {
+    pending_breakpoint_step_.reset();
+  }
   breakpoints_by_address_.erase(address);
   breakpoint_ids_.erase(id_it);
   return true;
@@ -126,8 +142,10 @@ std::vector<Breakpoint> Debugger::breakpoints() const {
 }
 
 std::size_t Debugger::add_write_watchpoint(std::uintptr_t address, std::size_t length) {
-  if (process_.state() != ProcessState::Stopped) {
-    throw std::logic_error("watchpoints can only be modified while the tracee is stopped");
+  const auto tid = stopped_tid();
+  if (process_.tids().size() != 1) {
+    throw std::logic_error(
+        "hardware watchpoints are currently limited to a single traced thread");
   }
   if (watchpoint_) {
     throw std::invalid_argument("only one hardware watchpoint is currently supported");
@@ -137,9 +155,9 @@ std::size_t Debugger::add_write_watchpoint(std::uintptr_t address, std::size_t l
     throw std::invalid_argument("write watchpoint address must be naturally aligned");
   }
 
-  const DebugRegisterSnapshot snapshot{lowlevel::get_debug_register(process_.pid(), 0),
-                                       lowlevel::get_debug_register(process_.pid(), 6),
-                                       lowlevel::get_debug_register(process_.pid(), 7)};
+  const DebugRegisterSnapshot snapshot{tid, lowlevel::get_debug_register(tid, 0),
+                                       lowlevel::get_debug_register(tid, 6),
+                                       lowlevel::get_debug_register(tid, 7)};
   if ((snapshot.dr7 & kDr7Slot0EnableMask) != 0) {
     throw std::runtime_error("hardware debug-register slot 0 is already in use");
   }
@@ -149,16 +167,16 @@ std::size_t Debugger::add_write_watchpoint(std::uintptr_t address, std::size_t l
   const auto configured_dr7 = disabled_dr7 | std::uint64_t{1} |
                               (std::uint64_t{1} << 16U) | (length_encoding << 18U);
   try {
-    lowlevel::set_debug_register(process_.pid(), 7, disabled_dr7);
-    lowlevel::set_debug_register(process_.pid(), 0, address);
-    lowlevel::set_debug_register(process_.pid(), 6, snapshot.dr6 & ~kDr6Breakpoint0);
-    lowlevel::set_debug_register(process_.pid(), 7, configured_dr7);
+    lowlevel::set_debug_register(tid, 7, disabled_dr7);
+    lowlevel::set_debug_register(tid, 0, address);
+    lowlevel::set_debug_register(tid, 6, snapshot.dr6 & ~kDr6Breakpoint0);
+    lowlevel::set_debug_register(tid, 7, configured_dr7);
   } catch (...) {
     try {
-      lowlevel::set_debug_register(process_.pid(), 7, disabled_dr7);
-      lowlevel::set_debug_register(process_.pid(), 0, snapshot.dr0);
-      lowlevel::set_debug_register(process_.pid(), 6, snapshot.dr6);
-      lowlevel::set_debug_register(process_.pid(), 7, snapshot.dr7);
+      lowlevel::set_debug_register(tid, 7, disabled_dr7);
+      lowlevel::set_debug_register(tid, 0, snapshot.dr0);
+      lowlevel::set_debug_register(tid, 6, snapshot.dr6);
+      lowlevel::set_debug_register(tid, 7, snapshot.dr7);
     } catch (...) {
     }
     throw;
@@ -199,13 +217,17 @@ StopInfo Debugger::continue_execution(SignalPolicy policy) {
   }
 
   if (pending_breakpoint_step_) {
+    if (pending_breakpoint_step_->tid != stopped_tid()) {
+      throw std::logic_error("pending breakpoint step belongs to a different thread");
+    }
     const auto internal = step_over_pending_breakpoint(false);
     if (internal.reason != StopReason::SingleStep) return internal;
   }
 
+  const auto tid = stopped_tid();
   const int signal = resume_signal(policy);
-  lowlevel::continue_process(process_.pid(), signal);
-  process_.mark_running();
+  lowlevel::continue_process(tid, signal);
+  process_.mark_running(tid);
   return wait_and_classify(false);
 }
 
@@ -214,12 +236,16 @@ StopInfo Debugger::single_step(SignalPolicy policy) {
     throw std::logic_error("single-step requires a stopped tracee");
   }
   if (pending_breakpoint_step_) {
+    if (pending_breakpoint_step_->tid != stopped_tid()) {
+      throw std::logic_error("pending breakpoint step belongs to a different thread");
+    }
     return step_over_pending_breakpoint(true);
   }
 
+  const auto tid = stopped_tid();
   const int signal = resume_signal(policy);
-  lowlevel::single_step(process_.pid(), signal);
-  process_.mark_running();
+  lowlevel::single_step(tid, signal);
+  process_.mark_running(tid);
   return wait_and_classify(true);
 }
 
@@ -238,17 +264,16 @@ void Debugger::detach(SignalPolicy policy) {
   breakpoints_by_address_.clear();
   breakpoint_ids_.clear();
   pending_breakpoint_step_.reset();
+  pending_thread_starts_.clear();
   watchpoint_.reset();
   watchpoint_register_snapshot_.reset();
 }
 
 void Debugger::restore_all_breakpoints() {
-  if (process_.state() != ProcessState::Stopped) {
-    throw std::logic_error("breakpoints can only be restored while the tracee is stopped");
-  }
+  const auto tid = stopped_tid();
   for (auto& [address, breakpoint] : breakpoints_by_address_) {
     if (!breakpoint.installed) continue;
-    lowlevel::write_byte(process_.pid(), address, breakpoint.original_byte);
+    lowlevel::write_byte(tid, address, breakpoint.original_byte);
     breakpoint.installed = false;
   }
   pending_breakpoint_step_.reset();
@@ -256,35 +281,46 @@ void Debugger::restore_all_breakpoints() {
 
 void Debugger::restore_watchpoint_registers() {
   if (!watchpoint_register_snapshot_) return;
-  if (process_.state() != ProcessState::Stopped) {
-    throw std::logic_error("watchpoint registers can only be restored while stopped");
+  const auto tid = watchpoint_register_snapshot_->tid;
+  if (process_.task_state(tid) != ProcessState::Stopped) {
+    throw std::logic_error("watchpoint owner thread must be stopped before restore");
   }
 
-  const auto current_dr7 = lowlevel::get_debug_register(process_.pid(), 7);
+  const auto current_dr7 = lowlevel::get_debug_register(tid, 7);
   const auto disabled_dr7 = current_dr7 & ~(kDr7Slot0EnableMask | kDr7Slot0ControlMask);
-  lowlevel::set_debug_register(process_.pid(), 7, disabled_dr7);
-  lowlevel::set_debug_register(process_.pid(), 0, watchpoint_register_snapshot_->dr0);
-  lowlevel::set_debug_register(process_.pid(), 6, watchpoint_register_snapshot_->dr6);
-  lowlevel::set_debug_register(process_.pid(), 7, watchpoint_register_snapshot_->dr7);
+  lowlevel::set_debug_register(tid, 7, disabled_dr7);
+  lowlevel::set_debug_register(tid, 0, watchpoint_register_snapshot_->dr0);
+  lowlevel::set_debug_register(tid, 6, watchpoint_register_snapshot_->dr6);
+  lowlevel::set_debug_register(tid, 7, watchpoint_register_snapshot_->dr7);
 }
 
-std::optional<StopInfo> Debugger::classify_watchpoint_stop() {
-  if (!watchpoint_) return std::nullopt;
-  const auto dr6 = lowlevel::get_debug_register(process_.pid(), 6);
+std::optional<StopInfo> Debugger::classify_watchpoint_stop(pid_t tid) {
+  if (!watchpoint_ || !watchpoint_register_snapshot_ ||
+      watchpoint_register_snapshot_->tid != tid) {
+    return std::nullopt;
+  }
+  const auto dr6 = lowlevel::get_debug_register(tid, 6);
   if ((dr6 & kDr6Breakpoint0) == 0) return std::nullopt;
-  lowlevel::set_debug_register(process_.pid(), 6, dr6 & ~kDr6Breakpoint0);
-  return StopInfo{StopReason::Watchpoint, SIGTRAP, std::nullopt, watchpoint_->id,
-                  watchpoint_->address};
+  lowlevel::set_debug_register(tid, 6, dr6 & ~kDr6Breakpoint0);
+  auto info = make_stop(StopReason::Watchpoint, SIGTRAP, tid);
+  info.watchpoint_id = watchpoint_->id;
+  info.watchpoint_address = watchpoint_->address;
+  return info;
 }
 
 StopInfo Debugger::step_over_pending_breakpoint(bool expose_single_step) {
-  const auto address = *pending_breakpoint_step_;
-  lowlevel::single_step(process_.pid(), 0);
-  process_.mark_running();
+  const auto pending = *pending_breakpoint_step_;
+  lowlevel::single_step(pending.tid, 0);
+  process_.mark_running(pending.tid);
   auto info = wait_and_classify(true);
-  if (process_.state() == ProcessState::Stopped) {
-    reinsert_breakpoint(address);
+
+  pid_t reinsert_tid = -1;
+  if (process_.task_state(pending.tid) == ProcessState::Stopped) {
+    reinsert_tid = pending.tid;
+  } else if (process_.state() == ProcessState::Stopped) {
+    reinsert_tid = stopped_tid();
   }
+  if (reinsert_tid > 0) reinsert_breakpoint(pending.address, reinsert_tid);
   pending_breakpoint_step_.reset();
 
   if (expose_single_step && info.reason == StopReason::SingleStep) {
@@ -293,66 +329,101 @@ StopInfo Debugger::step_over_pending_breakpoint(bool expose_single_step) {
   return info;
 }
 
-void Debugger::reinsert_breakpoint(std::uintptr_t address) {
+void Debugger::reinsert_breakpoint(std::uintptr_t address, pid_t tid) {
   const auto it = breakpoints_by_address_.find(address);
   if (it == breakpoints_by_address_.end() || it->second.installed) {
     return;
   }
-  lowlevel::write_byte(process_.pid(), address, kInt3);
+  lowlevel::write_byte(tid, address, kInt3);
   it->second.installed = true;
 }
 
 StopInfo Debugger::wait_and_classify(bool expected_single_step) {
-  const auto event = process_.wait();
-  if (event.kind == WaitEvent::Kind::Exited) {
-    stop_info_ = {StopReason::Exited, event.value, std::nullopt};
-    return stop_info_;
-  }
-  if (event.kind == WaitEvent::Kind::Signaled) {
-    stop_info_ = {StopReason::Signaled, event.value, std::nullopt};
-    return stop_info_;
-  }
-
-  const int signal = event.value;
-  if (signal != SIGTRAP) {
-    stop_info_ = {StopReason::Signal, signal, std::nullopt};
-    return stop_info_;
-  }
-  if (const auto watchpoint = classify_watchpoint_stop()) {
-    stop_info_ = *watchpoint;
-    return stop_info_;
-  }
-  if (expected_single_step) {
-    stop_info_ = {StopReason::SingleStep, SIGTRAP, std::nullopt};
-    return stop_info_;
-  }
-
-  auto regs = lowlevel::get_registers(process_.pid());
-  if (regs.rip > 0) {
-    const auto candidate = static_cast<std::uintptr_t>(regs.rip - 1);
-    const auto bp = breakpoints_by_address_.find(candidate);
-    if (bp != breakpoints_by_address_.end() && bp->second.installed) {
-      prepare_breakpoint_hit(candidate, regs);
-      stop_info_ = {StopReason::Breakpoint, SIGTRAP, candidate};
+  for (;;) {
+    const auto event = process_.wait();
+    if (event.kind == WaitEvent::Kind::Exited) {
+      pending_thread_starts_.erase(event.tid);
+      if (process_.tids().empty()) {
+        stop_info_ = make_stop(StopReason::Exited, event.value, event.tid);
+        return stop_info_;
+      }
+      if (process_.state() != ProcessState::Stopped) continue;
+      stop_info_ = make_stop(StopReason::ThreadExited, event.value, event.tid);
       return stop_info_;
     }
-  }
+    if (event.kind == WaitEvent::Kind::Signaled) {
+      pending_thread_starts_.erase(event.tid);
+      if (process_.tids().empty()) {
+        stop_info_ = make_stop(StopReason::Signaled, event.value, event.tid);
+        return stop_info_;
+      }
+      if (process_.state() != ProcessState::Stopped) continue;
+      stop_info_ = make_stop(StopReason::ThreadSignaled, event.value, event.tid);
+      return stop_info_;
+    }
 
-  stop_info_ = {StopReason::Trap, SIGTRAP, std::nullopt};
-  return stop_info_;
+    if (event.ptrace_event == PTRACE_EVENT_CLONE) {
+      if (!event.new_tid) {
+        throw std::runtime_error("clone event did not provide a new thread id");
+      }
+      if (watchpoint_) {
+        throw std::runtime_error(
+            "thread creation while a hardware watchpoint is active is unsupported");
+      }
+      pending_thread_starts_.insert(*event.new_tid);
+      continue;
+    }
+
+    if (pending_thread_starts_.erase(event.tid) != 0) {
+      stop_info_ = make_stop(StopReason::ThreadCreated, event.value, event.tid);
+      stop_info_.new_tid = event.tid;
+      return stop_info_;
+    }
+
+    const int signal = event.value;
+    if (signal != SIGTRAP) {
+      stop_info_ = make_stop(StopReason::Signal, signal, event.tid);
+      return stop_info_;
+    }
+    if (const auto watchpoint = classify_watchpoint_stop(event.tid)) {
+      stop_info_ = *watchpoint;
+      return stop_info_;
+    }
+    if (expected_single_step) {
+      stop_info_ = make_stop(StopReason::SingleStep, SIGTRAP, event.tid);
+      return stop_info_;
+    }
+
+    auto regs = lowlevel::get_registers(event.tid);
+    if (regs.rip > 0) {
+      const auto candidate = static_cast<std::uintptr_t>(regs.rip - 1);
+      const auto bp = breakpoints_by_address_.find(candidate);
+      if (bp != breakpoints_by_address_.end() && bp->second.installed) {
+        prepare_breakpoint_hit(candidate, regs, event.tid);
+        auto info = make_stop(StopReason::Breakpoint, SIGTRAP, event.tid);
+        info.breakpoint_address = candidate;
+        stop_info_ = info;
+        return stop_info_;
+      }
+    }
+
+    stop_info_ = make_stop(StopReason::Trap, SIGTRAP, event.tid);
+    return stop_info_;
+  }
 }
 
-void Debugger::prepare_breakpoint_hit(std::uintptr_t address, user_regs_struct regs) {
+void Debugger::prepare_breakpoint_hit(std::uintptr_t address, user_regs_struct regs,
+                                      pid_t tid) {
   auto it = breakpoints_by_address_.find(address);
   if (it == breakpoints_by_address_.end() || !it->second.installed) {
     throw std::logic_error("attempted to prepare an unknown breakpoint hit");
   }
 
   regs.rip = address;
-  lowlevel::set_registers(process_.pid(), regs);
-  lowlevel::write_byte(process_.pid(), address, it->second.original_byte);
+  lowlevel::set_registers(tid, regs);
+  lowlevel::write_byte(tid, address, it->second.original_byte);
   it->second.installed = false;
-  pending_breakpoint_step_ = address;
+  pending_breakpoint_step_ = PendingBreakpointStep{address, tid};
 }
 
 }  // namespace mdbg

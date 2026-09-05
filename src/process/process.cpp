@@ -151,9 +151,11 @@ WaitEvent Process::wait() {
     if (result == pid_) exit_code_ = code;
     task_states_.erase(task);
     if (task_states_.empty()) {
+      current_tid_ = -1;
       state_ = ProcessState::Exited;
     } else {
       update_aggregate_state();
+      select_current_task();
     }
     return {WaitEvent::Kind::Exited, code, result};
   }
@@ -162,9 +164,11 @@ WaitEvent Process::wait() {
     if (result == pid_) termination_signal_ = signal;
     task_states_.erase(task);
     if (task_states_.empty()) {
+      current_tid_ = -1;
       state_ = ProcessState::Signaled;
     } else {
       update_aggregate_state();
+      select_current_task();
     }
     return {WaitEvent::Kind::Signaled, signal, result};
   }
@@ -205,6 +209,17 @@ void Process::update_aggregate_state() noexcept {
     }
   }
   state_ = ProcessState::Running;
+}
+
+void Process::select_current_task() noexcept {
+  current_tid_ = -1;
+  for (const auto& [tid, state] : task_states_) {
+    if (state == ProcessState::Stopped) {
+      current_tid_ = tid;
+      return;
+    }
+  }
+  if (!task_states_.empty()) current_tid_ = task_states_.begin()->first;
 }
 
 void Process::detach(int signal) {

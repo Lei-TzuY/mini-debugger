@@ -168,24 +168,34 @@ void run_follow_parent_vfork(const std::string& driver, const std::string& targe
   const auto watchpoint_id =
       debugger.add_write_watchpoint(value_address, sizeof(std::uint64_t));
 
+  auto require_vfork_event = [&](const char* release_path) {
+    const auto info = debugger.continue_execution();
+    require(info.process_event == mdbg::ProcessEventKind::Vfork,
+            std::string("real vfork ") + release_path +
+                " was not classified as a vfork process-topology event");
+    require(info.tid == leader,
+            std::string("vfork ") + release_path +
+                " event did not remain owned by the followed parent");
+    require(info.child_pid.has_value() && *info.child_pid > 0 && *info.child_pid != leader,
+            std::string("vfork ") + release_path +
+                " event did not expose a distinct child process identity");
+
+    const auto threads = debugger.threads();
+    require(threads.size() == 1 && threads.front().tid == leader && threads.front().active,
+            std::string("transient vfork ") + release_path +
+                " child leaked into the parent's TID registry");
+    require(debugger.breakpoints().size() == 1 &&
+                debugger.breakpoints().front().id == breakpoint_id,
+            std::string("parent breakpoint ownership changed across vfork ") + release_path);
+    require(debugger.watchpoints().size() == 1 &&
+                debugger.watchpoints().front().id == watchpoint_id,
+            std::string("parent watchpoint ownership changed across vfork ") + release_path);
+  };
+
+  require_vfork_event("child-exit release");
+  require_vfork_event("child-exec release");
+
   auto info = debugger.continue_execution();
-  require(info.process_event != mdbg::ProcessEventKind::None,
-          "real vfork was not surfaced as a process-topology event");
-  require(info.tid == leader, "vfork event did not remain owned by the followed parent");
-  require(info.child_pid.has_value() && *info.child_pid > 0 && *info.child_pid != leader,
-          "vfork event did not expose a distinct child process identity");
-
-  const auto threads = debugger.threads();
-  require(threads.size() == 1 && threads.front().tid == leader && threads.front().active,
-          "transient vfork child leaked into the parent's TID registry");
-  require(debugger.breakpoints().size() == 1 &&
-              debugger.breakpoints().front().id == breakpoint_id,
-          "parent breakpoint ownership changed across vfork shared-VM release");
-  require(debugger.watchpoints().size() == 1 &&
-              debugger.watchpoints().front().id == watchpoint_id,
-          "parent watchpoint ownership changed across vfork shared-VM release");
-
-  info = debugger.continue_execution();
   require(info.reason == mdbg::StopReason::Breakpoint && info.tid == leader &&
               info.breakpoint_address == probe_address,
           "parent managed breakpoint did not survive vfork shared-VM handling");

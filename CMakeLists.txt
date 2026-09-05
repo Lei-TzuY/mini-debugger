@@ -18,6 +18,7 @@ add_library(mdbg_core
   src/registers/registers.cpp
   src/elf/elf.cpp
   src/debugger/debugger.cpp
+  src/debugger/memory_mutation.cpp
   src/loader/deferred_symbol_breakpoints.cpp
   src/unwind/frame_pointer.cpp
   src/unwind/cfi.cpp

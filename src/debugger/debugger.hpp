@@ -135,6 +135,11 @@ class Debugger {
     std::string executable_path;
     std::set<pid_t> pending_thread_starts;
     std::map<pid_t, int> pending_signals;
+    std::map<std::uintptr_t, Breakpoint> breakpoints_by_address;
+    std::map<std::size_t, std::uintptr_t> breakpoint_ids;
+    std::optional<PendingBreakpointStep> pending_breakpoint_step;
+    std::optional<Watchpoint> watchpoint;
+    std::optional<DebugRegisterSnapshot> watchpoint_register_snapshot;
   };
 
   friend class DeferredBreakpoints;
@@ -153,7 +158,6 @@ class Debugger {
   void restore_all_breakpoints();
   void restore_watchpoint_registers();
   void discard_image_state() noexcept;
-  void require_single_process_debug_state(const char* operation) const;
   [[nodiscard]] std::optional<StopInfo> classify_watchpoint_stop(pid_t tid);
   bool discard_breakpoint(std::size_t id) noexcept;
 

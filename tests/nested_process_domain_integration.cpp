@@ -68,6 +68,12 @@ void run_nested_registry_api(const std::string& driver) {
   const auto child = *info.child_pid;
   require(child != parent, "first nested fork did not create a distinct child");
 
+  const auto parent_stop_sequence = debugger.stop_info().sequence;
+  debugger.select_process(child);
+  debugger.select_process(parent);
+  require(debugger.stop_info().sequence != parent_stop_sequence,
+          "process-domain round trip did not invalidate the prior inspection generation");
+
   const auto parent_breakpoint = debugger.add_breakpoint(probe_address);
   require(byte_at(debugger, probe_address) == 0xccU,
           "parent process-scoped breakpoint was not physically installed");

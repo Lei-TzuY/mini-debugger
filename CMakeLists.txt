@@ -149,9 +149,13 @@ if(BUILD_TESTING)
   target_link_libraries(memory_mutation_integration PRIVATE mdbg_core)
   target_compile_options(memory_mutation_integration PRIVATE -Wall -Wextra -Wpedantic -Werror)
   add_test(NAME memory_mutation_integration_pie
-    COMMAND memory_mutation_integration $<TARGET_FILE:debugger_fixture_pie>)
+    COMMAND memory_mutation_integration
+      $<TARGET_FILE:debugger_fixture_pie>
+      $<TARGET_FILE:mdbg>)
   add_test(NAME memory_mutation_integration_nopie
-    COMMAND memory_mutation_integration $<TARGET_FILE:debugger_fixture_nopie>)
+    COMMAND memory_mutation_integration
+      $<TARGET_FILE:debugger_fixture_nopie>
+      $<TARGET_FILE:mdbg>)
 
   add_executable(attach_integration tests/attach_integration.cpp)
   target_link_libraries(attach_integration PRIVATE mdbg_core)

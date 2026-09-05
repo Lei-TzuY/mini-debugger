@@ -1,7 +1,14 @@
 #include "debugger/debugger.hpp"
 #include "dwarf/line_table.hpp"
+#include "dwarf/local_value.hpp"
 #include "elf/elf.hpp"
 
+#include <poll.h>
+#include <sys/wait.h>
+#include <unistd.h>
+
+#include <cerrno>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <filesystem>
@@ -9,6 +16,9 @@
 #include <string>
 
 namespace {
+
+constexpr std::uint64_t kExpectedLocalRawValue = 0x1020304050607080ULL;
+constexpr const char* kExpectedLocalValue = "local_value = 1161981756646125696";
 
 void require(bool condition, const std::string& message) {
   if (!condition) throw std::runtime_error(message);
@@ -80,6 +90,133 @@ void test_runtime_mapping(const std::string& fixture) {
   require_mapped_source(*stopped_location);
 }
 
+void test_local_value_api(const std::string& fixture) {
+  auto debugger = mdbg::Debugger::launch(fixture, {"value"});
+  const mdbg::ElfFile elf(fixture);
+  const auto probe = elf.find_symbol("local_value_probe");
+  require(probe.has_value(), "local_value_probe symbol missing from fixture");
+  const auto address = static_cast<std::uintptr_t>(elf.runtime_address(debugger.pid(), *probe));
+  debugger.add_breakpoint(address);
+  const auto stop = debugger.continue_execution();
+  require(stop.reason == mdbg::StopReason::Breakpoint && stop.breakpoint_address == address,
+          "local-value fixture did not stop at the compiler-generated probe");
+
+  const auto value = mdbg::inspect_local_integer(debugger, elf, "local_value");
+  require(value.name == "local_value", "local-value API returned the wrong variable name");
+  require(value.raw_value == kExpectedLocalRawValue,
+          "local-value API returned the wrong runtime integer value");
+  require(value.byte_size == sizeof(std::uint64_t) && !value.is_signed,
+          "local-value API returned the wrong uint64_t type metadata");
+  require(std::filesystem::equivalent(value.module_path, fixture),
+          "local-value API did not preserve the owning module identity");
+
+  bool missing_failed = false;
+  try {
+    (void)mdbg::inspect_local_integer(debugger, elf, "missing_local");
+  } catch (const std::exception&) {
+    missing_failed = true;
+  }
+  require(missing_failed, "missing local variable did not fail explicitly");
+
+  const auto exit = debugger.continue_execution();
+  require(exit.reason == mdbg::StopReason::Exited && exit.value == 0,
+          "local-value fixture did not exit cleanly after inspection");
+}
+
+std::string run_value_cli(const std::string& integration_path, const std::string& fixture) {
+  const auto mdbg_path =
+      (std::filesystem::absolute(integration_path).parent_path() / "mdbg").string();
+  require(std::filesystem::exists(mdbg_path), "mdbg executable is missing beside integration test");
+
+  int input_pipe[2];
+  int output_pipe[2];
+  if (::pipe(input_pipe) != 0 || ::pipe(output_pipe) != 0) {
+    throw std::runtime_error("failed to create CLI pipes");
+  }
+
+  const pid_t child = ::fork();
+  if (child == -1) throw std::runtime_error("failed to fork CLI");
+  if (child == 0) {
+    ::setpgid(0, 0);
+    ::dup2(input_pipe[0], STDIN_FILENO);
+    ::dup2(output_pipe[1], STDOUT_FILENO);
+    ::dup2(output_pipe[1], STDERR_FILENO);
+    ::close(input_pipe[0]);
+    ::close(input_pipe[1]);
+    ::close(output_pipe[0]);
+    ::close(output_pipe[1]);
+    ::execl(mdbg_path.c_str(), mdbg_path.c_str(), fixture.c_str(), "value", nullptr);
+    _exit(127);
+  }
+
+  ::close(input_pipe[0]);
+  ::close(output_pipe[1]);
+
+  const std::string script =
+      "break local_value_probe\n"
+      "continue\n"
+      "print local_value\n"
+      "continue\n";
+  std::size_t written = 0;
+  while (written < script.size()) {
+    const auto count = ::write(input_pipe[1], script.data() + written, script.size() - written);
+    if (count == -1 && errno == EINTR) continue;
+    if (count <= 0) throw std::runtime_error("failed to write CLI script");
+    written += static_cast<std::size_t>(count);
+  }
+  ::close(input_pipe[1]);
+
+  std::string output;
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(8);
+  bool eof = false;
+  while (!eof) {
+    const auto now = std::chrono::steady_clock::now();
+    if (now >= deadline) {
+      ::kill(-child, SIGKILL);
+      ::kill(child, SIGKILL);
+      throw std::runtime_error("timed out waiting for value-inspection CLI");
+    }
+    const auto remaining =
+        std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now).count();
+    pollfd descriptor{output_pipe[0], POLLIN | POLLHUP, 0};
+    const int result = ::poll(&descriptor, 1, static_cast<int>(remaining));
+    if (result == -1 && errno == EINTR) continue;
+    if (result <= 0) {
+      ::kill(-child, SIGKILL);
+      ::kill(child, SIGKILL);
+      throw std::runtime_error("timed out reading value-inspection CLI output");
+    }
+
+    char buffer[512];
+    const auto count = ::read(output_pipe[0], buffer, sizeof(buffer));
+    if (count == -1 && errno == EINTR) continue;
+    if (count < 0) throw std::runtime_error("failed to read value-inspection CLI output");
+    if (count == 0) {
+      eof = true;
+    } else {
+      output.append(buffer, static_cast<std::size_t>(count));
+    }
+  }
+  ::close(output_pipe[0]);
+
+  int status = 0;
+  pid_t waited;
+  do {
+    waited = ::waitpid(child, &status, 0);
+  } while (waited == -1 && errno == EINTR);
+  require(waited == child && WIFEXITED(status) && WEXITSTATUS(status) == 0,
+          "value-inspection CLI did not exit cleanly\n" + output);
+  return output;
+}
+
+void test_cli_local_value(const std::string& integration_path, const std::string& fixture) {
+  const auto output = run_value_cli(integration_path, fixture);
+  require(output.find("Breakpoint 1") != std::string::npos,
+          "CLI did not install the local-value probe breakpoint\n" + output);
+  require(output.find(kExpectedLocalValue) != std::string::npos,
+          "CLI did not render the compiler-generated local integer value\n" + output);
+}
+
 void test_missing_debug_line(const std::string& stripped_fixture) {
   const mdbg::DwarfLineTable lines(stripped_fixture);
   require(!lines.available(), "stripped fixture must not claim DWARF line coverage");
@@ -95,6 +232,8 @@ int main(int argc, char** argv) {
   if (argc != 4) return 2;
   try {
     test_runtime_mapping(argv[1]);
+    test_local_value_api(argv[1]);
+    test_cli_local_value(argv[0], argv[1]);
     test_missing_debug_line(argv[2]);
     test_runtime_mapping(argv[3]);
     return 0;

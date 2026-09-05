@@ -2,6 +2,7 @@
 #include "debugger/debugger.hpp"
 #include "dwarf/eh_frame.hpp"
 #include "dwarf/line_table.hpp"
+#include "dwarf/local_value.hpp"
 #include "elf/elf.hpp"
 #include "registers/registers.hpp"
 #include "source/source_finish.hpp"
@@ -68,6 +69,21 @@ pid_t parse_pid(const std::string& text) {
     throw std::invalid_argument("invalid pid: " + text);
   }
   return static_cast<pid_t>(value);
+}
+
+std::int64_t signed_local_value(const mdbg::LocalIntegerValue& value) {
+  if (value.byte_size == 0 || value.byte_size > sizeof(std::uint64_t)) {
+    throw std::invalid_argument("invalid local integer byte width");
+  }
+  if (value.byte_size == sizeof(std::uint64_t)) {
+    return static_cast<std::int64_t>(value.raw_value);
+  }
+  const auto bits = static_cast<unsigned>(value.byte_size * 8U);
+  const auto mask = (std::uint64_t{1} << bits) - 1U;
+  auto raw = value.raw_value & mask;
+  const auto sign_bit = std::uint64_t{1} << (bits - 1U);
+  if ((raw & sign_bit) != 0) raw |= ~mask;
+  return static_cast<std::int64_t>(raw);
 }
 
 const char* process_state_name(mdbg::ProcessState state) {
@@ -527,6 +543,25 @@ int main(int argc, char** argv) {
         print_source_location(address, debugger, elf);
       } else if (command == "list" || command == "l") {
         print_source_location(static_cast<std::uintptr_t>(debugger.registers().rip), debugger, elf);
+      } else if (command == "print") {
+        std::string name;
+        input >> name;
+        if (name.empty()) {
+          std::cout << "usage: print <name>\n";
+          continue;
+        }
+        try {
+          const auto value = mdbg::inspect_local_integer(debugger, elf, name);
+          std::cout << value.name << " = ";
+          if (value.is_signed) {
+            std::cout << signed_local_value(value);
+          } else {
+            std::cout << value.raw_value;
+          }
+          std::cout << '\n';
+        } catch (const std::exception& error) {
+          std::cout << "print failed: " << error.what() << '\n';
+        }
       } else if (command == "set") {
         std::string topic;
         input >> topic;
@@ -729,7 +764,7 @@ int main(int argc, char** argv) {
         }
       } else {
         std::cout << "commands: continue, step, next, finish, stepi, regs, bt, list, "
-                     "line <addr|symbol>, set follow-fork-mode <parent|child|both>, "
+                     "line <addr|symbol>, print <name>, set follow-fork-mode <parent|child|both>, "
                      "set register <name> <value>, set memory <addr|symbol> <byte> [byte...], "
                      "set substitute-path <from> <to>, reg <name>, x <addr|symbol> [len], "
                      "break <addr|symbol|file:line>, delete <id>, process <pid>, thread <tid>, "

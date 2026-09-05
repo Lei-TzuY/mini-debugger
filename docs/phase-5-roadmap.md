@@ -46,11 +46,26 @@ Completed Priority 2 contract:
 
 Priority 2 still does not create a general DWARF expression stack machine. The larger multi-register XOR/shift expressions visible elsewhere in compiler output remain unsupported until a separate active current-PC workflow independently requires them.
 
+## Priority 3: compiler-composed multi-register stack values — complete
+
+The fourth Phase 5 slice promotes exactly such a larger expression only after it becomes the active location of an existing executable workflow. The optimized arithmetic fixture now computes the same expected `arithmetic_local == 0x10203040506070a5` from six live arguments. At the exported `arithmetic_local_probe`, GCC 13.3 selects a current-PC expression that combines R8, R9, RCX, RDX, RSI, and RDI through zero-offset `DW_OP_bregN`, shift constants (`DW_OP_const1u`, `DW_OP_lit8`, `DW_OP_lit16`, `DW_OP_lit24`), repeated `DW_OP_shl`/`DW_OP_xor`, and a final `DW_OP_stack_value`. Clang 18.1.3 materializes the same source value in `DW_OP_reg0 (rax)` and remains covered by the existing register path.
+
+Completed Priority 3 contract:
+
+- test-first GCC PIE and non-PIE sessions use the pre-existing direct API and CLI `print arithmetic_local` workflow and fail only because this newly selected current-PC composite expression is unsupported; all other GCC tests stay green while the complete Clang-large lane remains green on the same source fixture;
+- the evaluator is a deliberately bounded stack interpreter for the compiler-proven expression surface only: zero-offset `DW_OP_breg1/2/4/5/8/9`, `DW_OP_const1u`, exactly the emitted `DW_OP_lit8/16/24`, `DW_OP_shl`, `DW_OP_xor`, one trailing `DW_OP_stack_value`, and no other operations;
+- each register value comes from the currently selected stopped TID; nonzero register-relative offsets remain rejected in this composite path, binary operations require two stack operands, shift counts must be below 64, and completion requires exactly one final stack value;
+- the recovered value is truncated through the already-resolved scalar type width and returned with the existing module/type/lexical ownership rather than introducing a parallel value representation;
+- the same existing direct API and real CLI assertions prove `arithmetic_local == 0x10203040506070a5` for PIE and non-PIE after the GCC path becomes supported, while Clang continues through its pre-existing `DW_OP_reg0` path;
+- unsupported registers, constants, arithmetic operations, malformed operands, stack underflow, invalid shifts, missing/floating `DW_OP_stack_value`, and trailing operations remain fail-closed.
+
+Priority 3 still does not claim a general DWARF virtual machine. The bounded stack exists only because a real current-PC GCC expression required composition; pieces, dereference, arbitrary literals/registers, alternate arithmetic, and historical/cross-frame operations still require independent executable compiler evidence.
+
 ## Current frontier: next compiler-produced expression failure
 
 Do not select the next opcode family from the DWARF specification by enumeration. First find a real GCC or Clang current-PC location expression that the existing evaluator rejects in an otherwise valid source-value workflow, preserve the exact compiler evidence, and then add only the minimum semantics and ownership state required by that failure.
 
-Potential surfaces such as arithmetic/composite expressions, pieces, dereference chains, inlined-scope ownership, richer stack-value combinations, or additional entry-value registers remain candidates only when real compiler output makes one independently necessary. A candidate that only appears in an inactive location-list range is not sufficient evidence.
+Potential surfaces such as pieces, dereference chains, inlined-scope ownership, richer stack-value combinations, or additional entry-value registers remain candidates only when real compiler output makes one independently necessary. A candidate that only appears in an inactive location-list range is not sufficient evidence.
 
 ## Selection rule
 

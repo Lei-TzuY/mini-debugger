@@ -121,11 +121,26 @@ Completed Priority 7 contract:
 
 Priority 7 does not generalize qualified types. GCC output also contains unrelated `DW_TAG_volatile_type` metadata, but no selected current-PC source-value failure requires it, so volatile/restrict/atomic chains remain unsupported pending independent executable evidence.
 
+## Priority 8: compiler dereference/XOR stack values — complete
+
+The ninth Phase 5 slice advances expression semantics only after the existing indirect-local workflow selects a richer live location. The source still exposes the same `indirect_local == 0x8877665544332211`, but computes it as `*ptr ^ 0x55aa00ff33cc6699` from a correspondingly pre-XORed seed. At `indirect_local_probe`, GCC 13.3 selects the active current-PC expression `DW_OP_breg5 (rdi): 0; DW_OP_deref; DW_OP_constu 6172747335350380185; DW_OP_xor; DW_OP_stack_value`; Clang 18.1.3 materializes the same source value through its already-supported register path.
+
+Completed Priority 8 contract:
+
+- test-first run #715 builds both compiler lanes successfully; GCC PIE and non-PIE fail only in the two DWARF5 local-value tests with `DW_OP_breg5 value requires the compiler-proven trailing DW_OP_stack_value`, while the other 46 GCC tests and the complete Clang-large lane remain green;
+- the existing `DW_OP_breg5` value evaluator retains Priority 1 unchanged and adds exactly one second compiler-proven shape: zero offset, `DW_OP_deref`, `DW_OP_constu`, `DW_OP_xor`, one trailing `DW_OP_stack_value`, and no additional operations;
+- the dereference address comes from RDI on the currently selected stopped TID; the new form rejects nonzero breg offsets and reads exactly one x86-64 8-byte value through the existing `Debugger::read_memory`/integer decoder before applying the compiler-provided XOR constant;
+- the result still flows through the already-resolved scalar type-width truncation and existing module/current-PC/lexical/process/TID ownership, rather than introducing a generic dereference API or independent stack machine;
+- the same pre-existing direct API and real CLI assertions continue to prove `indirect_local == 0x8877665544332211` for PIE and non-PIE, and production run #716 is fully green under GCC and Clang-large;
+- malformed operands, missing `DW_OP_constu`/`DW_OP_xor`/`DW_OP_stack_value`, nonzero dereference offsets, alternate dereference widths/chains, arbitrary stack operations, and trailing data remain fail-closed.
+
+Priority 8 does not make `DW_OP_deref` generally available. It supports only the live compiler expression that composes selected-TID register ownership, one inferior-memory load, one compiler constant, and one XOR into the final stack value.
+
 ## Current frontier: next compiler-produced expression or ownership failure
 
 Do not select the next opcode family from the DWARF specification by enumeration. First find a real GCC or Clang current-PC location expression or ownership shape that the existing evaluator rejects in an otherwise valid source-value workflow, preserve the exact compiler evidence, and then add only the minimum semantics and ownership state required by that failure.
 
-Potential surfaces such as dereference chains, richer stack-value combinations, additional piece layouts, additional entry-value registers, additional qualified-type chains, or deeper inline/call-site ownership remain candidates only when real compiler output makes one independently necessary. A candidate that only appears in an inactive location-list range is not sufficient evidence.
+Potential surfaces such as richer dereference chains, richer stack-value combinations, additional piece layouts, additional entry-value registers, additional qualified-type chains, or deeper inline/call-site ownership remain candidates only when real compiler output makes one independently necessary. A candidate that only appears in an inactive location-list range is not sufficient evidence.
 
 ## Selection rule
 

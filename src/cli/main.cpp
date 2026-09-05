@@ -106,8 +106,16 @@ void print_stop(const mdbg::StopInfo& info, const mdbg::ElfFile& elf, pid_t pid)
   using mdbg::StopReason;
   if (info.process_event != mdbg::ProcessEventKind::None) {
     const bool is_vfork = info.process_event == mdbg::ProcessEventKind::Vfork;
-    std::cout << "process " << (is_vfork ? "vfork" : "fork")
-              << ": followed parent " << pid << ", ";
+    const auto parent = info.parent_pid.value_or(pid);
+    const bool follows_child =
+        !is_vfork && info.child_pid.has_value() && info.tid == *info.child_pid;
+    std::cout << "process " << (is_vfork ? "vfork" : "fork") << ": ";
+    if (follows_child) {
+      std::cout << "parent " << parent << " unfollowed, followed child " << *info.child_pid
+                << '\n';
+      return;
+    }
+    std::cout << "followed parent " << parent << ", ";
     if (is_vfork) std::cout << "transient ";
     std::cout << "child ";
     if (info.child_pid) {
@@ -502,6 +510,20 @@ int main(int argc, char** argv) {
       } else if (command == "set") {
         std::string topic;
         input >> topic;
+        if (topic == "follow-fork-mode") {
+          std::string mode;
+          input >> mode;
+          if (mode == "parent") {
+            debugger.set_fork_follow_policy(mdbg::ForkFollowPolicy::Parent);
+          } else if (mode == "child") {
+            debugger.set_fork_follow_policy(mdbg::ForkFollowPolicy::Child);
+          } else {
+            std::cout << "usage: set follow-fork-mode <parent|child>\n";
+            continue;
+          }
+          std::cout << "follow-fork-mode = " << mode << '\n';
+          continue;
+        }
         if (topic == "register") {
           std::string name;
           std::string value_text;
@@ -556,7 +578,7 @@ int main(int argc, char** argv) {
           continue;
         }
         if (topic != "substitute-path") {
-          std::cout << "usage: set <memory|register|substitute-path> ...\n";
+          std::cout << "usage: set <follow-fork-mode|memory|register|substitute-path> ...\n";
           continue;
         }
 
@@ -659,8 +681,8 @@ int main(int argc, char** argv) {
         }
       } else {
         std::cout << "commands: continue, step, next, finish, stepi, regs, bt, list, "
-                     "line <addr|symbol>, set register <name> <value>, "
-                     "set memory <addr|symbol> <byte> [byte...], "
+                     "line <addr|symbol>, set follow-fork-mode <parent|child>, "
+                     "set register <name> <value>, set memory <addr|symbol> <byte> [byte...], "
                      "set substitute-path <from> <to>, reg <name>, x <addr|symbol> [len], "
                      "break <addr|symbol|file:line>, delete <id>, thread <tid>, "
                      "info <breakpoints|threads>, symbols [filter], detach, quit\n";

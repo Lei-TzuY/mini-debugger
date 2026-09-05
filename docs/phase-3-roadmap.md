@@ -53,24 +53,42 @@ P1-C interactive process-topology rendering is complete:
 - a real `mdbg` subprocess also drives both vfork release paths in one session and proves the followed parent identity stays stable while each transient child is identified as unfollowed;
 - test-first coverage built cleanly in both compiler lanes and failed only because the topology marker was absent; the production renderer returns the full PIE/non-PIE suite to green under GCC and Clang-large.
 
-Priority 1 is complete for the bounded launched follow-parent policy. Attached-process fork/vfork remains an explicit unproven evidence boundary rather than being implied by these launched workflows. Follow-child and simultaneous multi-process debugging are intentionally outside this completed policy.
+Priority 1 is complete for the bounded launched follow-parent policy. Attached-process fork/vfork remains an explicit unproven evidence boundary rather than being implied by these launched workflows.
 
-## Priority 2: bounded follow-child fork handoff — current frontier
+## Priority 2: bounded follow-child fork handoff — complete
 
-The next architectural gap is not another fork/vfork display variant. The session can now observe a child while deterministically retaining the parent, but it cannot transfer its single followed-process identity to a regular fork child. Priority 2 adds one bounded follow-child handoff without creating a simultaneous multi-process debugger.
+Priority 2 closes the one-process ownership-transfer gap for a regular `fork()` without introducing simultaneous multi-process debugging.
+
+- `ForkFollowPolicy` is explicit and defaults to `Parent`, preserving the completed follow-parent behavior; API callers and the CLI can select `Child`, and the interactive command is `set follow-fork-mode <parent|child>`;
+- after a real `PTRACE_EVENT_FORK`, the debugger consumes the child's initial ptrace stop before either process is released and preserves distinct `parent_pid` / `child_pid` topology metadata;
+- the proven follow-child slice is deliberately bounded to launched, single-thread parents: attached-origin and multi-thread-parent ownership transfer fail explicitly rather than pretending that one-thread detach semantics cover those cases;
+- installed managed software breakpoints remain physically installed in the child copy while the corresponding bytes are restored in the parent's copy-on-write domain before parent detach; saved original-byte and breakpoint-ID ownership therefore stay coherent with the adopted child;
+- if a bounded hardware watchpoint is owned by the forking TID, the debugger reads the currently armed parent DR0/DR6/DR7 state and explicitly installs that state into the stopped child, then restores the parent to its pre-watchpoint debug-register snapshot before detach; logical watchpoint ownership is retargeted to the child only after the parent is released;
+- the detached parent is removed from debugger ownership before `Process::adopt_stopped_process()` atomically rebuilds the session around the child PID and a child-only task registry; the child is never represented as a thread of the old parent;
+- pending signals/thread-start metadata are cleared at the domain handoff, while a pending displaced breakpoint can continue through the existing restored-byte single-step path and reinsert the managed `INT3` into the adopted child rather than the detached parent;
+- a direct PIE/non-PIE integration arms both a process-wide managed breakpoint and a thread-owned hardware watchpoint before fork, proves the parent becomes `TracerPid: 0`, proves the adopted child retains both logical IDs, then observes child breakpoint -> child hardware watchpoint -> child SIGSTOP -> child clean exit while the detached parent also exits cleanly;
+- the initial implementation exposed that x86 debug-register inheritance across fork could not be used as an implicit contract: the first runtime candidate transferred logical watchpoint metadata but missed the child watchpoint. The final implementation therefore performs explicit physical DR transfer, and the same direct workflow passes under GCC and Clang-large;
+- a real `mdbg` subprocess proves the interactive policy end to end: select `follow-fork-mode child`, install a symbol breakpoint, observe `process fork: parent <pid> unfollowed, followed child <pid>`, verify the parent is untraced, hit the retained child breakpoint, surface the child's independent SIGSTOP, and exit without leaked process ownership;
+- the final PIE/non-PIE suite runs through both GCC and Clang-large gates. The default follow-parent fork/vfork workflows remain in the same suite and continue to pass unchanged.
+
+This completes the bounded regular-fork follow-child ownership-transfer milestone. It does **not** claim vfork follow-child, attached-origin follow-child, multi-thread-parent handoff, or simultaneous parent/child debugging.
+
+## Priority 3: simultaneous regular-fork process ownership — current frontier
+
+After Priority 2, a single session can deterministically choose either side of a regular fork, but it still throws away one process domain. The next architectural boundary is therefore an explicit multi-process session model for one real parent/child fork, not another follow-policy rendering variant.
 
 First coherent slice acceptance:
 
-- choose an explicit follow-child policy for a real `fork()` and surface that policy through executable API/CLI behavior; the default completed follow-parent policy must remain deterministic and unchanged;
-- after `PTRACE_EVENT_FORK`, consume the child's initial ptrace stop, restore debugger-owned software-breakpoint bytes and any debugger-owned hardware debug-register state in the parent's copy-on-write execution domain, then detach the parent before allowing it to run independently;
-- adopt the child as the session's sole process identity and task registry without temporarily pretending the child PID is a thread of the old parent;
-- transfer the child copy's inherited managed-breakpoint ownership coherently: physical `INT3` state, saved original bytes, pending displaced-step constraints, and user-breakpoint identity may not diverge merely because process ownership moved;
-- when the forking TID owns the bounded hardware watchpoint, transfer logical ownership only to the adopted child while restoring the detached parent's pre-watchpoint debug-register snapshot;
-- subsequent register/memory operations, signals, breakpoints, detach/destructor cleanup, and terminal exit must route through the adopted child identity; the detached parent must remain externally owned and untraced;
-- PIE and non-PIE integration must execute a real fork where the parent and child take distinguishable paths, prove the parent becomes untraced, prove the adopted child hits a retained managed breakpoint, and finish with no leaked ptrace ownership under both GCC and Clang-large.
+- retain both a regular-fork parent and child as independently identified traced processes after the child's initial ptrace stop, without inserting the child PID into the parent's TID registry or aliasing process selection to thread selection;
+- introduce an explicit process registry and one active process identity while preserving each process's own TID registry, executable identity, signal-delivery state, and lifecycle state;
+- route register/memory operations and resume/step commands through the selected process/TID pair, with deterministic process selection and no implicit cross-process resume;
+- make managed software-breakpoint ownership process-scoped after copy-on-write divergence: removing or displaced-stepping a breakpoint in one process may not silently rewrite the sibling process's byte or metadata;
+- keep hardware debug-register ownership per TID and therefore per process domain; a watchpoint armed before fork must not become one ambiguous session-global snapshot once both domains remain traced;
+- surface parent and child exits independently and only close the debugging session after all retained process domains have reached terminal/detached states;
+- prove the model with one real PIE/non-PIE fork in which parent and child take distinguishable paths, switch active process explicitly, hit process-scoped stops in both domains, and terminate without leaked ptrace ownership under GCC and Clang-large.
 
-Start with ordinary `fork()`. Do not generalize this slice to vfork follow-child: shared-VM handoff before `VFORK_DONE` has different ownership constraints and requires separate evidence. Do not introduce a multi-process registry merely to implement one ownership transfer.
+Do not generalize the first multi-process slice to arbitrary process trees, vfork shared-VM ownership, or attached-origin fork. The purpose of Priority 3 is to replace the single-`pid_` architectural assumption with one executable two-domain fork model before expanding breadth.
 
 ## Selection rule
 
-Priority 2 is the current frontier, with regular-fork follow-child handoff as the next coherent architectural slice. Attached-origin lifecycle evidence, vfork follow-child, expression evaluation, richer register classes, and convenience UI remain lower priority until one-process ownership can actually transfer across a real fork. As in earlier phases, kernel/compiler variants are added only when a reproducible workflow demonstrates a gap.
+Priority 3 is the current frontier, with simultaneous regular-fork parent/child ownership as the next architectural slice. Attached-origin lifecycle evidence, vfork follow-child, arbitrary process trees, expression evaluation, richer register classes, and convenience UI remain lower priority until the session can retain two ordinary fork domains at once. As in earlier phases, kernel/compiler variants are added only when a reproducible workflow demonstrates a gap.

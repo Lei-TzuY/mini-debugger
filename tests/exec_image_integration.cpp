@@ -85,6 +85,25 @@ struct DetachedChildGuard {
   }
 };
 
+pid_t tracer_pid(pid_t pid) {
+  std::ifstream input(std::filesystem::path("/proc") / std::to_string(pid) / "status");
+  std::string line;
+  while (std::getline(input, line)) {
+    if (line.rfind("TracerPid:", 0) == 0) {
+      return static_cast<pid_t>(std::stol(line.substr(std::string("TracerPid:").size())));
+    }
+  }
+  throw std::runtime_error("process status did not expose TracerPid");
+}
+
+void require_process_untraced(pid_t pid) {
+  for (int attempt = 0; attempt < 200; ++attempt) {
+    if (tracer_pid(pid) == 0) return;
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+  throw std::runtime_error("detached fork parent remained ptrace-owned");
+}
+
 void require_child_stopped_untraced(pid_t child) {
   const auto status_path = std::filesystem::path("/proc") / std::to_string(child) / "status";
   for (int attempt = 0; attempt < 200; ++attempt) {
@@ -104,6 +123,15 @@ void require_child_stopped_untraced(pid_t child) {
     std::this_thread::sleep_for(std::chrono::milliseconds(5));
   }
   throw std::runtime_error("fork child did not become independently stopped and untraced");
+}
+
+void require_clean_process_exit(pid_t pid, const std::string& message) {
+  int status = 0;
+  pid_t result;
+  do {
+    result = ::waitpid(pid, &status, 0);
+  } while (result == -1 && errno == EINTR);
+  require(result == pid && WIFEXITED(status) && WEXITSTATUS(status) == 0, message);
 }
 
 void run_follow_parent_fork(const std::string& driver) {
@@ -147,6 +175,79 @@ void run_follow_parent_fork(const std::string& driver) {
   info = debugger.continue_execution();
   require(info.reason == mdbg::StopReason::Exited && info.value == 0,
           "followed parent did not exit cleanly after detached child completion");
+}
+
+void run_follow_child_fork(const std::string& driver) {
+  auto debugger = mdbg::Debugger::launch(driver, {"--fork-topology"});
+  require(debugger.stop_info().reason == mdbg::StopReason::InitialExec,
+          "follow-child fork driver did not expose the initial exec stop");
+  const auto parent = debugger.pid();
+
+  const mdbg::ElfFile image(driver);
+  const auto probe = image.find_symbol("fork_shared_probe");
+  const auto value = image.find_symbol("fork_shared_value");
+  require(probe.has_value() && value.has_value(),
+          "follow-child fork probe/value symbols are unavailable");
+  const auto probe_address =
+      static_cast<std::uintptr_t>(image.runtime_address(parent, *probe));
+  const auto value_address =
+      static_cast<std::uintptr_t>(image.runtime_address(parent, *value));
+
+  const auto breakpoint_id = debugger.add_breakpoint(probe_address);
+  const auto watchpoint_id =
+      debugger.add_write_watchpoint(value_address, sizeof(std::uint64_t));
+  debugger.set_fork_follow_policy(mdbg::ForkFollowPolicy::Child);
+
+  auto info = debugger.continue_execution();
+  require(info.process_event == mdbg::ProcessEventKind::Fork,
+          "follow-child fork was not surfaced as a topology event");
+  require(info.parent_pid.has_value() && *info.parent_pid == parent,
+          "follow-child fork did not retain the detached parent identity");
+  require(info.child_pid.has_value() && *info.child_pid > 0 && *info.child_pid != parent,
+          "follow-child fork did not expose a distinct child identity");
+  const auto child = *info.child_pid;
+  DetachedChildGuard parent_guard{parent};
+
+  require(debugger.pid() == child && debugger.active_tid() == child && info.tid == child,
+          "debugger ownership did not transfer to the fork child");
+  const auto threads = debugger.threads();
+  require(threads.size() == 1 && threads.front().tid == child && threads.front().active,
+          "follow-child handoff did not rebuild a child-only task registry");
+  require_process_untraced(parent);
+  require(debugger.breakpoints().size() == 1 &&
+              debugger.breakpoints().front().id == breakpoint_id,
+          "managed breakpoint identity was not retained across follow-child handoff");
+  require(debugger.watchpoints().size() == 1 &&
+              debugger.watchpoints().front().id == watchpoint_id,
+          "hardware watchpoint identity was not retained across follow-child handoff");
+
+  info = debugger.continue_execution();
+  require(info.reason == mdbg::StopReason::Breakpoint && info.tid == child &&
+              info.breakpoint_address == probe_address,
+          "adopted child did not hit the inherited managed breakpoint");
+
+  info = debugger.continue_execution();
+  require(info.reason == mdbg::StopReason::Watchpoint && info.tid == child &&
+              info.watchpoint_id == watchpoint_id &&
+              info.watchpoint_address == value_address,
+          "adopted child did not hit the transferred hardware watchpoint");
+
+  require(debugger.remove_breakpoint(breakpoint_id),
+          "adopted child breakpoint could not be removed");
+  require(debugger.remove_watchpoint(watchpoint_id),
+          "adopted child watchpoint could not be removed");
+
+  info = debugger.continue_execution();
+  require(info.reason == mdbg::StopReason::Signal && info.value == SIGSTOP &&
+              info.tid == child,
+          "adopted child did not surface its independent SIGSTOP");
+  info = debugger.continue_execution(mdbg::SignalPolicy::Suppress);
+  require(info.reason == mdbg::StopReason::Exited && info.value == 0 && info.tid == child,
+          "adopted child did not exit cleanly");
+
+  require_clean_process_exit(parent,
+                             "detached parent did not exit cleanly after child completion");
+  parent_guard.pid = -1;
 }
 
 void run_follow_parent_vfork(const std::string& driver, const std::string& target) {
@@ -484,6 +585,7 @@ int main(int argc, char** argv) {
   try {
     run_exec_replacement(argv[1], argv[2]);
     run_follow_parent_fork(argv[1]);
+    run_follow_child_fork(argv[1]);
     run_follow_parent_vfork(argv[1], argv[2]);
     run_cli_exec_replacement(argv[1], argv[2]);
     run_cli_follow_parent_fork(argv[1]);

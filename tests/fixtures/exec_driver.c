@@ -11,10 +11,12 @@
 
 extern char** environ;
 
+volatile uint64_t fork_shared_value = UINT64_C(0x2718281828459045);
 volatile uint64_t vfork_parent_value = UINT64_C(0x3141592653589793);
 
 __attribute__((noinline)) void fork_shared_probe(void) {
   __asm__ volatile("nop" ::: "memory");
+  fork_shared_value += 1;
 }
 
 __attribute__((noinline)) void vfork_parent_probe(void) {

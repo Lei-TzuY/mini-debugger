@@ -51,29 +51,22 @@ Completed capability:
 
 This closes the major source-level interoperability gap without claiming support for arbitrary DWARF5 forms or DWARF64.
 
-## Priority 4: multi-thread debugging — current frontier
+## Priority 4: multi-thread debugging — complete
 
-Move from one traced thread to a deliberate thread model.
+The debugger now has an explicit bounded single-runner thread model instead of treating the thread-group leader as the process.
 
 Completed slices:
 
 - P4-A: launched tracees enable `PTRACE_O_TRACECLONE`; `Process` waits across traced tasks with `__WALL`, records the TID on every wait event, reads the kernel-reported child TID from `PTRACE_GETEVENTMSG`, tracks per-TID stopped/running state, and removes exited tasks from the registry. A real pthread fixture exercises clone discovery, the worker's initial ptrace stop, worker exit, leader exit, and empty-registry convergence in both PIE and non-PIE integration runs.
-- P4-B: debugger execution is bound to the active stopped TID. Clone creator stops are held while the new worker's initial ptrace stop becomes the user-visible `ThreadCreated` event; `registers`, continue, single-step, breakpoint RIP repair, and displaced execution target that active TID. Process-wide software-breakpoint ownership remains singular while the restore/step/reinsert window executes with all other traced tasks stopped. Non-final task exit/signal events are distinguished from whole-process termination, and PIE/non-PIE integration proves repeated worker-thread breakpoint hits plus same-TID displaced stepping.
-- P4-C: signal and teardown ownership now follow the same per-TID model. Forwarded signal delivery is allowed only for the TID that produced the active signal-delivery stop; attached processes enumerate and attach every pre-existing `/proc/<pid>/task` entry, apply clone tracing per TID, and detach every owned stopped task while injecting a forwarded signal only into its originating active TID. Attached debugger destruction releases all traced tasks, launched teardown drains the traced thread group after termination, and focused PIE/non-PIE integration covers worker signal suppress/forward, explicit multi-thread detach, destructor detach, and launched leader/worker cleanup.
+- P4-B: debugger execution is bound to the active stopped TID. Clone creator stops are held while the new worker's initial ptrace stop becomes the user-visible `ThreadCreated` event; register access, continue, single-step, breakpoint RIP repair, and displaced execution target that active TID. Process-wide software-breakpoint ownership remains singular while the restore/step/reinsert window executes with all other traced tasks stopped.
+- P4-C: signal and teardown ownership follow the same per-TID model. Attached processes enumerate and attach every pre-existing `/proc/<pid>/task` entry, apply clone tracing per TID, detach every owned stopped task, and drain launched multi-thread teardown. Forwarded signals are injected only into the TID that owns the active signal-delivery decision.
+- P4-D: traced TIDs are exposed through the debugger API and a specific stopped TID can become active only while every traced task is stopped. Register access and execution follow the selected TID; pending signal-delivery intent is retained per TID across selection changes; switching away during a process-wide software-breakpoint displaced-step window is rejected. A real attached fixture blocks the leader in `pthread_join`, selects and releases the stopped worker through a targeted signal, hits and steps its managed breakpoint, observes worker exit, then resumes the leader to clean process exit.
 
-Current slice: P4-D — make thread selection and scheduling explicit for pre-existing attached threads. The single-runner policy must allow a stopped worker to become active when the leader cannot make progress without it, instead of permanently privileging the leader selected at attach time.
+The completed PIE/non-PIE coverage also rejects unknown and exited TID selection deterministically and proves explicit detach plus debugger-destructor detach still release every traced task after active-thread changes.
 
-Acceptance criteria:
+This seals the current multi-thread milestone. The stop policy remains intentionally single-runner: one selected task executes while the other traced tasks remain stopped. Hardware watchpoints remain explicitly single-thread-only because x86 debug-register ownership is per TID; broadening them requires a separate concrete debug-register allocation scenario rather than being hidden inside the thread milestone. CLI thread-list/selection presentation belongs with Priority 6 productization now that the underlying scheduling contract is stable.
 
-- the debugger exposes the currently traced TIDs and can select a specific stopped TID as active without changing process-wide breakpoint ownership;
-- register access, continue, single-step, signal routing, and displaced execution continue to follow the selected active TID;
-- a real pre-existing leader/worker fixture where the leader waits on the worker can be attached, the worker selected and advanced, and the leader subsequently allowed to finish;
-- invalid, exited, or non-stopped TID selection is rejected deterministically;
-- detach/teardown still leaves no traced thread behind after thread selection changes.
-
-P4-A established lifecycle identity, P4-B bound execution to that identity, and P4-C closed signal and ownership cleanup. P4 remains open until attached pre-existing threads can be deliberately selected and scheduled under the same single-runner policy. Hardware watchpoints remain explicitly single-thread-only until per-TID debug-register ownership is designed.
-
-## Priority 5: broader CFI recovery
+## Priority 5: broader CFI recovery — current frontier
 
 Broaden `.eh_frame` support only when driven by real compiler output that currently fails.
 
@@ -84,6 +77,8 @@ Acceptance criteria:
 - arbitrary register values are never invented;
 - cross-module unwind behavior remains bounded and deterministic.
 
+The next slice should start from an actual compiler-produced `.eh_frame` sequence that the current bounded interpreter rejects, then add only the minimum recovery rule needed to unwind that fixture. Do not turn this milestone into speculative opcode enumeration.
+
 ## Priority 6: source display and CLI productization
 
 Improve presentation after the underlying execution semantics are stable.
@@ -92,6 +87,7 @@ Possible scope:
 
 - source-context display around the current line;
 - clearer module-qualified symbol/source rendering;
+- explicit thread listing/selection commands over the completed P4 scheduling API;
 - CLI help/usage consistency;
 - release packaging and examples.
 

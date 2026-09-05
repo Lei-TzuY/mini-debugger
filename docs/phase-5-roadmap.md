@@ -107,11 +107,25 @@ Completed Priority 6 contract:
 
 Priority 6 does not implement generic DWARF DIE inheritance, arbitrary inline call-stack reconstruction, abstract-origin location inheritance, or new location-expression families. It extends the existing lexical ownership model only far enough to recover compiler-produced inlined locals whose concrete storage is already evaluable.
 
+## Priority 7: compiler const-qualified local type ownership — complete
+
+The eighth Phase 5 slice promotes a previously deferred qualified-type surface only after it becomes an independently selected current-PC failure. The existing `indirect_local = *ptr` workflow is changed only to `const uint64_t indirect_local = *ptr`; GCC 13.3 and Clang 18.1.3 both emit a `DW_TAG_const_type` wrapper with a `DW_FORM_ref4` `DW_AT_type` link to the existing integer type while preserving the already-supported active location paths.
+
+Completed Priority 7 contract:
+
+- test-first GCC and Clang-large PIE/non-PIE sessions build successfully and fail only in the two DWARF5 local-value tests with `local variable type is not a supported typedef/base-type/pointer/structure chain`; all other 46/48 tests remain green;
+- direct compiler inspection confirms the selected source local uses `DW_TAG_const_type` in both permanent compiler lanes rather than inferring support from an inactive DIE;
+- integer/value type resolution treats only `DW_TAG_const_type` as a bounded transparent wrapper alongside typedef, requiring the same supported `DW_AT_type` + `DW_FORM_ref4` ownership link and preserving the existing 16-link depth bound;
+- location selection, register/memory evaluation, lexical/inlined ownership, signedness/width decoding, and module/TID semantics are unchanged; the existing API/CLI workflow still proves `indirect_local == 0x8877665544332211`;
+- malformed or missing qualifier type links and every other unsupported qualifier tag remain fail-closed.
+
+Priority 7 does not generalize qualified types. GCC output also contains unrelated `DW_TAG_volatile_type` metadata, but no selected current-PC source-value failure requires it, so volatile/restrict/atomic chains remain unsupported pending independent executable evidence.
+
 ## Current frontier: next compiler-produced expression or ownership failure
 
 Do not select the next opcode family from the DWARF specification by enumeration. First find a real GCC or Clang current-PC location expression or ownership shape that the existing evaluator rejects in an otherwise valid source-value workflow, preserve the exact compiler evidence, and then add only the minimum semantics and ownership state required by that failure.
 
-Potential surfaces such as dereference chains, richer stack-value combinations, additional piece layouts, additional entry-value registers, qualified-type chains, or deeper inline/call-site ownership remain candidates only when real compiler output makes one independently necessary. A candidate that only appears in an inactive location-list range is not sufficient evidence.
+Potential surfaces such as dereference chains, richer stack-value combinations, additional piece layouts, additional entry-value registers, additional qualified-type chains, or deeper inline/call-site ownership remain candidates only when real compiler output makes one independently necessary. A candidate that only appears in an inactive location-list range is not sufficient evidence.
 
 ## Selection rule
 

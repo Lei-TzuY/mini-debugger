@@ -34,6 +34,7 @@ constexpr std::uint64_t kDwTagStructureType = 0x13;
 constexpr std::uint64_t kDwTagTypedef = 0x16;
 constexpr std::uint64_t kDwTagInlinedSubroutine = 0x1d;
 constexpr std::uint64_t kDwTagBaseType = 0x24;
+constexpr std::uint64_t kDwTagConstType = 0x26;
 constexpr std::uint64_t kDwTagSubprogram = 0x2e;
 constexpr std::uint64_t kDwTagVariable = 0x34;
 
@@ -803,16 +804,17 @@ IntegerType resolve_integer_type(const std::vector<Die>& dies, std::uint64_t typ
     const auto index = die_index_by_offset(dies, type_offset);
     if (!index) throw std::runtime_error("local variable type references an unknown DIE");
     const auto& die = dies[*index];
-    if (die.tag == kDwTagTypedef) {
+    if (die.tag == kDwTagTypedef || die.tag == kDwTagConstType) {
       const auto* type = attribute(die, kDwAtType);
       if (type == nullptr || type->form != kDwFormRef4) {
-        throw std::runtime_error("typedef does not use the supported DW_FORM_ref4 type link");
+        throw std::runtime_error(
+            "local type wrapper does not use the supported DW_FORM_ref4 type link");
       }
       type_offset = type->number;
       continue;
     }
     if (die.tag != kDwTagBaseType) {
-      throw std::runtime_error("local variable type is not a supported typedef/base-type chain");
+      throw std::runtime_error("local variable type is not a supported typedef/const/base-type chain");
     }
     const auto* size = attribute(die, kDwAtByteSize);
     const auto* encoding = attribute(die, kDwAtEncoding);
@@ -825,7 +827,7 @@ IntegerType resolve_integer_type(const std::vector<Die>& dies, std::uint64_t typ
     return IntegerType{static_cast<std::size_t>(size->number),
                        encoding->number == kDwAteSigned};
   }
-  throw std::runtime_error("local variable typedef chain is too deep");
+  throw std::runtime_error("local variable typedef/const chain is too deep");
 }
 
 bool is_constant_member_offset_form(std::uint64_t form) {
@@ -838,10 +840,11 @@ ValueType resolve_value_type(const std::vector<Die>& dies, std::uint64_t type_of
     const auto index = die_index_by_offset(dies, type_offset);
     if (!index) throw std::runtime_error("local variable type references an unknown DIE");
     const auto& die = dies[*index];
-    if (die.tag == kDwTagTypedef) {
+    if (die.tag == kDwTagTypedef || die.tag == kDwTagConstType) {
       const auto* type = attribute(die, kDwAtType);
       if (type == nullptr || type->form != kDwFormRef4) {
-        throw std::runtime_error("typedef does not use the supported DW_FORM_ref4 type link");
+        throw std::runtime_error(
+            "local type wrapper does not use the supported DW_FORM_ref4 type link");
       }
       type_offset = type->number;
       continue;
@@ -908,7 +911,7 @@ ValueType resolve_value_type(const std::vector<Die>& dies, std::uint64_t type_of
       return ValueType{struct_size, false, LocalValueKind::Structure, std::move(members)};
     }
     throw std::runtime_error(
-        "local variable type is not a supported typedef/base-type/pointer/structure chain");
+        "local variable type is not a supported typedef/const/base-type/pointer/structure chain");
   }
   throw std::runtime_error("local variable type chain is too deep");
 }

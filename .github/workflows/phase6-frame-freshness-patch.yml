@@ -1,0 +1,53 @@
+name: phase6-frame-freshness-patch
+
+on:
+  push:
+    branches:
+      - feat/caller-frame-source-values
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/caller-frame-source-values
+          fetch-depth: 0
+      - name: Apply exact frame freshness fix
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('src/dwarf/source_lookup.cpp')
+          text = path.read_text()
+          old = '''  if (frame.process_pid != debugger.pid() || frame.tid != debugger.active_tid()) {
+            throw std::logic_error("inspection frame belongs to a different process/TID domain");
+          }
+          const auto live = debugger.registers();
+          '''
+          new = '''  if (frame.process_pid != debugger.pid() || frame.tid != debugger.active_tid()) {
+            throw std::logic_error("inspection frame belongs to a different process/TID domain");
+          }
+          if (frame.origin_stop_sequence != debugger.stop_info().sequence) {
+            throw std::logic_error("inspection frame is stale after debugger stop changed");
+          }
+          const auto live = debugger.registers();
+          '''
+          if text.count(old) != 1:
+              raise SystemExit('expected validation snippet exactly once')
+          path.write_text(text.replace(old, new, 1))
+          PY
+      - name: Commit exact fix and remove construction workflow
+        shell: bash
+        run: |
+          git config user.name 'LeiZ'
+          git config user.email '52287354+Lei-TzuY@users.noreply.github.com'
+          git rm .github/workflows/phase6-frame-freshness-patch.yml
+          git add src/dwarf/source_lookup.cpp
+          git commit -m 'fix: invalidate inspection frames across stops'
+          git push origin HEAD:feat/caller-frame-source-values

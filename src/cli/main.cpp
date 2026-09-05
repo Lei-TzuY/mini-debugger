@@ -460,8 +460,29 @@ int main(int argc, char** argv) {
       } else if (command == "set") {
         std::string topic;
         input >> topic;
+        if (topic == "register") {
+          std::string name;
+          std::string value_text;
+          input >> name >> value_text;
+          if (name.empty() || value_text.empty()) {
+            std::cout << "usage: set register <name> <value>\n";
+            continue;
+          }
+          try {
+            std::size_t consumed = 0;
+            const auto value = std::stoull(value_text, &consumed, 0);
+            if (consumed != value_text.size()) {
+              throw std::invalid_argument("invalid register value: " + value_text);
+            }
+            debugger.set_register(name, value);
+            std::cout << name << " = 0x" << std::hex << value << std::dec << '\n';
+          } catch (const std::exception& error) {
+            std::cout << "register assignment failed: " << error.what() << '\n';
+          }
+          continue;
+        }
         if (topic != "substitute-path") {
-          std::cout << "usage: set substitute-path <recorded-prefix> <local-prefix>\n";
+          std::cout << "usage: set <register|substitute-path> ...\n";
           continue;
         }
 
@@ -564,8 +585,8 @@ int main(int argc, char** argv) {
         }
       } else {
         std::cout << "commands: continue, step, next, finish, stepi, regs, bt, list, "
-                     "line <addr|symbol>, set substitute-path <from> <to>, "
-                     "reg <name>, x <addr|symbol> [len], "
+                     "line <addr|symbol>, set register <name> <value>, "
+                     "set substitute-path <from> <to>, reg <name>, x <addr|symbol> [len], "
                      "break <addr|symbol|file:line>, delete <id>, thread <tid>, "
                      "info <breakpoints|threads>, symbols [filter], detach, quit\n";
       }
@@ -575,4 +596,3 @@ int main(int argc, char** argv) {
     return 1;
   }
   return 0;
-}

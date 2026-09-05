@@ -57,22 +57,38 @@ The fourth source-value slice fixes name ownership for real nested lexical scope
 
 Priority 3 therefore closes the bounded compiler-produced lexical-shadowing gap. Sibling-block variants, deeper nesting, inlined-subroutine ownership, range lists, and additional expression opcodes are not follow-up micro-PR targets without independent executable evidence.
 
-## Priority 4: bounded pointer scalar inspection — current frontier
+## Priority 4: bounded pointer scalar inspection — complete
 
-The next architectural gap is the value type model rather than name lookup. `inspect_local_integer` and `LocalIntegerValue` currently require a typedef/base-integer chain, so a normal source pointer can have a perfectly supported location while still failing when its `DW_AT_type` resolves to `DW_TAG_pointer_type`.
+The fifth source-value slice extends the existing typed-value path across one concrete compiler-produced pointer type without broadening the location VM:
 
-Current Priority 4 acceptance:
+- a dedicated `-O0 -g -gdwarf-4` fixture keeps a stack-resident `uint64_t *local_pointer` live at the exported `local_pointer_probe`, pointing at the real runtime object `pointer_target`;
+- test-first CI was exact: GCC 13.3 and Clang 18.1 both configured and built successfully, 42/44 existing tests stayed green, and only `pointer_value_integration_{pie,nopie}` failed with `local variable type is not a supported typedef/base-type chain`, proving the breakpoint, module routing, lexical ownership, and existing location evaluator had already succeeded and the rejected boundary was `DW_TAG_pointer_type`;
+- the value result grows an explicit `LocalValueKind` and a generic `inspect_local_value` entry point, while `inspect_local_integer` remains as an integer-only compatibility wrapper rather than silently accepting pointer values as integers;
+- pointer type resolution follows the same bounded typedef chain, accepts only the compiler-proven `DW_TAG_pointer_type`, requires the x86-64 eight-byte pointer width, and requires a `DW_FORM_ref4` pointee that itself resolves through the already supported integer typedef/base-type chain; malformed links, other widths, aggregates, references, arrays, pointer-to-pointer expansion, and unsupported pointees still fail explicitly;
+- no new location expression or location-list rule is added: the pointer uses the existing selected-process/TID `DW_OP_fbreg` path and final memory read, so source-value ownership remains shared with the integer implementation;
+- direct API integration compares the recovered raw pointer value with the independently resolved runtime ELF address of `pointer_target`, preserves owning-module identity and pointer width/kind metadata, and continues to clean exit;
+- real `mdbg` subprocess integration renders `local_pointer = 0x...` deterministically in hexadecimal; pointer dereference is deliberately not bundled into this scalar milestone;
+- PIE and non-PIE pass under both permanent GCC and Clang-large gates while all earlier integer, formal-parameter, optimized-location, and lexical-shadowing coverage remains green.
 
-- add one deterministic compiler-produced local pointer whose pointee and pointer value remain live at an exported probe, and first prove the current evaluator fails specifically at the pointer type boundary under GCC and Clang-large;
-- extend the existing source-value result/type path rather than adding a parallel raw-memory command: preserve owning module, variable name, selected process/TID, and the already proven location evaluator;
-- support only the concrete pointer DIE/type links and pointer-width metadata emitted by that fixture, with explicit rejection for unsupported address sizes, malformed type references, aggregates, references, arrays, or compound value pieces;
-- render the pointer scalar deterministically in the CLI and prove the recovered address equals the live runtime object address; dereferencing should be added only if the chosen executable acceptance requires it rather than bundled speculatively;
-- preserve lexical shadowing, optimized location-list ownership, formal-parameter behavior, PIE/non-PIE execution, GCC/Clang-large compatibility, and clean exit.
+Priority 4 therefore closes the bounded scalar type-model gap without turning `print` into an aggregate renderer or a general DWARF expression engine.
+
+## Priority 5: bounded struct aggregate presentation — current frontier
+
+The next architectural gap is aggregate type/value shaping rather than another scalar variant. The current source-value resolver explicitly rejects `DW_TAG_structure_type`, even though a normal O0 local struct can be owned by the already supported lexical and `DW_OP_fbreg` location path.
+
+Current Priority 5 acceptance:
+
+- add one deterministic compiler-produced local struct with at least two independently verifiable integer members that remain live at an exported probe, and first prove the current evaluator reaches the struct type boundary while all pre-existing source-value and debugger tests remain green under GCC and Clang-large;
+- extend the existing typed source-value model rather than introducing an aggregate-specific ptrace path: preserve owning module, local name, lexical ownership, selected process/TID, and the same location evaluator used by Priorities 0–4;
+- support only the concrete `DW_TAG_structure_type` / direct-child `DW_TAG_member` shape emitted by that fixture, including bounded structure byte size, member names, `DW_FORM_ref4` integer member types, constant `DW_AT_data_member_location` offsets, and strict member-in-structure bounds validation;
+- read the aggregate storage through the existing debugger memory API and decode the proven direct members from that owned byte range; do not separately peek each field through raw ptrace or duplicate the location engine;
+- expose deterministic CLI presentation for the named members and prove the decoded values match the live runtime struct; padding may be skipped by offsets, but unions, arrays, bitfields, anonymous members, inheritance, nested aggregates, value pieces, and arbitrary expression-based member locations remain outside this slice;
+- preserve pointer/integer scalar behavior, lexical shadowing, optimized location-list ownership, formal parameters, PIE/non-PIE execution, GCC/Clang-large compatibility, module identity, and clean exit.
 
 ## Later priorities
 
-After Priority 4, aggregate/type presentation, richer expression evaluation, inlined-scope ownership, and DWARF5 location-list ownership remain candidates. They must continue to be ordered by concrete compiler-produced failures rather than surface-area breadth.
+After Priority 5, richer expression evaluation, inlined-scope ownership, DWARF5 location-list ownership, and broader aggregate/type presentation remain candidates. They must continue to be ordered by concrete compiler-produced failures rather than surface-area breadth.
 
 ## Selection rule
 
-Priority 4 is the current frontier. Select the smallest real pointer-local workflow whose location is already representable by the existing evaluator but whose compiler-produced type DIE is rejected by the integer-only type model. Prove that exact failure first under the permanent GCC and Clang-large gates, then add only the pointer type/value semantics needed by that workflow. Do not use pointer support as a reason to build aggregate rendering, arbitrary dereference expressions, or a general DWARF VM.
+Priority 5 is the current frontier. Select the smallest real local-struct workflow whose variable location is already representable by the existing evaluator but whose compiler-produced `DW_TAG_structure_type` is rejected by the scalar type model. Prove that exact failure first under the permanent GCC and Clang-large gates, then add only the structure/member metadata and owned-byte decoding needed by that workflow. Do not use aggregate support as a reason to add unions, arrays, bitfields, nested aggregate recursion, arbitrary dereference, or a general DWARF VM.

@@ -28,6 +28,7 @@ namespace {
 
 constexpr std::uint64_t kDwTagFormalParameter = 0x05;
 constexpr std::uint64_t kDwTagLexicalBlock = 0x0b;
+constexpr std::uint64_t kDwTagPointerType = 0x0f;
 constexpr std::uint64_t kDwTagTypedef = 0x16;
 constexpr std::uint64_t kDwTagBaseType = 0x24;
 constexpr std::uint64_t kDwTagSubprogram = 0x2e;
@@ -98,6 +99,12 @@ struct Die {
 struct IntegerType {
   std::size_t byte_size;
   bool is_signed;
+};
+
+struct ScalarType {
+  std::size_t byte_size;
+  bool is_signed;
+  LocalValueKind kind;
 };
 
 std::string normalized_source_path(const std::filesystem::path& path) {
@@ -491,6 +498,43 @@ IntegerType resolve_integer_type(const std::vector<Die>& dies, std::uint64_t typ
   throw std::runtime_error("local variable typedef chain is too deep");
 }
 
+ScalarType resolve_scalar_type(const std::vector<Die>& dies, std::uint64_t type_offset) {
+  for (unsigned depth = 0; depth < 16; ++depth) {
+    const auto index = die_index_by_offset(dies, type_offset);
+    if (!index) throw std::runtime_error("local variable type references an unknown DIE");
+    const auto& die = dies[*index];
+    if (die.tag == kDwTagTypedef) {
+      const auto* type = attribute(die, kDwAtType);
+      if (type == nullptr || type->form != kDwFormRef4) {
+        throw std::runtime_error("typedef does not use the supported DW_FORM_ref4 type link");
+      }
+      type_offset = type->number;
+      continue;
+    }
+    if (die.tag == kDwTagPointerType) {
+      const auto* size = attribute(die, kDwAtByteSize);
+      const auto pointer_size = size == nullptr ? std::size_t{8}
+                                                : static_cast<std::size_t>(size->number);
+      if (pointer_size != 8) {
+        throw std::runtime_error("local pointer type has an unsupported byte size");
+      }
+      const auto* pointee = attribute(die, kDwAtType);
+      if (pointee == nullptr || pointee->form != kDwFormRef4) {
+        throw std::runtime_error("local pointer type has no supported DW_FORM_ref4 pointee");
+      }
+      (void)resolve_integer_type(dies, pointee->number);
+      return ScalarType{pointer_size, false, LocalValueKind::Pointer};
+    }
+    if (die.tag == kDwTagBaseType) {
+      const auto integer = resolve_integer_type(dies, type_offset);
+      return ScalarType{integer.byte_size, integer.is_signed, LocalValueKind::Integer};
+    }
+    throw std::runtime_error(
+        "local variable type is not a supported typedef/base-type/pointer chain");
+  }
+  throw std::runtime_error("local variable type chain is too deep");
+}
+
 std::int64_t fbreg_offset(const std::vector<std::byte>& expression) {
   if (expression.empty() || std::to_integer<std::uint8_t>(expression.front()) != kDwOpFbreg) {
     throw std::runtime_error("local variable location is not the supported DW_OP_fbreg form");
@@ -589,13 +633,13 @@ std::uint64_t truncate_integer(std::uint64_t value, std::size_t byte_size) {
   return value & ((std::uint64_t{1} << bits) - 1U);
 }
 
-std::optional<LocalIntegerValue> inspect_unit(const DebugSections& sections,
-                                              const Debugger& debugger,
-                                              const ElfFile& module,
-                                              std::uint64_t virtual_pc,
-                                              std::string_view name,
-                                              std::size_t unit_start,
-                                              std::size_t& next_unit) {
+std::optional<LocalScalarValue> inspect_unit(const DebugSections& sections,
+                                             const Debugger& debugger,
+                                             const ElfFile& module,
+                                             std::uint64_t virtual_pc,
+                                             std::string_view name,
+                                             std::size_t unit_start,
+                                             std::size_t& next_unit) {
   const auto dies = parse_unit_dies(sections, unit_start, next_unit);
   std::uint64_t compilation_unit_base = 0;
   for (const auto& die : dies) {
@@ -666,7 +710,7 @@ std::optional<LocalIntegerValue> inspect_unit(const DebugSections& sections,
     throw std::runtime_error("local value has no supported DW_FORM_ref4 type");
   }
 
-  const auto integer_type = resolve_integer_type(dies, type->number);
+  const auto scalar_type = resolve_scalar_type(dies, type->number);
   std::vector<std::byte> location_expression;
   if (location->form == kDwFormExprloc) {
     location_expression = location->expression;
@@ -681,14 +725,16 @@ std::optional<LocalIntegerValue> inspect_unit(const DebugSections& sections,
     const auto op = std::to_integer<std::uint8_t>(location_expression.front());
     const auto regs = debugger.registers();
     if (op == kDwOpReg0) {
-      const auto raw = truncate_integer(regs.rax, integer_type.byte_size);
-      return LocalIntegerValue{module.path(), std::string(name), raw,
-                               integer_type.byte_size, integer_type.is_signed};
+      const auto raw = truncate_integer(regs.rax, scalar_type.byte_size);
+      return LocalScalarValue{module.path(), std::string(name), raw,
+                              scalar_type.byte_size, scalar_type.is_signed,
+                              scalar_type.kind};
     }
     if (op == kDwOpReg5) {
-      const auto raw = truncate_integer(regs.rdi, integer_type.byte_size);
-      return LocalIntegerValue{module.path(), std::string(name), raw,
-                               integer_type.byte_size, integer_type.is_signed};
+      const auto raw = truncate_integer(regs.rdi, scalar_type.byte_size);
+      return LocalScalarValue{module.path(), std::string(name), raw,
+                              scalar_type.byte_size, scalar_type.is_signed,
+                              scalar_type.kind};
     }
   }
 
@@ -704,16 +750,17 @@ std::optional<LocalIntegerValue> inspect_unit(const DebugSections& sections,
   const auto base = frame_base(debugger, module, base_expression->expression);
   const auto address = add_signed(base, fbreg_offset(location_expression),
                                   "local variable address");
-  return LocalIntegerValue{module.path(), std::string(name),
-                           read_integer(debugger, address, integer_type.byte_size),
-                           integer_type.byte_size, integer_type.is_signed};
+  return LocalScalarValue{module.path(), std::string(name),
+                          read_integer(debugger, address, scalar_type.byte_size),
+                          scalar_type.byte_size, scalar_type.is_signed,
+                          scalar_type.kind};
 }
 
 }  // namespace
 
-LocalIntegerValue inspect_local_integer(const Debugger& debugger,
-                                        const ElfFile& preferred_elf,
-                                        std::string_view name) {
+LocalScalarValue inspect_local_value(const Debugger& debugger,
+                                     const ElfFile& preferred_elf,
+                                     std::string_view name) {
   if (name.empty()) throw std::invalid_argument("local variable name must not be empty");
   if (debugger.state() != ProcessState::Stopped) {
     throw std::logic_error("local-value inspection requires a stopped tracee");
@@ -739,6 +786,16 @@ LocalIntegerValue inspect_local_integer(const Debugger& debugger,
     unit = next;
   }
   throw std::runtime_error("current PC is not covered by a supported DWARF4 subprogram");
+}
+
+LocalIntegerValue inspect_local_integer(const Debugger& debugger,
+                                        const ElfFile& preferred_elf,
+                                        std::string_view name) {
+  auto value = inspect_local_value(debugger, preferred_elf, name);
+  if (value.kind != LocalValueKind::Integer) {
+    throw std::runtime_error("local value is not an integer scalar: " + std::string(name));
+  }
+  return value;
 }
 
 std::optional<std::uint64_t> DwarfLineTable::find_virtual_source(

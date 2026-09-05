@@ -90,22 +90,38 @@ Priority 3 replaces the one-active-PID assumption with one executable two-domain
 
 The bounded model intentionally remains one launched, single-thread regular-fork parent plus one child. Attached-origin simultaneous fork ownership, multi-thread-parent retention, nested process trees, simultaneous vfork ownership, and pre-fork managed software-breakpoint duplication are not claimed.
 
-## Priority 4: per-process exec image divergence — current frontier
+## Priority 4: per-process exec image divergence — complete for the bounded two-domain milestone
 
-The next architectural boundary is no longer retaining two ordinary fork domains; it is allowing those retained domains to stop sharing one executable-image assumption after one side calls `exec`.
+Priority 4 proves that process ownership and executable-image ownership are independently scoped inside the retained parent/child session.
+
+- a real `--fork-exec-divergence` fixture retains both regular-fork domains, then lets the selected child replace its image with `execve()` while the parent remains ptrace-owned and stopped in the old executable;
+- the existing process-domain backend handles `PTRACE_EVENT_EXEC` only in the active domain: it collapses that process's task registry, calls the old-image cleanup only for that domain, refreshes only that domain's `/proc/<pid>/exe` identity, and leaves the retained sibling domain untouched;
+- process selection after divergence swaps the executable identity together with the process/TID, pending-signal, managed-breakpoint, displaced-step, watchpoint, and debug-register ownership state, so selecting the parent restores the old image context and selecting the child restores the replacement image context;
+- `UserBreakpointRegistry` is now process-domain scoped by the active `debugger.pid()`: managed and deferred user entries/controllers are stored independently per process, while user-facing breakpoint IDs remain session-global and monotonic;
+- image replacement clears only the active process's user/deferred registry domain rather than the whole session, so child exec cannot invalidate sibling parent user-breakpoint bookkeeping;
+- the real CLI workflow arms an old-image symbol breakpoint in each retained domain, execs only the child, switches back to the parent and proves its old-image user breakpoint still exists, switches to the replacement-image child and creates the next monotonic breakpoint on `exec_target_probe`, then hits that new-image breakpoint independently;
+- after the replacement child exits, the old-image parent is promoted, its pre-existing managed/symbol breakpoint still hits, and the final parent exit closes the session without leaked process ownership;
+- the debugger's already-proven process-domain watchpoint/breakpoint/pending-state swap and active-domain `discard_image_state()` share the same ownership boundary: exec clears the executing domain's old-image debug state without turning sibling process state into session-global cleanup;
+- test-first coverage built and configured cleanly under both compilers and left 38/40 tests green, failing only with `child exec invalidated the sibling parent user breakpoint registry`; process-scoping the registry returns all 40 tests to green under GCC and Clang-large.
+
+This completes the bounded two-domain image-divergence milestone. It does **not** claim nested process trees, attached-origin multi-process exec, simultaneous vfork ownership, or arbitrary process-domain counts.
+
+## Priority 5: bounded nested regular-fork process-domain registry — current frontier
+
+The next architectural boundary is the debugger's remaining `active + optional retained` two-slot process model. Once two processes may own different executable images safely, the next valuable step is to replace that fixed second slot with a real process-domain collection proven by one nested regular fork, not to add another rendering variant.
 
 First coherent slice acceptance:
 
-- start from the proven two-domain regular-fork session, select one retained domain, and let that process replace its image with a real `execve()` while the sibling remains traced in the old executable;
-- classify the exec stop only in the process domain that executed it: collapse that domain's task registry, refresh only its executable identity, clear only its old-image breakpoint/watchpoint/pending execution ownership, and leave the sibling's executable path, TIDs, pending signals, and debug state untouched;
-- preserve explicit process selection after image divergence so switching to the old-image sibling restores its old executable identity/resolution context, while switching back to the exec'd process exposes the replacement image;
-- make CLI symbol/source resolution and user/deferred breakpoint bookkeeping follow the selected process image rather than one session-global `ElfFile`; image replacement in one process may not invalidate the sibling process's user breakpoint state;
-- prove a new-image symbol breakpoint in the exec'd process and an old-image managed/symbol breakpoint in the sibling can coexist and be hit independently after switching process domains;
-- surface exec'd-process and old-image-sibling terminal events independently and end the session only after both domains complete;
-- run one real PIE/non-PIE fork -> child exec -> divergent-image workflow through GCC and Clang-large, including a real `mdbg` subprocess rather than only direct API state inspection.
+- start from a launched single-thread process under `ForkFollowPolicy::Both`, retain its first regular-fork child, then allow one retained domain to perform a second regular `fork()` while the other domain remains traced, yielding three independently identifiable ptrace-owned process domains;
+- replace the single optional retained-process slot with a bounded process-domain registry keyed by process identity while preserving one explicitly selected active process and each domain's own TID registry, stop metadata, executable path, pending signals/thread starts, managed breakpoint map, displaced-step state, watchpoint, and DR restore snapshot;
+- make `processes()` and `select_process(pid)` operate over all retained stopped domains with deterministic rejection of unknown/running/terminal selections and no implicit resume of siblings;
+- route waits and terminal promotion without losing a third domain: one process exit/signal must remove or mark only that domain, preserve the remaining domains, and choose a deterministic stopped survivor without ending the session until the final owned process terminates;
+- prove copy-on-write/debug ownership across three domains by arming process-scoped state after retention and showing a breakpoint or controlled memory mutation in one process cannot rewrite the sibling domains;
+- make the CLI `info processes` / `process <pid>` workflow enumerate and switch among all three domains, preserving the correct executable identity and user-breakpoint registry for each selected process;
+- run a real PIE/non-PIE parent -> child -> grandchild regular-fork workflow through GCC and Clang-large, including a real `mdbg` subprocess and leak-free completion of all owned processes.
 
-Do not expand this slice to arbitrary nested process trees, attached-origin multi-process exec, or simultaneous vfork ownership. The goal is to prove that process ownership and image ownership are independently scoped before increasing process-tree breadth.
+Do not generalize the first registry slice to unbounded arbitrary process trees, attached-origin nested forks, multi-thread-parent nested retention, or simultaneous vfork ownership. The purpose of Priority 5 is to remove the fixed two-slot architecture with one executable three-domain proof before increasing breadth.
 
 ## Selection rule
 
-Priority 4 is the current frontier. The next work must demonstrate one retained fork domain replacing its executable without corrupting the sibling domain's image/debug state. Arbitrary process trees, attached-origin lifecycle evidence, vfork follow-child/both, expression evaluation, richer register classes, and convenience UI remain lower priority until divergent executable images work inside the two-domain session. As in earlier phases, kernel/compiler variants are added only when a reproducible workflow demonstrates a gap.
+Priority 5 is the current frontier. The next work must replace the optional second process slot with a process-domain collection and prove one real nested regular-fork three-domain workflow. Attached-origin lifecycle evidence, vfork follow-child/both, arbitrary-depth trees, expression evaluation, richer register classes, and convenience UI remain lower priority until process selection/lifecycle can preserve more than two ordinary fork domains. As in earlier phases, kernel/compiler variants are added only when a reproducible workflow demonstrates a gap.

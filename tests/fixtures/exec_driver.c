@@ -56,6 +56,21 @@ static int run_fork_topology(void) {
   return 0;
 }
 
+static int run_fork_exec_divergence(const char* target) {
+  if (block_sigchld() != 0) return 29;
+
+  const pid_t child = fork();
+  if (child == -1) return 30;
+  if (child == 0) {
+    execl(target, target, NULL);
+    _exit(31);
+  }
+
+  if (wait_clean_child(child) != 0) return 32;
+  fork_shared_probe();
+  return 0;
+}
+
 static int run_vfork_topology(const char* target) {
   if (block_sigchld() != 0) return 22;
 
@@ -97,6 +112,9 @@ static void* exec_worker(void* argument) {
 int main(int argc, char** argv) {
   if (argc == 2 && strcmp(argv[1], "--fork-topology") == 0) {
     return run_fork_topology();
+  }
+  if (argc == 3 && strcmp(argv[1], "--fork-exec-divergence") == 0) {
+    return run_fork_exec_divergence(argv[2]);
   }
   if (argc == 3 && strcmp(argv[1], "--vfork-topology") == 0) {
     return run_vfork_topology(argv[2]);

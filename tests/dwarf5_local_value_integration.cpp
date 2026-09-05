@@ -17,6 +17,7 @@
 namespace {
 
 constexpr std::uint64_t kExpectedEntryParameter = UINT64_C(0x1020304050607080);
+constexpr std::uint64_t kExpectedEntryRdiSentinel = UINT64_C(0x777788889999aaaa);
 constexpr std::uint64_t kExpectedOptimizedLocal = UINT64_C(0x1e3c1e781e3c1ef0);
 constexpr const char* kExpectedEntryCliValue = "entry_parameter = 1161981756646125696";
 constexpr const char* kExpectedCliValue = "optimized_local = 2178649820992642800";
@@ -44,8 +45,8 @@ void test_direct_api(const std::string& fixture) {
               stop.breakpoint_address == entry_address,
           "DWARF5 fixture did not stop in the entry-value parameter range");
   const auto current_rdi = debugger.registers().rdi;
-  require(current_rdi != kExpectedEntryParameter,
-          "entry-value probe did not separate the current RDI from the entry parameter");
+  require(current_rdi == kExpectedEntryRdiSentinel,
+          "entry-value helper did not leave the expected current RDI sentinel");
 
   const auto entry_value =
       mdbg::inspect_local_integer(debugger, elf, "entry_parameter");

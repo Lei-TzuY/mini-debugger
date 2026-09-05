@@ -13,14 +13,19 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <limits>
+#include <optional>
 #include <sstream>
 #include <string>
+#include <system_error>
 #include <vector>
 
 namespace {
+
+constexpr std::uint64_t kSourceContextRadius = 4;
 
 struct SourceSpec {
   std::string file;
@@ -209,11 +214,64 @@ void print_backtrace(const mdbg::Debugger& debugger, const mdbg::ElfFile& elf) {
   }
 }
 
+std::optional<std::filesystem::path> resolve_source_path(const std::string& file,
+                                                         const std::string& module_path) {
+  if (file.empty()) return std::nullopt;
+
+  std::filesystem::path candidate(file);
+  std::error_code error;
+  if (std::filesystem::is_regular_file(candidate, error)) return candidate;
+
+  if (candidate.is_absolute() || module_path.empty()) return std::nullopt;
+  error.clear();
+  candidate = std::filesystem::path(module_path).parent_path() / candidate;
+  if (std::filesystem::is_regular_file(candidate, error)) return candidate;
+  return std::nullopt;
+}
+
+void print_source_excerpt(const std::string& file, std::uint64_t line,
+                          const std::string& module_path = {}) {
+  const auto path = resolve_source_path(file, module_path);
+  if (!path) {
+    std::cout << "source unavailable: " << file << '\n';
+    return;
+  }
+
+  std::ifstream input(*path);
+  if (!input) {
+    std::cout << "source unavailable: " << path->string() << '\n';
+    return;
+  }
+
+  const auto first = line > kSourceContextRadius ? line - kSourceContextRadius : 1;
+  const auto maximum = std::numeric_limits<std::uint64_t>::max();
+  const auto last = line > maximum - kSourceContextRadius
+                        ? maximum
+                        : line + kSourceContextRadius;
+
+  std::string text;
+  std::uint64_t current = 0;
+  bool found_current = false;
+  while (current < last && std::getline(input, text)) {
+    ++current;
+    if (current < first) continue;
+    const bool active = current == line;
+    if (active) found_current = true;
+    std::cout << (active ? "=> " : "   ") << std::setw(5) << current << " | " << text << '\n';
+  }
+
+  if (!found_current) {
+    std::cout << "source unavailable: " << path->string() << ':' << line
+              << " is outside the file\n";
+  }
+}
+
 void print_source_position(std::uintptr_t address, const mdbg::SourceLocation& source) {
   std::cout << "0x" << std::hex << address << std::dec << ' ' << source.file << ':'
             << source.line;
   if (source.column != 0) std::cout << ':' << source.column;
   std::cout << '\n';
+  print_source_excerpt(source.file, source.line);
 }
 
 void print_source_position(std::uintptr_t address, const mdbg::ModuleResolvedSource& source) {
@@ -221,6 +279,7 @@ void print_source_position(std::uintptr_t address, const mdbg::ModuleResolvedSou
             << source.line;
   if (source.column != 0) std::cout << ':' << source.column;
   std::cout << '\n';
+  print_source_excerpt(source.file, source.line, source.module_path);
 }
 
 void print_source_motion_result(const char* operation, const mdbg::SourceStepResult& result,
@@ -388,6 +447,8 @@ int main(int argc, char** argv) {
         }
         const auto address = resolve_location(location, elf, debugger.pid());
         print_source_location(address, debugger, elf);
+      } else if (command == "list" || command == "l") {
+        print_source_location(static_cast<std::uintptr_t>(debugger.registers().rip), debugger, elf);
       } else if (command == "reg") {
         std::string name;
         input >> name;
@@ -472,7 +533,7 @@ int main(int argc, char** argv) {
                     << std::dec << ' ' << symbol.name << '\n';
         }
       } else {
-        std::cout << "commands: continue, step, next, finish, stepi, regs, bt, "
+        std::cout << "commands: continue, step, next, finish, stepi, regs, bt, list, "
                      "line <addr|symbol>, reg <name>, x <addr|symbol> [len], "
                      "break <addr|symbol|file:line>, delete <id>, thread <tid>, "
                      "info <breakpoints|threads>, symbols [filter], detach, quit\n";

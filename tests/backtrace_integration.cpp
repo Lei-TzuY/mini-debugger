@@ -6,11 +6,15 @@
 #include "unwind/cfi.hpp"
 #include "unwind/frame_pointer.hpp"
 
+#include <sys/wait.h>
+#include <unistd.h>
+
+#include <cerrno>
 #include <csignal>
 #include <cstdio>
+#include <filesystem>
 #include <stdexcept>
 #include <string>
-#include <unistd.h>
 
 namespace {
 
@@ -52,6 +56,38 @@ std::string temp_path() {
   ::close(fd);
   ::unlink(pattern);
   return pattern;
+}
+
+void write_all(int fd, const std::string& text) {
+  std::size_t offset = 0;
+  while (offset < text.size()) {
+    const auto written = ::write(fd, text.data() + offset, text.size() - offset);
+    if (written == -1 && errno == EINTR) continue;
+    if (written <= 0) throw std::runtime_error("failed to write CLI command stream");
+    offset += static_cast<std::size_t>(written);
+  }
+}
+
+std::string read_all(int fd) {
+  std::string output;
+  char buffer[4096];
+  for (;;) {
+    const auto count = ::read(fd, buffer, sizeof(buffer));
+    if (count == -1 && errno == EINTR) continue;
+    if (count == 0) return output;
+    if (count < 0) throw std::runtime_error("failed to read CLI output");
+    output.append(buffer, static_cast<std::size_t>(count));
+  }
+}
+
+std::size_t occurrence_count(const std::string& text, const std::string& needle) {
+  std::size_t count = 0;
+  std::size_t position = 0;
+  while ((position = text.find(needle, position)) != std::string::npos) {
+    ++count;
+    position += needle.size();
+  }
+  return count;
 }
 
 void require_frame_name(const mdbg::ElfFile& elf, pid_t pid, std::uintptr_t address,
@@ -191,6 +227,80 @@ void test_compiler_exception_cfi(const std::string& fixture) {
           "exception CFI fixture did not exit cleanly");
 }
 
+void test_cli_source_context(const std::string& integration_path,
+                             const std::string& fixture) {
+  const auto mdbg_path =
+      (std::filesystem::absolute(integration_path).parent_path() / "mdbg").string();
+  require(std::filesystem::exists(mdbg_path), "mdbg executable is missing beside integration test");
+
+  const std::string path = temp_path();
+  int input_pipe[2] = {-1, -1};
+  int output_pipe[2] = {-1, -1};
+  require(::pipe(input_pipe) == 0, "failed to create CLI stdin pipe");
+  require(::pipe(output_pipe) == 0, "failed to create CLI stdout pipe");
+
+  const pid_t child = ::fork();
+  require(child != -1, "failed to fork CLI integration child");
+  if (child == 0) {
+    ::dup2(input_pipe[0], STDIN_FILENO);
+    ::dup2(output_pipe[1], STDOUT_FILENO);
+    ::dup2(output_pipe[1], STDERR_FILENO);
+    ::close(input_pipe[0]);
+    ::close(input_pipe[1]);
+    ::close(output_pipe[0]);
+    ::close(output_pipe[1]);
+    ::execl(mdbg_path.c_str(), mdbg_path.c_str(), fixture.c_str(), path.c_str(),
+            "backtrace", nullptr);
+    _exit(127);
+  }
+
+  ::close(input_pipe[0]);
+  ::close(output_pipe[1]);
+  try {
+    write_all(input_pipe[1],
+              "break backtrace_leaf\n"
+              "continue\n"
+              "continue\n"
+              "list\n"
+              "step\n"
+              "quit\n");
+    ::close(input_pipe[1]);
+    input_pipe[1] = -1;
+
+    const auto output = read_all(output_pipe[0]);
+    ::close(output_pipe[0]);
+    output_pipe[0] = -1;
+
+    int status = 0;
+    pid_t waited;
+    do {
+      waited = ::waitpid(child, &status, 0);
+    } while (waited == -1 && errno == EINTR);
+    require(waited == child && WIFEXITED(status) && WEXITSTATUS(status) == 0,
+            "mdbg CLI source-context workflow did not exit cleanly\n" + output);
+    require(output.find("Breakpoint 1") != std::string::npos,
+            "CLI did not install the source-context probe breakpoint\n" + output);
+    require(output.find("breakpoint at") != std::string::npos,
+            "CLI did not reach the source-context probe breakpoint\n" + output);
+    require(output.find("backtrace_leaf(void)") != std::string::npos,
+            "CLI source context did not render real source text\n" + output);
+    require(output.find("fixture_value += 1;") != std::string::npos,
+            "source-step context did not render the advanced source line\n" + output);
+    require(occurrence_count(output, "=> ") >= 2,
+            "manual list and source step did not share current-line context rendering\n" + output);
+  } catch (...) {
+    if (input_pipe[1] != -1) ::close(input_pipe[1]);
+    if (output_pipe[0] != -1) ::close(output_pipe[0]);
+    ::kill(child, SIGKILL);
+    int status = 0;
+    while (::waitpid(child, &status, 0) == -1 && errno == EINTR) {
+    }
+    std::remove(path.c_str());
+    throw;
+  }
+  std::remove(path.c_str());
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -202,6 +312,7 @@ int main(int argc, char** argv) {
     test_frame_pointer_backtrace(argv[1]);
     test_cfi_backtrace_without_frame_pointer(argv[2]);
     test_compiler_exception_cfi(argv[0]);
+    test_cli_source_context(argv[0], argv[1]);
     return 0;
   } catch (const std::exception& error) {
     std::fprintf(stderr, "backtrace integration failure: %s\n", error.what());

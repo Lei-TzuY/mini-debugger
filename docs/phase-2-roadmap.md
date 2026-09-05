@@ -86,10 +86,10 @@ Improve presentation now that the underlying execution, loader, thread, source, 
 Completed slices:
 
 - P6-A: the completed P4 scheduling contract is exposed to users through `info threads` and `thread <tid>`. Thread listing reports each tracked TID and state with an explicit active marker; selection delegates to the existing single-runner debugger API rather than duplicating scheduling policy in the CLI. A real CLI subprocess integration drives a pthread tracee through thread creation, leader/worker selection, selected-thread register access, worker execution/exit, active ownership returning to the leader, and clean process exit in both PIE and non-PIE runs.
+- P6-B: source locations now render a bounded real-file excerpt with an explicit current-line marker while preserving the existing address and `file:line[:column]` output. The `list`/`l` command re-renders the active RIP, and source `step`, `next`, `finish`, plus explicit `line` lookup share the same rendering path. Missing or synthetic source paths remain non-fatal and produce a deterministic unavailable message. A real `mdbg` subprocess regression drives both PIE and non-PIE tracees through a managed breakpoint, manual listing, and source stepping against the repository's actual fixture source file.
 
 Next productization candidates:
 
-- source-context display around the current source location;
 - clearer module-qualified symbol/source rendering;
 - CLI help/usage consistency beyond the commands already exercised by integration;
 - release packaging and examples after the interactive workflows are coherent.

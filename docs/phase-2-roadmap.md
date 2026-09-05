@@ -64,7 +64,7 @@ Completed slices:
 
 The completed PIE/non-PIE coverage also rejects unknown and exited TID selection deterministically and proves explicit detach plus debugger-destructor detach still release every traced task after active-thread changes.
 
-This seals the current multi-thread milestone. The stop policy remains intentionally single-runner: one selected task executes while the other traced tasks remain stopped. Hardware watchpoints remain explicitly single-thread-only because x86 debug-register ownership is per TID; broadening them requires a separate concrete debug-register allocation scenario rather than being hidden inside the thread milestone. CLI thread-list/selection presentation belongs with Priority 6 productization now that the underlying scheduling contract is stable.
+This seals the current multi-thread milestone. The stop policy remains intentionally single-runner: one selected task executes while the other traced tasks remain stopped. Per-TID hardware debug-register ownership is handled separately by Priority 7 rather than being hidden inside the scheduler. CLI thread-list/selection presentation belongs with Priority 6 productization now that the underlying scheduling contract is stable.
 
 ## Priority 5: broader CFI recovery — complete for the current compiler-proven milestone
 
@@ -92,20 +92,36 @@ Completed slices:
 
 Help wording and release packaging remain useful maintenance/product work, but they are no longer the highest-value architecture frontier and should not keep Priority 6 artificially open.
 
-## Priority 7: thread-scoped hardware watchpoints — current frontier
+## Priority 7: thread-scoped hardware watchpoints — complete for the current bounded milestone
 
-Extend the existing single-slot x86-64 write-watchpoint capability across the explicit P4 thread model without pretending x86 debug registers are process-global. The current implementation intentionally rejects `add_write_watchpoint()` as soon as more than one traced TID exists, so this is a concrete executable capability gap rather than speculative feature enumeration.
+The existing single-slot x86-64 write-watchpoint capability now follows the explicit P4 thread model instead of treating debug registers as process-global or rejecting every multi-thread tracee.
 
-Acceptance for the first bounded slice:
+Completed capability:
 
-- a write watchpoint is owned by one explicitly selected stopped TID, and DR0/DR6/DR7 are programmed only on that owner;
-- selecting or running another traced TID does not silently inherit or trigger the owner's watchpoint;
-- a real pthread tracee can select a worker, arm a watchpoint on that worker, observe a classified watchpoint stop from the worker's write, and continue the other thread under the existing single-runner policy;
-- removal, owner-thread exit, explicit detach, and debugger teardown restore only debugger-owned debug-register state and never leave stale hardware state on another TID;
-- coexistence with process-wide managed software breakpoints remains deterministic, including displaced-step classification on the watchpoint-owning TID;
-- the one-slot/write-only bound remains explicit. DR1-DR3 allocation and read/read-write mode matrices stay out of scope unless a later concrete scenario requires them.
+- `add_write_watchpoint()` binds DR0/DR6/DR7 ownership to the explicitly selected stopped TID and preserves that TID's exact pre-existing debug-register snapshot;
+- selecting a different stopped TID while the watchpoint is armed neither copies the owner's debug-register state nor mutates the owner, and reselecting the owner preserves the armed watchpoint;
+- a real attached pthread fixture arms the worker, proves the leader's debug registers remain unchanged, then drives a targeted worker signal through a process-wide `INT3` at the watched store and surfaces the displaced store as a worker-owned `Watchpoint` stop;
+- the watched write commits before the stop, and the leader later executes the same store without inheriting the dead worker's hardware watchpoint;
+- removal, explicit detach, and debugger-destructor detach restore the exact saved owner DR0/DR6/DR7 state while leaving non-owner debug registers unchanged;
+- worker exit or signal termination discards stale watchpoint ownership for the dead TID, so later teardown never attempts to restore debug registers through an exited task;
+- the one-slot/write-only bound remains explicit, and thread creation while a hardware watchpoint is active remains an explicit unsupported transition rather than silently guessing debug-register inheritance.
 
-The implementation should build on the existing per-TID stop/scheduling contract and debug-register snapshot logic rather than cloning a second thread scheduler inside the watchpoint subsystem.
+This seals the current watchpoint milestone. DR1-DR3 allocation, read/read-write mode matrices, and clone-time watchpoint propagation are not follow-up checklists; they should be revisited only when a concrete debugging workflow requires them.
+
+## Priority 8: controlled inferior state mutation — current frontier
+
+The debugger can inspect selected-thread registers and process memory, and its low-level ptrace layer already contains register and word writes, but there is no debugger-level or CLI contract for deliberately changing inferior state. The next architectural step is to expose mutation without bypassing the ownership invariants already established for threads, software breakpoints, and hardware watchpoints.
+
+Acceptance for the first coherent slices:
+
+- selected-thread general-purpose register assignment performs a bounded read-modify-write of the live register set, changes only the named register, and leaves every non-selected TID untouched;
+- process-memory writes round-trip through the debugger API and CLI with explicit bounds and deterministic ptrace failure reporting;
+- a memory write overlapping an installed managed software breakpoint updates the breakpoint's saved original byte while keeping the physical `INT3` installed, so later displaced execution and breakpoint removal observe the user's new program byte rather than stale pre-write state;
+- external mutation that overlaps a currently restored byte during a pending displaced-breakpoint step is rejected or completed through one explicit ownership path; it may not silently corrupt the restore/step/reinsert invariant;
+- debugger-originated memory writes do not fabricate hardware-watchpoint stops because no tracee instruction executed;
+- PIE/non-PIE integration proves register mutation on a selected pthread worker, ordinary memory mutation, managed-breakpoint overlap, and exact readback/cleanup behavior.
+
+P8 may be split into register and memory slices, but both must use the existing selected-TID and breakpoint ownership model rather than exposing raw ptrace writes as a parallel subsystem.
 
 ## Selection rule
 

@@ -31,69 +31,26 @@ jobs:
       - name: Apply bounded register-relative-memory patch
         if: github.ref == 'refs/heads/feat/dwarf-register-relative-memory-local' && matrix.compiler == 'gcc'
         shell: bash
+        env:
+          PATCH_MARKER: ICByZXR1cm4gYWRkX3NpZ25lZChkZWJ1Z2dlci5yZWdpc3RlcnMoKS5yZGksIG9mZnNldCwgIkRXX09QX2JyZWc1IHZhbHVlIik7Cn0KCnN0ZDo6dWludDY0X3QgZXZhbHVhdGVfZW50cnlfcmRpKA==
+          PATCH_REPLACEMENT: ICByZXR1cm4gYWRkX3NpZ25lZChkZWJ1Z2dlci5yZWdpc3RlcnMoKS5yZGksIG9mZnNldCwgIkRXX09QX2JyZWc1IHZhbHVlIik7Cn0KCnN0ZDo6dWludDY0X3QgZXZhbHVhdGVfYnJlZzVfbWVtb3J5X2FkZHJlc3MoCiAgICBjb25zdCBzdGQ6OnZlY3RvcjxzdGQ6OmJ5dGU+JiBleHByZXNzaW9uLCBjb25zdCBEZWJ1Z2dlciYgZGVidWdnZXIpIHsKICBpZiAoZXhwcmVzc2lvbi5lbXB0eSgpIHx8CiAgICAgIHN0ZDo6dG9faW50ZWdlcjxzdGQ6OnVpbnQ4X3Q+KGV4cHJlc3Npb24uZnJvbnQoKSkgIT0ga0R3T3BCcmVnNSkgewogICAgdGhyb3cgc3RkOjpydW50aW1lX2Vycm9yKAogICAgICAgICJsb2NhbCBtZW1vcnkgbG9jYXRpb24gaXMgbm90IHRoZSBjb21waWxlci1wcm92ZW4gRFdfT1BfYnJlZzUgZm9ybSIpOwogIH0KICBzdGQ6OnNpemVfdCBjdXJzb3IgPSAxOwogIGNvbnN0IGF1dG8gb2Zmc2V0ID0KICAgICAgcmVhZF9zbGViKGV4cHJlc3Npb24sIGN1cnNvciwgZXhwcmVzc2lvbi5zaXplKCksICJEV19PUF9icmVnNSBtZW1vcnkgb2Zmc2V0Iik7CiAgaWYgKGN1cnNvciAhPSBleHByZXNzaW9uLnNpemUoKSkgewogICAgdGhyb3cgc3RkOjpydW50aW1lX2Vycm9yKAogICAgICAgICJ1bnN1cHBvcnRlZCB0cmFpbGluZyBvcGVyYXRpb25zIGFmdGVyIERXX09QX2JyZWc1IG1lbW9yeSBsb2NhdGlvbiIpOwogIH0KICByZXR1cm4gYWRkX3NpZ25lZChkZWJ1Z2dlci5yZWdpc3RlcnMoKS5yZGksIG9mZnNldCwKICAgICAgICAgICAgICAgICAgICAiRFdfT1BfYnJlZzUgbWVtb3J5IGFkZHJlc3MiKTsKfQoKc3RkOjp1aW50NjRfdCBldmFsdWF0ZV9lbnRyeV9yZGko
+          PATCH_OLD: ICBpZiAodmFsdWVfdHlwZS5raW5kICE9IExvY2FsVmFsdWVLaW5kOjpTdHJ1Y3R1cmUgJiYgIWxvY2F0aW9uX2V4cHJlc3Npb24uZW1wdHkoKSAmJgogICAgICBzdGQ6OnRvX2ludGVnZXI8c3RkOjp1aW50OF90Pihsb2NhdGlvbl9leHByZXNzaW9uLmZyb250KCkpID09IGtEd09wQnJlZzUpIHsKICAgIGNvbnN0IGF1dG8gcmF3ID0gdHJ1bmNhdGVfaW50ZWdlcigKICAgICAgICBldmFsdWF0ZV9icmVnNV9zdGFja192YWx1ZShsb2NhdGlvbl9leHByZXNzaW9uLCBkZWJ1Z2dlciksCiAgICAgICAgdmFsdWVfdHlwZS5ieXRlX3NpemUpOwogICAgcmV0dXJuIExvY2FsU2NhbGFyVmFsdWV7bW9kdWxlLnBhdGgoKSwgc3RkOjpzdHJpbmcobmFtZSksIHJhdywKICAgICAgICAgICAgICAgICAgICAgICAgICAgIHZhbHVlX3R5cGUuYnl0ZV9zaXplLCB2YWx1ZV90eXBlLmlzX3NpZ25lZCwKICAgICAgICAgICAgICAgICAgICAgICAgICAgIHZhbHVlX3R5cGUua2luZH07CiAgfQo=
+          PATCH_NEW: ICBpZiAodmFsdWVfdHlwZS5raW5kICE9IExvY2FsVmFsdWVLaW5kOjpTdHJ1Y3R1cmUgJiYgIWxvY2F0aW9uX2V4cHJlc3Npb24uZW1wdHkoKSAmJgogICAgICBzdGQ6OnRvX2ludGVnZXI8c3RkOjp1aW50OF90Pihsb2NhdGlvbl9leHByZXNzaW9uLmZyb250KCkpID09IGtEd09wQnJlZzUpIHsKICAgIGNvbnN0IGJvb2wgc3RhY2tfdmFsdWUgPQogICAgICAgIHN0ZDo6dG9faW50ZWdlcjxzdGQ6OnVpbnQ4X3Q+KGxvY2F0aW9uX2V4cHJlc3Npb24uYmFjaygpKSA9PSBrRHdPcFN0YWNrVmFsdWU7CiAgICBjb25zdCBhdXRvIHJhdyA9IHN0YWNrX3ZhbHVlCiAgICAgICAgICAgICAgICAgICAgICAgICA/IHRydW5jYXRlX2ludGVnZXIoCiAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICBldmFsdWF0ZV9icmVnNV9zdGFja192YWx1ZShsb2NhdGlvbl9leHByZXNzaW9uLCBkZWJ1Z2dlciksCiAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICB2YWx1ZV90eXBlLmJ5dGVfc2l6ZSkKICAgICAgICAgICAgICAgICAgICAgICAgIDogcmVhZF9pbnRlZ2VyKAogICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgZGVidWdnZXIsCiAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICBldmFsdWF0ZV9icmVnNV9tZW1vcnlfYWRkcmVzcyhsb2NhdGlvbl9leHByZXNzaW9uLCBkZWJ1Z2dlciksCiAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICB2YWx1ZV90eXBlLmJ5dGVfc2l6ZSk7CiAgICByZXR1cm4gTG9jYWxTY2FsYXJWYWx1ZXttb2R1bGUucGF0aCgpLCBzdGQ6OnN0cmluZyhuYW1lKSwgcmF3LAogICAgICAgICAgICAgICAgICAgICAgICAgICAgdmFsdWVfdHlwZS5ieXRlX3NpemUsIHZhbHVlX3R5cGUuaXNfc2lnbmVkLAogICAgICAgICAgICAgICAgICAgICAgICAgICAgdmFsdWVfdHlwZS5raW5kfTsKICB9Cg==
         run: |
           python3 - <<'PY'
+          import base64
+          import os
           from pathlib import Path
           p = Path('src/dwarf/source_lookup.cpp')
           s = p.read_text()
           if 'evaluate_breg5_memory_address' not in s:
-              marker = '''  return add_signed(debugger.registers().rdi, offset, "DW_OP_breg5 value");
-}
-
-std::uint64_t evaluate_entry_rdi('''
-              replacement = '''  return add_signed(debugger.registers().rdi, offset, "DW_OP_breg5 value");
-}
-
-std::uint64_t evaluate_breg5_memory_address(
-    const std::vector<std::byte>& expression, const Debugger& debugger) {
-  if (expression.empty() ||
-      std::to_integer<std::uint8_t>(expression.front()) != kDwOpBreg5) {
-    throw std::runtime_error(
-        "local memory location is not the compiler-proven DW_OP_breg5 form");
-  }
-  std::size_t cursor = 1;
-  const auto offset =
-      read_sleb(expression, cursor, expression.size(), "DW_OP_breg5 memory offset");
-  if (cursor != expression.size()) {
-    throw std::runtime_error(
-        "unsupported trailing operations after DW_OP_breg5 memory location");
-  }
-  return add_signed(debugger.registers().rdi, offset,
-                    "DW_OP_breg5 memory address");
-}
-
-std::uint64_t evaluate_entry_rdi('''
-              old = '''  if (value_type.kind != LocalValueKind::Structure && !location_expression.empty() &&
-      std::to_integer<std::uint8_t>(location_expression.front()) == kDwOpBreg5) {
-    const auto raw = truncate_integer(
-        evaluate_breg5_stack_value(location_expression, debugger),
-        value_type.byte_size);
-    return LocalScalarValue{module.path(), std::string(name), raw,
-                            value_type.byte_size, value_type.is_signed,
-                            value_type.kind};
-  }
-'''
-              new = '''  if (value_type.kind != LocalValueKind::Structure && !location_expression.empty() &&
-      std::to_integer<std::uint8_t>(location_expression.front()) == kDwOpBreg5) {
-    const bool stack_value =
-        std::to_integer<std::uint8_t>(location_expression.back()) == kDwOpStackValue;
-    const auto raw = stack_value
-                         ? truncate_integer(
-                               evaluate_breg5_stack_value(location_expression, debugger),
-                               value_type.byte_size)
-                         : read_integer(
-                               debugger,
-                               evaluate_breg5_memory_address(location_expression, debugger),
-                               value_type.byte_size);
-    return LocalScalarValue{module.path(), std::string(name), raw,
-                            value_type.byte_size, value_type.is_signed,
-                            value_type.kind};
-  }
-'''
+              marker = base64.b64decode(os.environ['PATCH_MARKER']).decode()
+              replacement = base64.b64decode(os.environ['PATCH_REPLACEMENT']).decode()
+              old = base64.b64decode(os.environ['PATCH_OLD']).decode()
+              new = base64.b64decode(os.environ['PATCH_NEW']).decode()
               if s.count(marker) != 1 or s.count(old) != 1:
                   raise SystemExit('source patch anchors are not unique')
-              s = s.replace(marker, replacement, 1).replace(old, new, 1)
-              p.write_text(s)
+              p.write_text(s.replace(marker, replacement, 1).replace(old, new, 1))
           PY
           git diff --check
           if ! git diff --quiet -- src/dwarf/source_lookup.cpp; then

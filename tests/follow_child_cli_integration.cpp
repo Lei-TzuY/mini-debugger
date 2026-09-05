@@ -168,7 +168,7 @@ void require_process_gone(pid_t pid) {
     if (!std::filesystem::exists(std::filesystem::path("/proc") / std::to_string(pid))) return;
     std::this_thread::sleep_for(std::chrono::milliseconds(5));
   }
-  throw std::runtime_error("detached parent remained after followed child completion");
+  throw std::runtime_error("process remained after debugger session completion");
 }
 
 void require_clean_cli_exit(CliProcess& cli) {
@@ -285,14 +285,14 @@ void run_two_process_cli(const std::string& driver, const std::string& mdbg) {
 
     write_cli(cli, "stepi\n");
     output = read_until(cli, "(mdbg) ");
-    require(output.find("single-step trap [tid " + std::to_string(child) + "]") !=
+    require(output.find("single-step trap on thread " + std::to_string(child)) !=
                 std::string::npos,
             "single-step did not route through selected child process");
 
     write_cli(cli, "continue\n");
     output = read_until(cli, "(mdbg) ");
     require(output.find("stopped by signal " + std::to_string(SIGSTOP)) != std::string::npos &&
-                output.find("[tid " + std::to_string(child) + "]") != std::string::npos,
+                output.find("on thread " + std::to_string(child)) != std::string::npos,
             "child did not surface its independent SIGSTOP");
 
     write_cli(cli, "x fork_shared_value 8\n");
@@ -307,7 +307,6 @@ void run_two_process_cli(const std::string& driver, const std::string& mdbg) {
             "child terminal event was not surfaced independently");
     require(output.find("active process " + std::to_string(parent)) != std::string::npos,
             "remaining parent was not promoted after child exit");
-    require_process_gone(child);
 
     write_cli(cli, "info processes\n");
     output = read_until(cli, "(mdbg) ");
@@ -325,6 +324,7 @@ void run_two_process_cli(const std::string& driver, const std::string& mdbg) {
             "remaining parent did not exit cleanly");
     require_clean_cli_exit(cli);
     require_process_gone(parent);
+    require_process_gone(child);
   } catch (...) {
     if (parent > 0) (void)::kill(parent, SIGKILL);
     if (child > 0) (void)::kill(child, SIGKILL);

@@ -18,6 +18,7 @@ constexpr std::byte kInt3{0xcc};
 constexpr std::uint64_t kDr6Breakpoint0{1};
 constexpr std::uint64_t kDr7Slot0EnableMask{0x3};
 constexpr std::uint64_t kDr7Slot0ControlMask{std::uint64_t{0xf} << 16U};
+constexpr std::size_t kMaxProcessDomains{3};
 
 std::uint64_t watchpoint_length_encoding(std::size_t length) {
   switch (length) {
@@ -113,13 +114,14 @@ Debugger::Debugger(Process process, StopInfo initial_stop, std::string executabl
       executable_path_(std::move(executable_path)) {}
 
 Debugger::~Debugger() {
-  if (retained_process_) {
+  if (!retained_processes_.empty()) {
     if (!terminal_process_state(process_.state()) && process_.pid() > 0) {
       (void)::kill(process_.pid(), SIGKILL);
     }
-    if (!terminal_process_state(retained_process_->process.state()) &&
-        retained_process_->process.pid() > 0) {
-      (void)::kill(retained_process_->process.pid(), SIGKILL);
+    for (const auto& [pid, domain] : retained_processes_) {
+      if (!terminal_process_state(domain.process.state()) && pid > 0) {
+        (void)::kill(pid, SIGKILL);
+      }
     }
     return;
   }
@@ -148,10 +150,10 @@ pid_t Debugger::stopped_tid() const {
 }
 
 void Debugger::set_fork_follow_policy(ForkFollowPolicy policy) {
-  if (retained_process_) {
+  if (!retained_processes_.empty()) {
     if (policy != ForkFollowPolicy::Both) {
       throw std::logic_error(
-          "cannot change fork follow policy while two process domains are retained");
+          "cannot change fork follow policy while process domains are retained");
     }
     fork_follow_policy_ = policy;
     return;
@@ -180,49 +182,59 @@ std::vector<ProcessInfo> Debugger::processes() const {
   if (process_.pid() > 0) {
     result.push_back(ProcessInfo{process_.pid(), process_.state(), true});
   }
-  if (retained_process_ && retained_process_->process.pid() > 0) {
-    result.push_back(ProcessInfo{retained_process_->process.pid(),
-                                 retained_process_->process.state(), false});
+  for (const auto& [pid, domain] : retained_processes_) {
+    if (pid > 0) result.push_back(ProcessInfo{pid, domain.process.state(), false});
   }
   return result;
 }
 
-bool Debugger::has_live_retained_process() const noexcept {
-  return retained_process_ && !terminal_process_state(retained_process_->process.state());
+std::optional<pid_t> Debugger::first_stopped_retained_process() const noexcept {
+  for (const auto& [pid, domain] : retained_processes_) {
+    if (domain.process.state() == ProcessState::Stopped) return pid;
+  }
+  return std::nullopt;
 }
 
-void Debugger::swap_active_process() {
-  if (!retained_process_) {
+void Debugger::swap_active_process(pid_t pid) {
+  auto node = retained_processes_.extract(pid);
+  if (node.empty()) {
     throw std::logic_error("no retained process is available for selection");
   }
-  process_.swap(retained_process_->process);
-  std::swap(stop_info_, retained_process_->stop_info);
-  std::swap(executable_path_, retained_process_->executable_path);
-  pending_thread_starts_.swap(retained_process_->pending_thread_starts);
-  pending_signals_.swap(retained_process_->pending_signals);
-  breakpoints_by_address_.swap(retained_process_->breakpoints_by_address);
-  breakpoint_ids_.swap(retained_process_->breakpoint_ids);
-  std::swap(pending_breakpoint_step_, retained_process_->pending_breakpoint_step);
-  std::swap(watchpoint_, retained_process_->watchpoint);
-  std::swap(watchpoint_register_snapshot_,
-            retained_process_->watchpoint_register_snapshot);
+  const auto old_active_pid = process_.pid();
+  auto& domain = node.mapped();
+  process_.swap(domain.process);
+  std::swap(stop_info_, domain.stop_info);
+  std::swap(executable_path_, domain.executable_path);
+  pending_thread_starts_.swap(domain.pending_thread_starts);
+  pending_signals_.swap(domain.pending_signals);
+  breakpoints_by_address_.swap(domain.breakpoints_by_address);
+  breakpoint_ids_.swap(domain.breakpoint_ids);
+  std::swap(pending_breakpoint_step_, domain.pending_breakpoint_step);
+  std::swap(watchpoint_, domain.watchpoint);
+  std::swap(watchpoint_register_snapshot_, domain.watchpoint_register_snapshot);
+  node.key() = old_active_pid;
+  const auto inserted = retained_processes_.insert(std::move(node));
+  if (!inserted.inserted) {
+    throw std::logic_error("active process identity collided with retained registry");
+  }
 }
 
 void Debugger::select_process(pid_t pid) {
   if (pid == process_.pid()) return;
-  if (!retained_process_ || retained_process_->process.pid() != pid) {
+  const auto selected = retained_processes_.find(pid);
+  if (selected == retained_processes_.end()) {
     throw std::invalid_argument("cannot select an untracked process");
   }
   if (process_.state() != ProcessState::Stopped) {
     throw std::logic_error("process selection requires the active process to be stopped");
   }
-  if (retained_process_->process.state() != ProcessState::Stopped) {
+  if (selected->second.process.state() != ProcessState::Stopped) {
     throw std::logic_error("cannot select a process that is not stopped");
   }
   if (pending_breakpoint_step_) {
     throw std::logic_error("cannot switch processes while a breakpoint displaced step is pending");
   }
-  swap_active_process();
+  swap_active_process(pid);
 }
 
 std::vector<ThreadInfo> Debugger::threads() const {
@@ -253,7 +265,7 @@ std::vector<std::byte> Debugger::read_memory(std::uintptr_t address,
 }
 
 std::size_t Debugger::add_breakpoint(std::uintptr_t address) {
-  if (fork_follow_policy_ == ForkFollowPolicy::Both && !retained_process_) {
+  if (fork_follow_policy_ == ForkFollowPolicy::Both && retained_processes_.empty()) {
     throw std::logic_error(
         "process-scoped managed breakpoints can only be armed after fork retention");
   }
@@ -418,8 +430,8 @@ StopInfo Debugger::single_step(SignalPolicy policy) {
 }
 
 void Debugger::detach(SignalPolicy policy) {
-  if (retained_process_) {
-    throw std::logic_error("detach is not yet supported for a two-process session");
+  if (!retained_processes_.empty()) {
+    throw std::logic_error("detach is not yet supported for a multi-process session");
   }
   if (process_.origin() != ProcessOrigin::Attached) {
     throw std::logic_error("detach is only valid for an attached process");
@@ -523,7 +535,7 @@ void Debugger::reinsert_breakpoint(std::uintptr_t address, pid_t tid) {
 }
 
 WaitEvent Debugger::wait_active_process() {
-  if (retained_process_) return process_.wait_current();
+  if (!retained_processes_.empty()) return process_.wait_current();
   return process_.wait();
 }
 
@@ -538,10 +550,12 @@ StopInfo Debugger::wait_and_classify(bool expected_single_step) {
         watchpoint_register_snapshot_.reset();
       }
       if (process_.tids().empty()) {
-        if (has_live_retained_process()) {
+        if (const auto survivor = first_stopped_retained_process()) {
+          const auto terminal_pid = process_.pid();
           const auto terminal = make_stop(StopReason::ProcessExited, event.value, event.tid);
           stop_info_ = terminal;
-          swap_active_process();
+          swap_active_process(*survivor);
+          retained_processes_.erase(terminal_pid);
           stop_info_ = terminal;
           return stop_info_;
         }
@@ -560,10 +574,12 @@ StopInfo Debugger::wait_and_classify(bool expected_single_step) {
         watchpoint_register_snapshot_.reset();
       }
       if (process_.tids().empty()) {
-        if (has_live_retained_process()) {
+        if (const auto survivor = first_stopped_retained_process()) {
+          const auto terminal_pid = process_.pid();
           const auto terminal = make_stop(StopReason::ProcessSignaled, event.value, event.tid);
           stop_info_ = terminal;
-          swap_active_process();
+          swap_active_process(*survivor);
+          retained_processes_.erase(terminal_pid);
           stop_info_ = terminal;
           return stop_info_;
         }
@@ -700,15 +716,23 @@ StopInfo Debugger::wait_and_classify(bool expected_single_step) {
               "simultaneous fork ownership is currently supported for launched tracees only");
         }
         const auto parent_tids = process_.tids();
-        if (retained_process_ || parent_tids.size() != 1 || parent_tids.front() != event.tid ||
-            event.tid != parent) {
+        if (parent_tids.size() != 1 || parent_tids.front() != event.tid || event.tid != parent) {
           try {
             lowlevel::detach(child, SIGKILL);
           } catch (...) {
             (void)::kill(child, SIGKILL);
           }
           throw std::runtime_error(
-              "simultaneous fork ownership currently requires one single-thread parent/child pair");
+              "simultaneous fork ownership currently requires a single-thread active process");
+        }
+        if (1U + retained_processes_.size() >= kMaxProcessDomains) {
+          try {
+            lowlevel::detach(child, SIGKILL);
+          } catch (...) {
+            (void)::kill(child, SIGKILL);
+          }
+          throw std::runtime_error(
+              "simultaneous fork ownership currently supports at most three process domains");
         }
         if (!breakpoints_by_address_.empty() || pending_breakpoint_step_) {
           try {
@@ -749,10 +773,14 @@ StopInfo Debugger::wait_and_classify(bool expected_single_step) {
           }
 
           auto child_stop = make_stop(StopReason::Trap, SIGSTOP, child);
-          retained_process_.emplace(RetainedProcessDomain{
-              Process::adopt_stopped(child, process_.origin()), std::move(child_stop),
-              executable_path_, {}, {}, {}, {}, std::nullopt, child_watchpoint,
-              child_watchpoint_snapshot});
+          const auto inserted = retained_processes_.emplace(
+              child, RetainedProcessDomain{
+                         Process::adopt_stopped(child, process_.origin()), std::move(child_stop),
+                         executable_path_, {}, {}, {}, {}, std::nullopt, child_watchpoint,
+                         child_watchpoint_snapshot});
+          if (!inserted.second) {
+            throw std::logic_error("fork child process identity already exists in registry");
+          }
           child_retained = true;
         } catch (...) {
           if (!child_retained) {

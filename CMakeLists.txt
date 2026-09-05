@@ -173,6 +173,15 @@ if(BUILD_TESTING)
       $<TARGET_FILE:exec_driver_nopie>
       $<TARGET_FILE:exec_target_nopie>)
 
+  add_executable(nested_process_domain_integration tests/nested_process_domain_integration.cpp)
+  target_link_libraries(nested_process_domain_integration PRIVATE mdbg_core)
+  target_compile_options(nested_process_domain_integration PRIVATE
+    -Wall -Wextra -Wpedantic -Werror)
+  add_test(NAME nested_process_domain_integration_pie
+    COMMAND nested_process_domain_integration $<TARGET_FILE:exec_driver_pie>)
+  add_test(NAME nested_process_domain_integration_nopie
+    COMMAND nested_process_domain_integration $<TARGET_FILE:exec_driver_nopie>)
+
   add_executable(follow_child_cli_integration tests/follow_child_cli_integration.cpp)
   target_compile_options(follow_child_cli_integration PRIVATE -Wall -Wextra -Wpedantic -Werror)
   add_test(NAME follow_child_cli_integration_pie

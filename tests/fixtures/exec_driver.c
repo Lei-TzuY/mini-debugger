@@ -56,6 +56,31 @@ static int run_fork_topology(void) {
   return 0;
 }
 
+static int run_nested_fork_topology(void) {
+  if (block_sigchld() != 0) return 33;
+
+  const pid_t child = fork();
+  if (child == -1) return 34;
+  if (child == 0) {
+    const pid_t grandchild = fork();
+    if (grandchild == -1) _exit(35);
+    if (grandchild == 0) {
+      fork_shared_probe();
+      raise(SIGSTOP);
+      _exit(0);
+    }
+
+    if (wait_clean_child(grandchild) != 0) _exit(36);
+    fork_shared_probe();
+    raise(SIGSTOP);
+    _exit(0);
+  }
+
+  if (wait_clean_child(child) != 0) return 37;
+  fork_shared_probe();
+  return 0;
+}
+
 static int run_fork_exec_divergence(const char* target) {
   if (block_sigchld() != 0) return 29;
 
@@ -112,6 +137,9 @@ static void* exec_worker(void* argument) {
 int main(int argc, char** argv) {
   if (argc == 2 && strcmp(argv[1], "--fork-topology") == 0) {
     return run_fork_topology();
+  }
+  if (argc == 2 && strcmp(argv[1], "--nested-fork-topology") == 0) {
+    return run_nested_fork_topology();
   }
   if (argc == 3 && strcmp(argv[1], "--fork-exec-divergence") == 0) {
     return run_fork_exec_divergence(argv[2]);

@@ -106,22 +106,28 @@ Priority 4 proves that process ownership and executable-image ownership are inde
 
 This completes the bounded two-domain image-divergence milestone. It does **not** claim nested process trees, attached-origin multi-process exec, simultaneous vfork ownership, or arbitrary process-domain counts.
 
-## Priority 5: bounded nested regular-fork process-domain registry — current frontier
+## Priority 5: bounded nested regular-fork process-domain registry — complete for the three-domain milestone
 
-The next architectural boundary is the debugger's remaining `active + optional retained` two-slot process model. Once two processes may own different executable images safely, the next valuable step is to replace that fixed second slot with a real process-domain collection proven by one nested regular fork, not to add another rendering variant.
+Priority 5 removes the debugger's fixed `active + optional retained` two-slot architecture with one real nested regular-fork proof rather than extending the old model with another special slot.
 
-First coherent slice acceptance:
+- retained inactive domains are stored in a PID-keyed collection while the explicitly selected domain remains active; swapping a selected domain moves the complete `Process`, stop metadata, executable path, pending signals/thread starts, managed-breakpoint maps, displaced-step state, watchpoint, and DR restore snapshot as one ownership unit;
+- the first bounded collection is intentionally capped at three simultaneously owned process domains; a fourth domain is rejected before ownership is admitted rather than silently exceeding the proven lifecycle model;
+- a launched single-thread parent under `ForkFollowPolicy::Both` retains its child, the selected child performs a second regular fork, and the resulting parent/child/grandchild domains are all independently ptrace-owned and stopped;
+- `processes()` enumerates all three domains and `select_process(pid)` selects any stopped retained PID, rejects unknown/terminal identities, and never resumes a sibling implicitly;
+- process terminal handling removes only the exited/signaled domain and deterministically promotes the lowest-PID stopped survivor; grandchild exit preserves child+parent, child exit preserves parent, and the session terminates only after the final parent exits;
+- process-scoped managed breakpoint ownership is proven across all three copy-on-write domains at the same virtual address: parent and grandchild can simultaneously own physical `INT3` bytes while the child retains the original byte, and later child ownership does not rewrite the retained parent's breakpoint;
+- grandchild, child, and parent each hit and remove their own process-scoped breakpoint independently before their own terminal transition, proving that saved-byte and displaced-step ownership follow process selection rather than session-global virtual addresses;
+- a real `mdbg` subprocess selects the child for the second fork, enumerates all three domains with `info processes`, switches among grandchild/child/parent, surfaces independent SIGSTOP and terminal events, and exits without leaked process ownership;
+- the test-first candidate left 40/42 tests green and failed only at the old `simultaneous fork ownership currently requires one single-thread parent/child pair` guard; the final bounded registry passes all 42 PIE/non-PIE tests under GCC and Clang-large.
 
-- start from a launched single-thread process under `ForkFollowPolicy::Both`, retain its first regular-fork child, then allow one retained domain to perform a second regular `fork()` while the other domain remains traced, yielding three independently identifiable ptrace-owned process domains;
-- replace the single optional retained-process slot with a bounded process-domain registry keyed by process identity while preserving one explicitly selected active process and each domain's own TID registry, stop metadata, executable path, pending signals/thread starts, managed breakpoint map, displaced-step state, watchpoint, and DR restore snapshot;
-- make `processes()` and `select_process(pid)` operate over all retained stopped domains with deterministic rejection of unknown/running/terminal selections and no implicit resume of siblings;
-- route waits and terminal promotion without losing a third domain: one process exit/signal must remove or mark only that domain, preserve the remaining domains, and choose a deterministic stopped survivor without ending the session until the final owned process terminates;
-- prove copy-on-write/debug ownership across three domains by arming process-scoped state after retention and showing a breakpoint or controlled memory mutation in one process cannot rewrite the sibling domains;
-- make the CLI `info processes` / `process <pid>` workflow enumerate and switch among all three domains, preserving the correct executable identity and user-breakpoint registry for each selected process;
-- run a real PIE/non-PIE parent -> child -> grandchild regular-fork workflow through GCC and Clang-large, including a real `mdbg` subprocess and leak-free completion of all owned processes.
+The proven boundary remains deliberately finite: arbitrary-depth process trees, attached-origin nested retention, multi-thread-parent nested fork, simultaneous vfork ownership, and unbounded process-domain counts are not claimed. Those are breadth extensions and require their own evidence rather than being inferred from the three-domain proof.
 
-Do not generalize the first registry slice to unbounded arbitrary process trees, attached-origin nested forks, multi-thread-parent nested retention, or simultaneous vfork ownership. The purpose of Priority 5 is to remove the fixed two-slot architecture with one executable three-domain proof before increasing breadth.
+## Phase 3 closure
+
+Phase 3 is sealed for its architectural objective: a debugging session is no longer modeled as one immutable executable image or one fixed thread-group/process identity. The debugger now has explicit exec-image replacement, parent/child fork policies, simultaneous process ownership, per-domain image/debug state, and a real PID-keyed process-domain collection proven across a nested three-process topology.
+
+Further fork depth, attached-origin process-tree coverage, or vfork policy variants are not the next frontier by default. They should be added only when a concrete workflow demonstrates a missing lifecycle invariant. The next architectural phase moves above execution ownership into source-level debug data and value semantics; see `docs/phase-4-roadmap.md`.
 
 ## Selection rule
 
-Priority 5 is the current frontier. The next work must replace the optional second process slot with a process-domain collection and prove one real nested regular-fork three-domain workflow. Attached-origin lifecycle evidence, vfork follow-child/both, arbitrary-depth trees, expression evaluation, richer register classes, and convenience UI remain lower priority until process selection/lifecycle can preserve more than two ordinary fork domains. As in earlier phases, kernel/compiler variants are added only when a reproducible workflow demonstrates a gap.
+Phase 3 is complete. New work should start from the Phase 4 roadmap unless a reproducible regression invalidates one of the completed Phase 3 ownership contracts. Kernel/process-topology variants are evidence-driven maintenance, not a reason to keep extending this phase indefinitely.

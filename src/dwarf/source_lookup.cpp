@@ -45,6 +45,9 @@ constexpr std::uint64_t kDwAtDataMemberLocation = 0x38;
 constexpr std::uint64_t kDwAtEncoding = 0x3e;
 constexpr std::uint64_t kDwAtFrameBase = 0x40;
 constexpr std::uint64_t kDwAtType = 0x49;
+constexpr std::uint64_t kDwAtStrOffsetsBase = 0x72;
+constexpr std::uint64_t kDwAtAddrBase = 0x73;
+constexpr std::uint64_t kDwAtLoclistsBase = 0x8c;
 
 constexpr std::uint64_t kDwFormAddr = 0x01;
 constexpr std::uint64_t kDwFormData2 = 0x05;
@@ -57,7 +60,16 @@ constexpr std::uint64_t kDwFormRef4 = 0x13;
 constexpr std::uint64_t kDwFormSecOffset = 0x17;
 constexpr std::uint64_t kDwFormExprloc = 0x18;
 constexpr std::uint64_t kDwFormFlagPresent = 0x19;
+constexpr std::uint64_t kDwFormAddrx = 0x1b;
+constexpr std::uint64_t kDwFormLineStrp = 0x1f;
+constexpr std::uint64_t kDwFormImplicitConst = 0x21;
+constexpr std::uint64_t kDwFormLoclistx = 0x22;
+constexpr std::uint64_t kDwFormStrx1 = 0x25;
 
+constexpr std::uint8_t kDwUtCompile = 0x01;
+constexpr std::uint8_t kDwLleEndOfList = 0x00;
+constexpr std::uint8_t kDwLleOffsetPair = 0x04;
+constexpr std::uint8_t kDwLleBaseAddress = 0x06;
 constexpr std::uint8_t kDwOpReg0 = 0x50;
 constexpr std::uint8_t kDwOpReg5 = 0x55;
 constexpr std::uint8_t kDwOpReg6 = 0x56;
@@ -72,12 +84,17 @@ struct DebugSections {
   std::vector<std::byte> info;
   std::vector<std::byte> abbrev;
   std::vector<std::byte> strings;
+  std::vector<std::byte> line_strings;
   std::vector<std::byte> locations;
+  std::vector<std::byte> location_lists;
+  std::vector<std::byte> addresses;
+  std::vector<std::byte> string_offsets;
 };
 
 struct AttributeSpec {
   std::uint64_t name;
   std::uint64_t form;
+  std::int64_t implicit_constant{0};
 };
 
 struct Abbreviation {
@@ -117,6 +134,13 @@ struct ValueType {
   bool is_signed;
   LocalValueKind kind;
   std::vector<AggregateMemberType> members;
+};
+
+struct LoclistsContribution {
+  std::size_t start;
+  std::size_t offsets_base;
+  std::size_t end;
+  std::uint32_t offset_count;
 };
 
 std::string normalized_source_path(const std::filesystem::path& path) {
@@ -254,17 +278,27 @@ std::map<std::string, std::vector<std::byte>> read_named_sections(
 
 DebugSections read_debug_sections(const std::string& path) {
   const auto sections = read_named_sections(
-      path, {".debug_info", ".debug_abbrev", ".debug_str", ".debug_loc"});
+      path, {".debug_info", ".debug_abbrev", ".debug_str", ".debug_line_str",
+             ".debug_loc", ".debug_loclists", ".debug_addr", ".debug_str_offsets"});
   const auto info = sections.find(".debug_info");
   const auto abbrev = sections.find(".debug_abbrev");
   const auto strings = sections.find(".debug_str");
   if (info == sections.end() || abbrev == sections.end() || strings == sections.end()) {
-    throw std::runtime_error("local-value inspection requires .debug_info, .debug_abbrev, and .debug_str");
+    throw std::runtime_error(
+        "local-value inspection requires .debug_info, .debug_abbrev, and .debug_str");
   }
-  const auto locations = sections.find(".debug_loc");
-  return DebugSections{info->second, abbrev->second, strings->second,
-                       locations == sections.end() ? std::vector<std::byte>{}
-                                                   : locations->second};
+  const auto section_or_empty = [&](std::string_view name) {
+    const auto it = sections.find(std::string(name));
+    return it == sections.end() ? std::vector<std::byte>{} : it->second;
+  };
+  return DebugSections{info->second,
+                       abbrev->second,
+                       strings->second,
+                       section_or_empty(".debug_line_str"),
+                       section_or_empty(".debug_loc"),
+                       section_or_empty(".debug_loclists"),
+                       section_or_empty(".debug_addr"),
+                       section_or_empty(".debug_str_offsets")};
 }
 
 std::map<std::uint64_t, Abbreviation> parse_abbreviations(
@@ -287,7 +321,12 @@ std::map<std::uint64_t, Abbreviation> parse_abbreviations(
       if (name == 0 || form == 0) {
         throw std::runtime_error("malformed DWARF abbreviation attribute/form pair");
       }
-      entry.attributes.push_back(AttributeSpec{name, form});
+      std::int64_t implicit_constant = 0;
+      if (form == kDwFormImplicitConst) {
+        implicit_constant =
+            read_sleb(bytes, cursor, bytes.size(), "DW_FORM_implicit_const value");
+      }
+      entry.attributes.push_back(AttributeSpec{name, form, implicit_constant});
     }
     if (!result.emplace(code, std::move(entry)).second) {
       throw std::runtime_error("duplicate DWARF abbreviation code");
@@ -321,15 +360,30 @@ AttributeValue read_attribute(const AttributeSpec& spec, const DebugSections& se
       value.text = read_c_string(sections.info, cursor, unit_end, "DW_FORM_string");
       break;
     case kDwFormStrp: {
-      const auto offset = read_scalar<std::uint32_t>(sections.info, cursor, unit_end, "DW_FORM_strp");
-      if (offset >= sections.strings.size()) throw std::runtime_error("DW_FORM_strp offset is out of range");
+      const auto offset = read_scalar<std::uint32_t>(sections.info, cursor, unit_end,
+                                                     "DW_FORM_strp");
+      if (offset >= sections.strings.size()) {
+        throw std::runtime_error("DW_FORM_strp offset is out of range");
+      }
       auto string_cursor = static_cast<std::size_t>(offset);
       value.text = read_c_string(sections.strings, string_cursor, sections.strings.size(),
                                  "DW_FORM_strp string");
       break;
     }
+    case kDwFormLineStrp: {
+      const auto offset = read_scalar<std::uint32_t>(sections.info, cursor, unit_end,
+                                                     "DW_FORM_line_strp");
+      if (sections.line_strings.empty() || offset >= sections.line_strings.size()) {
+        throw std::runtime_error("DW_FORM_line_strp offset is out of range");
+      }
+      auto string_cursor = static_cast<std::size_t>(offset);
+      value.text = read_c_string(sections.line_strings, string_cursor,
+                                 sections.line_strings.size(), "DW_FORM_line_strp string");
+      break;
+    }
     case kDwFormRef4: {
-      const auto offset = read_scalar<std::uint32_t>(sections.info, cursor, unit_end, "DW_FORM_ref4");
+      const auto offset = read_scalar<std::uint32_t>(sections.info, cursor, unit_end,
+                                                     "DW_FORM_ref4");
       if (offset > std::numeric_limits<std::size_t>::max() - unit_start) {
         throw std::runtime_error("DW_FORM_ref4 overflows debug-info offset");
       }
@@ -342,7 +396,9 @@ AttributeValue read_attribute(const AttributeSpec& spec, const DebugSections& se
       break;
     case kDwFormExprloc: {
       const auto length = read_uleb(sections.info, cursor, unit_end, "DW_FORM_exprloc length");
-      if (length > unit_end - cursor) throw std::runtime_error("DW_FORM_exprloc extends past unit");
+      if (length > unit_end - cursor) {
+        throw std::runtime_error("DW_FORM_exprloc extends past unit");
+      }
       const auto end = cursor + static_cast<std::size_t>(length);
       value.expression.assign(sections.info.begin() + cursor, sections.info.begin() + end);
       cursor = end;
@@ -350,6 +406,19 @@ AttributeValue read_attribute(const AttributeSpec& spec, const DebugSections& se
     }
     case kDwFormFlagPresent:
       value.number = 1;
+      break;
+    case kDwFormAddrx:
+    case kDwFormLoclistx:
+      value.number = read_uleb(sections.info, cursor, unit_end,
+                               spec.form == kDwFormAddrx ? "DW_FORM_addrx"
+                                                        : "DW_FORM_loclistx");
+      break;
+    case kDwFormStrx1:
+      value.number = read_scalar<std::uint8_t>(sections.info, cursor, unit_end,
+                                               "DW_FORM_strx1");
+      break;
+    case kDwFormImplicitConst:
+      value.number = static_cast<std::uint64_t>(spec.implicit_constant);
       break;
     default:
       throw std::runtime_error("unsupported DWARF form in local-value inspection: " +
@@ -360,7 +429,9 @@ AttributeValue read_attribute(const AttributeSpec& spec, const DebugSections& se
 
 const AttributeValue* attribute(const Die& die, std::uint64_t name) {
   const auto it = std::find_if(die.attributes.begin(), die.attributes.end(),
-                               [name](const AttributeValue& value) { return value.name == name; });
+                               [name](const AttributeValue& value) {
+                                 return value.name == name;
+                               });
   return it == die.attributes.end() ? nullptr : &*it;
 }
 
@@ -382,7 +453,8 @@ bool is_descendant_of(const std::vector<Die>& dies, std::size_t child,
   return false;
 }
 
-std::uint64_t add_unsigned(std::uint64_t base, std::uint64_t offset, const char* what) {
+std::uint64_t add_unsigned(std::uint64_t base, std::uint64_t offset,
+                           const char* what) {
   if (offset > std::numeric_limits<std::uint64_t>::max() - base) {
     throw std::runtime_error(std::string(what) + " overflows address space");
   }
@@ -392,14 +464,195 @@ std::uint64_t add_unsigned(std::uint64_t base, std::uint64_t offset, const char*
 std::uint64_t add_signed(std::uint64_t base, std::int64_t offset, const char* what) {
   if (offset >= 0) return add_unsigned(base, static_cast<std::uint64_t>(offset), what);
   const auto magnitude = static_cast<std::uint64_t>(-(offset + 1)) + 1;
-  if (magnitude > base) throw std::runtime_error(std::string(what) + " underflows address space");
+  if (magnitude > base) {
+    throw std::runtime_error(std::string(what) + " underflows address space");
+  }
   return base - magnitude;
 }
 
+std::string indexed_string(const DebugSections& sections, std::uint64_t base,
+                           std::uint64_t index) {
+  if (sections.string_offsets.empty()) {
+    throw std::runtime_error("DW_FORM_strx1 requires .debug_str_offsets");
+  }
+  if (base < 8 || base > sections.string_offsets.size()) {
+    throw std::runtime_error("DW_AT_str_offsets_base is out of range");
+  }
+  const auto contribution_start = static_cast<std::size_t>(base - 8);
+  const auto length = read_at<std::uint32_t>(sections.string_offsets, contribution_start,
+                                             ".debug_str_offsets length");
+  if (length == 0xffffffffU || length < 4 ||
+      length > sections.string_offsets.size() - contribution_start - 4) {
+    throw std::runtime_error("unsupported .debug_str_offsets contribution");
+  }
+  const auto contribution_end = contribution_start + 4 + static_cast<std::size_t>(length);
+  if (read_at<std::uint16_t>(sections.string_offsets, contribution_start + 4,
+                             ".debug_str_offsets version") != 5 ||
+      read_at<std::uint16_t>(sections.string_offsets, contribution_start + 6,
+                             ".debug_str_offsets padding") != 0) {
+    throw std::runtime_error("unsupported .debug_str_offsets header");
+  }
+  if (index > (std::numeric_limits<std::size_t>::max() - static_cast<std::size_t>(base)) / 4) {
+    throw std::runtime_error("DW_FORM_strx1 index overflows offset table");
+  }
+  const auto entry = static_cast<std::size_t>(base) + static_cast<std::size_t>(index) * 4;
+  if (entry > contribution_end || 4 > contribution_end - entry) {
+    throw std::runtime_error("DW_FORM_strx1 index is out of range");
+  }
+  const auto string_offset = read_at<std::uint32_t>(sections.string_offsets, entry,
+                                                     "DW_FORM_strx1 offset");
+  if (string_offset >= sections.strings.size()) {
+    throw std::runtime_error("DW_FORM_strx1 string offset is out of range");
+  }
+  auto cursor = static_cast<std::size_t>(string_offset);
+  return read_c_string(sections.strings, cursor, sections.strings.size(),
+                       "DW_FORM_strx1 string");
+}
+
+std::uint64_t indexed_address(const DebugSections& sections, std::uint64_t base,
+                              std::uint64_t index) {
+  if (sections.addresses.empty()) throw std::runtime_error("DW_FORM_addrx requires .debug_addr");
+  if (base < 8 || base > sections.addresses.size()) {
+    throw std::runtime_error("DW_AT_addr_base is out of range");
+  }
+  const auto contribution_start = static_cast<std::size_t>(base - 8);
+  const auto length = read_at<std::uint32_t>(sections.addresses, contribution_start,
+                                             ".debug_addr length");
+  if (length == 0xffffffffU || length < 4 ||
+      length > sections.addresses.size() - contribution_start - 4) {
+    throw std::runtime_error("unsupported .debug_addr contribution");
+  }
+  const auto contribution_end = contribution_start + 4 + static_cast<std::size_t>(length);
+  if (read_at<std::uint16_t>(sections.addresses, contribution_start + 4,
+                             ".debug_addr version") != 5 ||
+      read_at<std::uint8_t>(sections.addresses, contribution_start + 6,
+                            ".debug_addr address size") != 8 ||
+      read_at<std::uint8_t>(sections.addresses, contribution_start + 7,
+                            ".debug_addr segment size") != 0) {
+    throw std::runtime_error("unsupported .debug_addr header");
+  }
+  if (index > (std::numeric_limits<std::size_t>::max() - static_cast<std::size_t>(base)) / 8) {
+    throw std::runtime_error("DW_FORM_addrx index overflows address table");
+  }
+  const auto entry = static_cast<std::size_t>(base) + static_cast<std::size_t>(index) * 8;
+  if (entry > contribution_end || 8 > contribution_end - entry) {
+    throw std::runtime_error("DW_FORM_addrx index is out of range");
+  }
+  return read_at<std::uint64_t>(sections.addresses, entry, "DW_FORM_addrx address");
+}
+
+LoclistsContribution loclists_contribution_at(const DebugSections& sections,
+                                               std::size_t start) {
+  if (sections.location_lists.empty()) {
+    throw std::runtime_error("DWARF5 local value location list requires .debug_loclists");
+  }
+  if (start > sections.location_lists.size() ||
+      12 > sections.location_lists.size() - start) {
+    throw std::runtime_error(".debug_loclists header is truncated");
+  }
+  const auto length = read_at<std::uint32_t>(sections.location_lists, start,
+                                             ".debug_loclists length");
+  if (length == 0xffffffffU || length < 8 ||
+      length > sections.location_lists.size() - start - 4) {
+    throw std::runtime_error("unsupported .debug_loclists contribution");
+  }
+  const auto end = start + 4 + static_cast<std::size_t>(length);
+  if (read_at<std::uint16_t>(sections.location_lists, start + 4,
+                             ".debug_loclists version") != 5 ||
+      read_at<std::uint8_t>(sections.location_lists, start + 6,
+                            ".debug_loclists address size") != 8 ||
+      read_at<std::uint8_t>(sections.location_lists, start + 7,
+                            ".debug_loclists segment size") != 0) {
+    throw std::runtime_error("unsupported .debug_loclists header");
+  }
+  const auto offset_count = read_at<std::uint32_t>(sections.location_lists, start + 8,
+                                                   ".debug_loclists offset count");
+  const auto offsets_base = start + 12;
+  if (offset_count > (end - offsets_base) / 4) {
+    throw std::runtime_error(".debug_loclists offset table extends past contribution");
+  }
+  return LoclistsContribution{start, offsets_base, end, offset_count};
+}
+
+LoclistsContribution loclists_contribution_for_offset(const DebugSections& sections,
+                                                      std::uint64_t offset) {
+  if (offset > std::numeric_limits<std::size_t>::max()) {
+    throw std::runtime_error("DWARF5 location-list offset is too large");
+  }
+  const auto wanted = static_cast<std::size_t>(offset);
+  std::size_t start = 0;
+  while (start < sections.location_lists.size()) {
+    const auto contribution = loclists_contribution_at(sections, start);
+    if (wanted >= contribution.offsets_base && wanted < contribution.end) {
+      return contribution;
+    }
+    if (contribution.end <= start) {
+      throw std::runtime_error(".debug_loclists parser did not advance");
+    }
+    start = contribution.end;
+  }
+  throw std::runtime_error("DWARF5 location-list offset is outside all contributions");
+}
+
+std::uint64_t indexed_loclist_offset(const DebugSections& sections, std::uint64_t base,
+                                     std::uint64_t index) {
+  if (base < 12 || base > std::numeric_limits<std::size_t>::max()) {
+    throw std::runtime_error("DW_AT_loclists_base is out of range");
+  }
+  const auto contribution =
+      loclists_contribution_at(sections, static_cast<std::size_t>(base) - 12);
+  if (contribution.offsets_base != base) {
+    throw std::runtime_error("DW_AT_loclists_base does not point at the offset table");
+  }
+  if (index >= contribution.offset_count) {
+    throw std::runtime_error("DW_FORM_loclistx index is out of range");
+  }
+  const auto entry = contribution.offsets_base + static_cast<std::size_t>(index) * 4;
+  const auto relative = read_at<std::uint32_t>(sections.location_lists, entry,
+                                               "DW_FORM_loclistx offset");
+  const auto absolute = add_unsigned(base, relative, "DW_FORM_loclistx offset");
+  if (absolute >= contribution.end) {
+    throw std::runtime_error("DW_FORM_loclistx resolves outside its contribution");
+  }
+  return absolute;
+}
+
+void resolve_dwarf5_indexes(const DebugSections& sections, std::vector<Die>& dies) {
+  if (dies.empty() || dies.front().parent) {
+    throw std::runtime_error("DWARF5 unit has no root DIE");
+  }
+  const auto* str_base = attribute(dies.front(), kDwAtStrOffsetsBase);
+  const auto* addr_base = attribute(dies.front(), kDwAtAddrBase);
+  const auto* loclists_base = attribute(dies.front(), kDwAtLoclistsBase);
+
+  for (auto& die : dies) {
+    for (auto& value : die.attributes) {
+      if (value.form == kDwFormStrx1) {
+        if (str_base == nullptr || str_base->form != kDwFormSecOffset) {
+          throw std::runtime_error("DW_FORM_strx1 requires DW_AT_str_offsets_base");
+        }
+        value.text = indexed_string(sections, str_base->number, value.number);
+      } else if (value.form == kDwFormAddrx) {
+        if (addr_base == nullptr || addr_base->form != kDwFormSecOffset) {
+          throw std::runtime_error("DW_FORM_addrx requires DW_AT_addr_base");
+        }
+        value.number = indexed_address(sections, addr_base->number, value.number);
+        value.form = kDwFormAddr;
+      } else if (value.form == kDwFormLoclistx) {
+        if (loclists_base == nullptr || loclists_base->form != kDwFormSecOffset) {
+          throw std::runtime_error("DW_FORM_loclistx requires DW_AT_loclists_base");
+        }
+        value.number = indexed_loclist_offset(sections, loclists_base->number, value.number);
+      }
+    }
+  }
+}
+
 std::vector<Die> parse_unit_dies(const DebugSections& sections, std::size_t unit_start,
-                                 std::size_t& next_unit) {
+                                 std::size_t& next_unit, std::uint16_t& unit_version) {
   std::size_t cursor = unit_start;
-  const auto unit_length = read_scalar<std::uint32_t>(sections.info, cursor, sections.info.size(),
+  const auto unit_length = read_scalar<std::uint32_t>(sections.info, cursor,
+                                                      sections.info.size(),
                                                       "DWARF unit length");
   if (unit_length == 0xffffffffU) throw std::runtime_error("DWARF64 debug info is unsupported");
   if (unit_length > sections.info.size() - cursor) {
@@ -407,14 +660,32 @@ std::vector<Die> parse_unit_dies(const DebugSections& sections, std::size_t unit
   }
   const auto unit_end = cursor + static_cast<std::size_t>(unit_length);
   next_unit = unit_end;
-  const auto version = read_scalar<std::uint16_t>(sections.info, cursor, unit_end,
-                                                  "DWARF unit version");
-  if (version != 4) throw std::runtime_error("only DWARF4 local-value units are supported");
-  const auto abbrev_offset = read_scalar<std::uint32_t>(sections.info, cursor, unit_end,
-                                                        "DWARF abbreviation offset");
-  const auto address_size = read_scalar<std::uint8_t>(sections.info, cursor, unit_end,
-                                                      "DWARF address size");
-  if (address_size != 8) throw std::runtime_error("only 8-byte DWARF4 addresses are supported");
+  unit_version = read_scalar<std::uint16_t>(sections.info, cursor, unit_end,
+                                            "DWARF unit version");
+
+  std::uint32_t abbrev_offset = 0;
+  std::uint8_t address_size = 0;
+  if (unit_version == 4) {
+    abbrev_offset = read_scalar<std::uint32_t>(sections.info, cursor, unit_end,
+                                               "DWARF abbreviation offset");
+    address_size = read_scalar<std::uint8_t>(sections.info, cursor, unit_end,
+                                             "DWARF address size");
+  } else if (unit_version == 5) {
+    const auto unit_type = read_scalar<std::uint8_t>(sections.info, cursor, unit_end,
+                                                     "DWARF5 unit type");
+    if (unit_type != kDwUtCompile) {
+      throw std::runtime_error("only DWARF5 compile units are supported for local values");
+    }
+    address_size = read_scalar<std::uint8_t>(sections.info, cursor, unit_end,
+                                             "DWARF5 address size");
+    abbrev_offset = read_scalar<std::uint32_t>(sections.info, cursor, unit_end,
+                                               "DWARF5 abbreviation offset");
+  } else {
+    throw std::runtime_error("only DWARF4/5 local-value units are supported");
+  }
+  if (address_size != 8) {
+    throw std::runtime_error("only 8-byte DWARF local-value addresses are supported");
+  }
   const auto abbreviations = parse_abbreviations(sections.abbrev, abbrev_offset);
 
   std::vector<Die> dies;
@@ -443,6 +714,7 @@ std::vector<Die> parse_unit_dies(const DebugSections& sections, std::size_t unit
   if (cursor != unit_end) {
     throw std::runtime_error("unexpected trailing data in DWARF compilation unit");
   }
+  if (unit_version == 5) resolve_dwarf5_indexes(sections, dies);
   return dies;
 }
 
@@ -584,7 +856,9 @@ ValueType resolve_value_type(const std::vector<Die>& dies, std::uint64_t type_of
         }
         members.push_back(AggregateMemberType{member_name->text, offset, integer});
       }
-      if (members.empty()) throw std::runtime_error("local struct has no supported direct members");
+      if (members.empty()) {
+        throw std::runtime_error("local struct has no supported direct members");
+      }
       return ValueType{struct_size, false, LocalValueKind::Structure, std::move(members)};
     }
     throw std::runtime_error(
@@ -605,10 +879,9 @@ std::int64_t fbreg_offset(const std::vector<std::byte>& expression) {
   return offset;
 }
 
-std::vector<std::byte> active_location_expression(const DebugSections& sections,
-                                                  std::uint64_t offset,
-                                                  std::uint64_t virtual_pc,
-                                                  std::uint64_t initial_base) {
+std::vector<std::byte> active_dwarf4_location_expression(
+    const DebugSections& sections, std::uint64_t offset, std::uint64_t virtual_pc,
+    std::uint64_t initial_base) {
   if (sections.locations.empty()) {
     throw std::runtime_error("local value location list requires .debug_loc");
   }
@@ -650,6 +923,66 @@ std::vector<std::byte> active_location_expression(const DebugSections& sections,
     cursor = expression_end;
   }
   throw std::runtime_error("local value has no location for the current PC");
+}
+
+std::vector<std::byte> active_dwarf5_location_expression(
+    const DebugSections& sections, std::uint64_t offset, std::uint64_t virtual_pc,
+    std::uint64_t initial_base) {
+  const auto contribution = loclists_contribution_for_offset(sections, offset);
+  std::size_t cursor = static_cast<std::size_t>(offset);
+  std::uint64_t base_address = initial_base;
+  while (cursor < contribution.end) {
+    const auto entry = read_scalar<std::uint8_t>(sections.location_lists, cursor,
+                                                 contribution.end,
+                                                 "DWARF5 location-list entry");
+    if (entry == kDwLleEndOfList) break;
+    if (entry == kDwLleBaseAddress) {
+      base_address = read_scalar<std::uint64_t>(sections.location_lists, cursor,
+                                                contribution.end,
+                                                "DW_LLE_base_address");
+      continue;
+    }
+    if (entry != kDwLleOffsetPair) {
+      throw std::runtime_error("unsupported DWARF5 location-list entry: " +
+                               std::to_string(entry));
+    }
+
+    const auto begin = read_uleb(sections.location_lists, cursor, contribution.end,
+                                 "DW_LLE_offset_pair begin");
+    const auto end = read_uleb(sections.location_lists, cursor, contribution.end,
+                               "DW_LLE_offset_pair end");
+    const auto length = read_uleb(sections.location_lists, cursor, contribution.end,
+                                  "DWARF5 location expression length");
+    if (length > contribution.end - cursor) {
+      throw std::runtime_error("DWARF5 location expression extends past contribution");
+    }
+    const auto expression_end = cursor + static_cast<std::size_t>(length);
+    const auto range_begin = add_unsigned(base_address, begin, "DWARF5 location range begin");
+    const auto range_end = add_unsigned(base_address, end, "DWARF5 location range end");
+    if (range_end < range_begin) {
+      throw std::runtime_error("DWARF5 location-list range is reversed");
+    }
+    if (virtual_pc >= range_begin && virtual_pc < range_end) {
+      return std::vector<std::byte>(sections.location_lists.begin() + cursor,
+                                    sections.location_lists.begin() + expression_end);
+    }
+    cursor = expression_end;
+  }
+  throw std::runtime_error("local value has no location for the current PC");
+}
+
+std::vector<std::byte> active_location_expression(const DebugSections& sections,
+                                                  std::uint64_t offset,
+                                                  std::uint64_t virtual_pc,
+                                                  std::uint64_t initial_base,
+                                                  std::uint16_t unit_version) {
+  if (unit_version == 4) {
+    return active_dwarf4_location_expression(sections, offset, virtual_pc, initial_base);
+  }
+  if (unit_version == 5) {
+    return active_dwarf5_location_expression(sections, offset, virtual_pc, initial_base);
+  }
+  throw std::runtime_error("unsupported DWARF unit version for location list");
 }
 
 std::uint64_t frame_base(const Debugger& debugger, const ElfFile& module,
@@ -708,7 +1041,8 @@ std::optional<LocalScalarValue> inspect_unit(const DebugSections& sections,
                                              std::string_view name,
                                              std::size_t unit_start,
                                              std::size_t& next_unit) {
-  const auto dies = parse_unit_dies(sections, unit_start, next_unit);
+  std::uint16_t unit_version = 0;
+  const auto dies = parse_unit_dies(sections, unit_start, next_unit, unit_version);
   std::uint64_t compilation_unit_base = 0;
   for (const auto& die : dies) {
     if (die.parent) continue;
@@ -782,9 +1116,9 @@ std::optional<LocalScalarValue> inspect_unit(const DebugSections& sections,
   std::vector<std::byte> location_expression;
   if (location->form == kDwFormExprloc) {
     location_expression = location->expression;
-  } else if (location->form == kDwFormSecOffset) {
+  } else if (location->form == kDwFormSecOffset || location->form == kDwFormLoclistx) {
     location_expression = active_location_expression(
-        sections, location->number, virtual_pc, compilation_unit_base);
+        sections, location->number, virtual_pc, compilation_unit_base, unit_version);
   } else {
     throw std::runtime_error("local value has no supported DW_AT_location form");
   }
@@ -872,7 +1206,7 @@ LocalScalarValue inspect_local_value(const Debugger& debugger,
     if (next <= unit) throw std::runtime_error("DWARF parser did not advance to the next unit");
     unit = next;
   }
-  throw std::runtime_error("current PC is not covered by a supported DWARF4 subprogram");
+  throw std::runtime_error("current PC is not covered by a supported DWARF4/5 subprogram");
 }
 
 LocalIntegerValue inspect_local_integer(const Debugger& debugger,
@@ -924,7 +1258,6 @@ std::optional<std::uint64_t> DwarfLineTable::find_runtime_source(
     pid_t pid, std::string_view file, std::uint64_t line, const ElfFile& elf) const {
   const auto virtual_address = find_virtual_source(file, line);
   if (!virtual_address) return std::nullopt;
-
   const auto bias = elf.load_bias(pid);
   if (*virtual_address > std::numeric_limits<std::uint64_t>::max() - bias) {
     throw std::runtime_error("source address overflows runtime address space");

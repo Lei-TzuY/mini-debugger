@@ -88,6 +88,14 @@ if(BUILD_TESTING)
   target_compile_options(formal_parameter_fixture_nopie PRIVATE -O1 -g -gdwarf-4 -fno-pie)
   target_link_options(formal_parameter_fixture_nopie PRIVATE -no-pie)
 
+  add_executable(formal_parameter_fixture_v5_pie tests/fixtures/formal_parameter_fixture.c)
+  target_compile_options(formal_parameter_fixture_v5_pie PRIVATE -O1 -g -gdwarf-5 -fPIE)
+  target_link_options(formal_parameter_fixture_v5_pie PRIVATE -pie)
+
+  add_executable(formal_parameter_fixture_v5_nopie tests/fixtures/formal_parameter_fixture.c)
+  target_compile_options(formal_parameter_fixture_v5_nopie PRIVATE -O1 -g -gdwarf-5 -fno-pie)
+  target_link_options(formal_parameter_fixture_v5_nopie PRIVATE -no-pie)
+
   add_executable(pointer_value_fixture_pie tests/fixtures/pointer_value_fixture.c)
   target_compile_options(pointer_value_fixture_pie PRIVATE -O0 -g -gdwarf-4 -fPIE)
   target_link_options(pointer_value_fixture_pie PRIVATE -pie)
@@ -329,6 +337,18 @@ if(BUILD_TESTING)
       $<TARGET_FILE:debugger_fixture_stripped>
       $<TARGET_FILE:debug_line_fixture_v5>
       $<TARGET_FILE:formal_parameter_fixture_nopie>)
+
+  add_executable(dwarf5_local_value_integration tests/dwarf5_local_value_integration.cpp)
+  target_link_libraries(dwarf5_local_value_integration PRIVATE mdbg_core)
+  target_compile_options(dwarf5_local_value_integration PRIVATE -Wall -Wextra -Wpedantic -Werror)
+  add_test(NAME dwarf5_local_value_integration_pie
+    COMMAND dwarf5_local_value_integration
+      $<TARGET_FILE:formal_parameter_fixture_v5_pie>
+      $<TARGET_FILE:mdbg>)
+  add_test(NAME dwarf5_local_value_integration_nopie
+    COMMAND dwarf5_local_value_integration
+      $<TARGET_FILE:formal_parameter_fixture_v5_nopie>
+      $<TARGET_FILE:mdbg>)
 
   add_executable(pointer_value_integration tests/pointer_value_integration.cpp)
   target_link_libraries(pointer_value_integration PRIVATE mdbg_core)

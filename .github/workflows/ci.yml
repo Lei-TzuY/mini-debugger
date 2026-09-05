@@ -29,5 +29,11 @@ jobs:
         run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_FLAGS="${{ matrix.cxx_flags }}"
       - name: Build
         run: cmake --build build --parallel 2
+      - name: Diagnose arithmetic local DWARF
+        run: |
+          echo '=== arithmetic_local DIE ==='
+          readelf --debug-dump=info build/formal_parameter_fixture_v5_pie | grep -A14 -B8 'arithmetic_local' || true
+          echo '=== location lists ==='
+          readelf --debug-dump=loc build/formal_parameter_fixture_v5_pie || true
       - name: Test
         run: ctest --test-dir build --output-on-failure --timeout 30

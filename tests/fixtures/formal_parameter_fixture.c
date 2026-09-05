@@ -80,12 +80,12 @@ __attribute__((noinline)) uint64_t inspect_indirect_local(uint64_t* ptr) {
 
 static __attribute__((always_inline)) inline uint64_t inspect_inlined_local(
     uint64_t parameter) {
-  uint64_t inline_local = parameter ^ INLINE_LOCAL_XOR;
+  volatile uint64_t inline_local = parameter ^ INLINE_LOCAL_XOR;
   __asm__ volatile(".globl inlined_local_probe\n"
                    "inlined_local_probe:\n"
                    "nop\n"
-                   : "+D"(inline_local)
                    :
+                   : "m"(inline_local)
                    : "memory");
   return inline_local;
 }

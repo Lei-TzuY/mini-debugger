@@ -87,10 +87,11 @@ Completed slices:
 
 - P6-A: the completed P4 scheduling contract is exposed to users through `info threads` and `thread <tid>`. Thread listing reports each tracked TID and state with an explicit active marker; selection delegates to the existing single-runner debugger API rather than duplicating scheduling policy in the CLI. A real CLI subprocess integration drives a pthread tracee through thread creation, leader/worker selection, selected-thread register access, worker execution/exit, active ownership returning to the leader, and clean process exit in both PIE and non-PIE runs.
 - P6-B: source locations now render a bounded real-file excerpt with an explicit current-line marker while preserving the existing address and `file:line[:column]` output. The `list`/`l` command re-renders the active RIP, and source `step`, `next`, `finish`, plus explicit `line` lookup share the same rendering path. Missing or synthetic source paths remain non-fatal and produce a deterministic unavailable message. A real `mdbg` subprocess regression drives both PIE and non-PIE tracees through a managed breakpoint, manual listing, and source stepping against the repository's actual fixture source file.
+- P6-C: module ownership now survives the product boundary instead of being discarded after module-aware resolution. Breakpoint stops render `module!symbol`, backtrace frames independently qualify both symbol and source ownership, and `list`/`line`/`finish` render `module!file:line`. Source `step`/`next` preserve the resolved module path in `SourceStepResult`, so source motion uses the same qualification without re-resolving or duplicating routing policy in the CLI. The shared-object PIE/non-PIE integration drives a real `mdbg` subprocess through a shared-library breakpoint, `bt`, `list`, and source `step`, while the existing direct source-step/next checks verify the result API carries the owning ELF image.
 
 Next productization candidates:
 
-- clearer module-qualified symbol/source rendering;
+- source-path remapping for debug information whose recorded build path no longer contains the source file; the current deterministic `source unavailable` behavior is correct but a real shared-library workflow demonstrates the usability gap;
 - CLI help/usage consistency beyond the commands already exercised by integration;
 - release packaging and examples after the interactive workflows are coherent.
 

@@ -14,6 +14,11 @@ static volatile sig_atomic_t signal_handler_count = 0;
 static volatile sig_atomic_t signal_handler_tid = 0;
 static volatile sig_atomic_t signal_worker_tid = 0;
 static volatile sig_atomic_t selection_release = 0;
+static volatile sig_atomic_t register_release = 0;
+static volatile sig_atomic_t register_worker_ready = 0;
+
+#define REGISTER_MUTATION_SEED UINT64_C(0x13579bdf2468ace0)
+#define REGISTER_MUTATION_VALUE UINT64_C(0xa5a55a5ac3c33c3c)
 
 __attribute__((noinline)) void breakpoint_one(void) {
   __asm__ volatile("nop" ::: "memory");
@@ -72,6 +77,11 @@ static void worker_signal_handler(int signal_number) {
 static void release_selection_worker(int signal_number) {
   (void)signal_number;
   selection_release = 1;
+}
+
+static void release_register_worker(int signal_number) {
+  (void)signal_number;
+  register_release = 1;
 }
 
 static void* lifecycle_worker(void* argument) {
@@ -202,6 +212,35 @@ static int run_threaded_watchpoint_attach(const char* path) {
   return worker_marker == 8 && fixture_value == 0x112233445566778aULL ? 0 : 108;
 }
 
+static void* register_mutation_worker(void* argument) {
+  (void)argument;
+  register uint64_t marker __asm__("r12") = REGISTER_MUTATION_SEED;
+  __asm__ volatile("" : "+r"(marker) : : "memory");
+  register_worker_ready = 1;
+  while (!register_release) {
+    __asm__ volatile("pause" : "+r"(marker) : : "memory");
+  }
+  return (void*)(uintptr_t)(marker == REGISTER_MUTATION_VALUE ? 0 : 1);
+}
+
+static int run_threaded_register_mutation_attach(const char* path) {
+  struct sigaction action;
+  memset(&action, 0, sizeof(action));
+  action.sa_handler = release_register_worker;
+  sigemptyset(&action.sa_mask);
+  if (sigaction(SIGUSR2, &action, NULL) != 0) return 109;
+
+  register_release = 0;
+  register_worker_ready = 0;
+  pthread_t thread;
+  if (pthread_create(&thread, NULL, register_mutation_worker, NULL) != 0) return 110;
+  while (!register_worker_ready) usleep(1000);
+  publish_addresses(path);
+  void* result = NULL;
+  if (pthread_join(thread, &result) != 0) return 111;
+  return result == NULL ? 0 : 112;
+}
+
 int main(int argc, char** argv) {
   if (argc == 2 && strcmp(argv[1], "thread-lifecycle") == 0) {
     return run_thread_lifecycle();
@@ -216,6 +255,9 @@ int main(int argc, char** argv) {
   }
   if (strcmp(argv[2], "attach-thread-watchpoint") == 0) {
     return run_threaded_watchpoint_attach(argv[1]);
+  }
+  if (strcmp(argv[2], "attach-register-mutation") == 0) {
+    return run_threaded_register_mutation_attach(argv[1]);
   }
   publish_addresses(argv[1]);
 

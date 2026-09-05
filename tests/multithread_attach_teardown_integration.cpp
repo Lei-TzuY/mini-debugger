@@ -20,6 +20,9 @@
 
 namespace {
 
+constexpr std::uint64_t kRegisterMutationSeed = 0x13579bdf2468ace0ULL;
+constexpr std::uint64_t kRegisterMutationValue = 0xa5a55a5ac3c33c3cULL;
+
 void require(bool condition, const std::string& message) {
   if (!condition) throw std::runtime_error(message);
 }
@@ -111,6 +114,19 @@ void release_and_require_clean_exit(const Child& child) {
   std::remove(child.path.c_str());
 }
 
+void release_register_fixture(const Child& child, pid_t worker) {
+  require(::syscall(SYS_tgkill, child.pid, worker, SIGUSR2) == 0,
+          "failed to release register-mutation worker");
+  int status = 0;
+  pid_t result;
+  do {
+    result = ::waitpid(child.pid, &status, 0);
+  } while (result == -1 && errno == EINTR);
+  require(result == child.pid && WIFEXITED(status) && WEXITSTATUS(status) == 0,
+          "register-mutation fixture did not observe the mutated worker register");
+  std::remove(child.path.c_str());
+}
+
 void require_tracer_state(pid_t leader, const std::vector<pid_t>& tids, pid_t tracer,
                           const std::string& context) {
   for (const auto tid : tids) {
@@ -151,6 +167,34 @@ CliProcess spawn_cli(const std::string& mdbg, const std::string& fixture) {
     ::close(output_pipe[0]);
     ::close(output_pipe[1]);
     ::execl(mdbg.c_str(), mdbg.c_str(), fixture.c_str(), "thread-lifecycle", nullptr);
+    _exit(127);
+  }
+
+  ::close(input_pipe[0]);
+  ::close(output_pipe[1]);
+  return CliProcess{pid, input_pipe[1], output_pipe[0]};
+}
+
+CliProcess spawn_attach_cli(const std::string& mdbg, pid_t tracee) {
+  int input_pipe[2];
+  int output_pipe[2];
+  if (::pipe(input_pipe) != 0 || ::pipe(output_pipe) != 0) {
+    throw std::runtime_error("failed to create attach CLI pipes");
+  }
+
+  const pid_t pid = ::fork();
+  if (pid == -1) throw std::runtime_error("failed to fork attach CLI");
+  if (pid == 0) {
+    ::setpgid(0, 0);
+    ::dup2(input_pipe[0], STDIN_FILENO);
+    ::dup2(output_pipe[1], STDOUT_FILENO);
+    ::dup2(output_pipe[1], STDERR_FILENO);
+    ::close(input_pipe[0]);
+    ::close(input_pipe[1]);
+    ::close(output_pipe[0]);
+    ::close(output_pipe[1]);
+    const auto pid_text = std::to_string(tracee);
+    ::execl(mdbg.c_str(), mdbg.c_str(), "--attach", pid_text.c_str(), nullptr);
     _exit(127);
   }
 
@@ -231,6 +275,18 @@ std::string read_cli_to_eof(CliProcess& cli) {
     output.append(buffer, static_cast<std::size_t>(count));
   }
   return output;
+}
+
+std::uint64_t register_output_value(const std::string& output, const std::string& name) {
+  const auto marker = name + " = 0x";
+  const auto begin = output.find(marker);
+  if (begin == std::string::npos) {
+    throw std::runtime_error("CLI did not print register " + name);
+  }
+  std::size_t consumed = 0;
+  const auto value = std::stoull(output.substr(begin + marker.size()), &consumed, 16);
+  if (consumed == 0) throw std::runtime_error("CLI register value is malformed");
+  return value;
 }
 
 pid_t created_thread_tid(const std::string& output) {
@@ -484,6 +540,81 @@ void test_cli_thread_selection(const std::string& fixture, const std::string& md
   }
 }
 
+void test_cli_selected_register_mutation(const std::string& fixture, const std::string& mdbg) {
+  const auto child = spawn_threaded_fixture(fixture, "attach-register-mutation");
+  auto cli = CliProcess{};
+  try {
+    const auto tids = task_ids(child.pid);
+    require(tids.size() == 2, "register fixture must expose one leader and one worker");
+    const auto worker = worker_tid(child.pid, tids);
+
+    cli = spawn_attach_cli(mdbg, child.pid);
+    const auto attached = read_cli_until(cli, "(mdbg) ");
+    require(attached.find("attached to process " + std::to_string(child.pid)) !=
+                std::string::npos,
+            "CLI did not attach to register-mutation fixture");
+
+    write_cli(cli, "thread " + std::to_string(worker) + "\n");
+    auto output = read_cli_until(cli, "(mdbg) ");
+    require(output.find("selected thread " + std::to_string(worker)) != std::string::npos,
+            "CLI did not select register-mutation worker");
+
+    write_cli(cli, "reg r12\n");
+    output = read_cli_until(cli, "(mdbg) ");
+    require(register_output_value(output, "r12") == kRegisterMutationSeed,
+            "worker did not expose deterministic r12 seed");
+
+    write_cli(cli, "thread " + std::to_string(child.pid) + "\n");
+    read_cli_until(cli, "(mdbg) ");
+    write_cli(cli, "reg r12\n");
+    output = read_cli_until(cli, "(mdbg) ");
+    const auto leader_r12 = register_output_value(output, "r12");
+
+    write_cli(cli, "thread " + std::to_string(worker) + "\n");
+    read_cli_until(cli, "(mdbg) ");
+    write_cli(cli, "set register r12 0xa5a55a5ac3c33c3c\n");
+    output = read_cli_until(cli, "(mdbg) ");
+    require(register_output_value(output, "r12") == kRegisterMutationValue,
+            "CLI did not acknowledge selected worker register mutation");
+
+    write_cli(cli, "reg r12\n");
+    output = read_cli_until(cli, "(mdbg) ");
+    require(register_output_value(output, "r12") == kRegisterMutationValue,
+            "selected worker register mutation did not round-trip");
+
+    write_cli(cli, "thread " + std::to_string(child.pid) + "\n");
+    read_cli_until(cli, "(mdbg) ");
+    write_cli(cli, "reg r12\n");
+    output = read_cli_until(cli, "(mdbg) ");
+    require(register_output_value(output, "r12") == leader_r12,
+            "selected worker register mutation leaked into the leader");
+
+    write_cli(cli, "detach\n");
+    ::close(cli.input);
+    cli.input = -1;
+    const auto detached = read_cli_to_eof(cli);
+    require(detached.find("detached") != std::string::npos,
+            "CLI did not detach after register mutation");
+
+    int status = 0;
+    pid_t result;
+    do {
+      result = ::waitpid(cli.pid, &status, 0);
+    } while (result == -1 && errno == EINTR);
+    require(result == cli.pid && WIFEXITED(status) && WEXITSTATUS(status) == 0,
+            "register-mutation CLI did not exit cleanly");
+    cli.pid = -1;
+    ::close(cli.output);
+    cli.output = -1;
+
+    release_register_fixture(child, worker);
+  } catch (...) {
+    terminate_cli(cli);
+    terminate_child(child);
+    throw;
+  }
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -499,6 +630,7 @@ int main(int argc, char** argv) {
     test_destructor_multithread_detach(argv[1]);
     test_explicit_thread_selection_progress(argv[1]);
     test_cli_thread_selection(argv[1], mdbg.string());
+    test_cli_selected_register_mutation(argv[1], mdbg.string());
   } catch (const std::exception& error) {
     std::cerr << "multi-thread attach/teardown integration failure: " << error.what() << '\n';
     return 1;

@@ -16,7 +16,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Normalize bounded compiler-proven patch
+      - name: Finish bounded evaluator formatting
         shell: bash
         run: |
           python3 - <<'PY'
@@ -25,62 +25,13 @@ jobs:
           path = Path('src/dwarf/source_lookup.cpp')
           text = path.read_text()
           function = text.index('std::uint64_t evaluate_breg5_stack_value(')
-          start_marker = '  if (next != kDwOpDeref || offset != 0) {'
-          end_marker = 'return value ^ constant;\n'
-          start = text.index(start_marker, function)
-          end = text.index(end_marker, start) + len(end_marker)
-          replacement = '''  if (next != kDwOpDeref || offset != 0) {
-              throw std::runtime_error(
-                  "DW_OP_breg5 value is not the compiler-proven stack/dereference form");
-            }
-
-            auto value = add_signed(debugger.registers().rdi, offset,
-                                    "DW_OP_breg5 dereference address");
-            std::size_t dereference_count = 0;
-            while (cursor < expression.size() &&
-                   std::to_integer<std::uint8_t>(expression[cursor]) == kDwOpDeref) {
-              if (dereference_count >= 2) {
-                throw std::runtime_error(
-                    "DW_OP_breg5 dereference chain exceeds the compiler-proven two-level bound");
-              }
-              ++cursor;
-              value = read_integer(debugger, value, sizeof(std::uint64_t));
-              ++dereference_count;
-            }
-            if (dereference_count == 0) {
-              throw std::runtime_error("DW_OP_breg5 dereference value is missing DW_OP_deref");
-            }
-            if (cursor >= expression.size() ||
-                std::to_integer<std::uint8_t>(expression[cursor]) != kDwOpConstu) {
-              throw std::runtime_error(
-                  "DW_OP_breg5 dereference value requires the compiler-proven DW_OP_constu");
-            }
-            ++cursor;
-            const auto constant =
-                read_uleb(expression, cursor, expression.size(), "DW_OP_constu value");
-            if (cursor >= expression.size() ||
-                std::to_integer<std::uint8_t>(expression[cursor]) != kDwOpXor) {
-              throw std::runtime_error(
-                  "DW_OP_breg5 dereference value requires the compiler-proven DW_OP_xor");
-            }
-            ++cursor;
-            if (cursor >= expression.size() ||
-                std::to_integer<std::uint8_t>(expression[cursor]) != kDwOpStackValue) {
-              throw std::runtime_error(
-                  "DW_OP_breg5 dereference value requires the compiler-proven trailing DW_OP_stack_value");
-            }
-            ++cursor;
-            if (cursor != expression.size()) {
-              throw std::runtime_error(
-                  "unsupported trailing operations after DW_OP_breg5 dereference value");
-            }
-            return value ^ constant;
-            '''
-          updated = text[:start] + replacement + text[end:]
-          if updated == text:
-              raise SystemExit('formatting patch made no change')
-          if updated.count('dereference chain exceeds the compiler-proven two-level bound') != 1:
-              raise SystemExit('formatting patch did not preserve exactly one bounded implementation')
+          next_function = text.index('std::uint64_t evaluate_breg5_memory_address(', function)
+          segment = text[function:next_function]
+          needle = '  return value ^ constant;\n  }\n\n'
+          if segment.count(needle) != 1:
+              raise SystemExit('expected exactly one mis-indented evaluator closing brace')
+          segment = segment.replace(needle, '  return value ^ constant;\n}\n\n', 1)
+          updated = text[:function] + segment + text[next_function:]
           path.write_text(updated)
           PY
           git diff --check
@@ -88,5 +39,5 @@ jobs:
           git config user.name "LeiZ"
           git config user.email "52287354+Lei-TzuY@users.noreply.github.com"
           git add src/dwarf/source_lookup.cpp
-          git commit -m "style: align bounded dereference evaluator"
+          git commit -m "style: finish bounded dereference formatting"
           git push origin HEAD:feat/compiler-double-deref-stack-value

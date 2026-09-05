@@ -108,27 +108,29 @@ Completed capability:
 
 This seals the current watchpoint milestone. DR1-DR3 allocation, read/read-write mode matrices, and clone-time watchpoint propagation are not follow-up checklists; they should be revisited only when a concrete debugging workflow requires them.
 
-## Priority 8: controlled inferior state mutation — current frontier
+## Priority 8: controlled inferior state mutation — complete
 
-The debugger can now deliberately change a bounded subset of selected-thread register state without bypassing the P4 single-runner ownership model. Process-memory mutation remains the next unresolved part of this frontier because it must cooperate with managed `INT3` ownership rather than exposing raw ptrace writes.
+Controlled mutation now extends the existing thread, breakpoint, and watchpoint ownership model instead of exposing raw ptrace writes as a parallel subsystem.
 
-Completed slice:
+Completed slices:
 
 - P8-A: `Debugger::set_register()` performs a GETREGS/read-modify-write/SETREGS cycle on `stopped_tid()`, so assignment follows the explicitly selected stopped TID and leaves every non-selected TID untouched;
-- the writable surface is deliberately limited to the sixteen x86-64 general-purpose data/stack registers (`rax` through `r15`, including `rbp`/`rsp`); `rip` and `eflags` remain read-only in this slice so register mutation cannot silently bypass breakpoint program-counter ownership or flag semantics;
-- the CLI exposes the same contract as `set register <name> <value>` with full-value parsing and deterministic assignment errors rather than calling ptrace directly;
-- a deterministic attached pthread fixture pins a known seed in worker `r12`; PIE and non-PIE integration select that worker, mutate and read back `r12`, prove the stopped leader's `r12` is unchanged, detach, then let the worker itself verify the mutated value remained in its execution state.
+- register mutation is deliberately limited to the sixteen x86-64 general-purpose data/stack registers; `rip` and `eflags` remain read-only so assignment cannot silently bypass breakpoint program-counter ownership or flag semantics;
+- P8-B: `Debugger::write_memory()` requires a stopped selected TID, rejects empty writes, address overflow, and writes larger than 4096 bytes, and preserves underlying ptrace failures rather than swallowing them;
+- writes overlapping an installed managed software breakpoint leave the physical `INT3` in place and update its saved program byte only after all required physical writes have succeeded, so breakpoint removal/displaced execution cannot restore stale state;
+- any write spanning the currently restored byte of a pending displaced-breakpoint step is rejected before the first ptrace write, preventing partial mutation of the restore/step/reinsert ownership window;
+- debugger-originated memory writes do not synthesize hardware-watchpoint stops because no inferior instruction executed; integration explicitly mutates a watched data address and verifies stop ownership is unchanged;
+- CLI `set register <name> <value>` and `set memory <address|symbol> <byte> [byte...]` both delegate to the debugger ownership layer rather than calling ptrace directly;
+- dedicated PIE/non-PIE integration proves ordinary 64-bit data mutation/readback/restoration, deterministic bounds and ptrace errors, installed-breakpoint overlap and stale-byte prevention, pending displaced-step rejection without partial writes, watchpoint coexistence, and an actual `mdbg` subprocess write/`x` readback/restore/clean-exit workflow.
 
-Current P8-B acceptance:
+This seals Priority 8. Additional register classes or memory-format conveniences are not follow-up checklists; they should be added only when a later executable workflow requires them.
 
-- process-memory writes round-trip through the debugger API and CLI with explicit bounds and deterministic ptrace failure reporting;
-- a memory write overlapping an installed managed software breakpoint updates the breakpoint's saved original byte while keeping the physical `INT3` installed, so later displaced execution and breakpoint removal observe the user's new program byte rather than stale pre-write state;
-- external mutation that overlaps a currently restored byte during a pending displaced-breakpoint step is rejected or completed through one explicit ownership path; it may not silently corrupt the restore/step/reinsert invariant;
-- debugger-originated memory writes do not fabricate hardware-watchpoint stops because no tracee instruction executed;
-- PIE/non-PIE integration proves ordinary memory mutation, managed-breakpoint overlap, exact readback, and cleanup behavior.
+## Phase 2 closure
 
-P8-B must extend the existing breakpoint ownership model; it must not expose `PTRACE_POKEDATA` as a parallel raw-memory subsystem that can invalidate saved breakpoint bytes.
+Priorities 0 through 8 now form a coherent debugger milestone: bounded decoding, deferred loader-aware breakpoints, hardware watchpoints, DWARF5 source mapping, single-runner multi-thread ownership, compiler-proven CFI recovery, interactive source/thread productization, thread-scoped debug-register ownership, and controlled inferior state mutation all have executable integration evidence.
+
+The next architectural gap is no longer another variant inside those surfaces. The process layer still assumes one thread-group identity and one executable image for the lifetime of a debugging session: ptrace options cover clone events but not exec/fork/vfork lifecycle, while CLI/symbol/source state is rooted in the executable selected at launch or attach. Phase 3 promotes to process-image and process-topology lifecycle rather than farming Phase 2 corner cases. See `docs/phase-3-roadmap.md`.
 
 ## Selection rule
 
-Choose the highest-priority milestone that has a concrete failing scenario or acceptance test and no overlapping active implementation. A milestone may be split into bounded PRs, but every PR must advance the milestone itself; repeated variant-only micro-PRs are not a roadmap strategy.
+Phase 2 is sealed. New work should start from the highest executable Phase 3 frontier unless a reproducible regression proves a Phase 2 invariant is broken.

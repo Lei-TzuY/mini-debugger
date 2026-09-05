@@ -551,9 +551,11 @@ int main(int argc, char** argv) {
           continue;
         }
         try {
-          const auto value = mdbg::inspect_local_integer(debugger, elf, name);
+          const auto value = mdbg::inspect_local_value(debugger, elf, name);
           std::cout << value.name << " = ";
-          if (value.is_signed) {
+          if (value.kind == mdbg::LocalValueKind::Pointer) {
+            std::cout << "0x" << std::hex << value.raw_value << std::dec;
+          } else if (value.is_signed) {
             std::cout << signed_local_value(value);
           } else {
             std::cout << value.raw_value;

@@ -435,14 +435,6 @@ const AttributeValue* attribute(const Die& die, std::uint64_t name) {
   return it == die.attributes.end() ? nullptr : &*it;
 }
 
-AttributeValue* mutable_attribute(Die& die, std::uint64_t name) {
-  const auto it = std::find_if(die.attributes.begin(), die.attributes.end(),
-                               [name](const AttributeValue& value) {
-                                 return value.name == name;
-                               });
-  return it == die.attributes.end() ? nullptr : &*it;
-}
-
 std::optional<std::size_t> die_index_by_offset(const std::vector<Die>& dies,
                                                std::uint64_t offset) {
   for (std::size_t index = 0; index < dies.size(); ++index) {
@@ -1266,7 +1258,6 @@ std::optional<std::uint64_t> DwarfLineTable::find_runtime_source(
     pid_t pid, std::string_view file, std::uint64_t line, const ElfFile& elf) const {
   const auto virtual_address = find_virtual_source(file, line);
   if (!virtual_address) return std::nullopt;
-
   const auto bias = elf.load_bias(pid);
   if (*virtual_address > std::numeric_limits<std::uint64_t>::max() - bias) {
     throw std::runtime_error("source address overflows runtime address space");

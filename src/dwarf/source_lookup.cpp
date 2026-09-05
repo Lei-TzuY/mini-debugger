@@ -78,6 +78,7 @@ constexpr std::uint8_t kDwOpLit8 = 0x38;
 constexpr std::uint8_t kDwOpLit16 = 0x40;
 constexpr std::uint8_t kDwOpLit24 = 0x48;
 constexpr std::uint8_t kDwOpReg0 = 0x50;
+constexpr std::uint8_t kDwOpReg4 = 0x54;
 constexpr std::uint8_t kDwOpReg5 = 0x55;
 constexpr std::uint8_t kDwOpReg6 = 0x56;
 constexpr std::uint8_t kDwOpBreg1 = 0x71;
@@ -88,6 +89,7 @@ constexpr std::uint8_t kDwOpBreg5 = 0x75;
 constexpr std::uint8_t kDwOpBreg8 = 0x78;
 constexpr std::uint8_t kDwOpBreg9 = 0x79;
 constexpr std::uint8_t kDwOpFbreg = 0x91;
+constexpr std::uint8_t kDwOpPiece = 0x93;
 constexpr std::uint8_t kDwOpStackValue = 0x9f;
 constexpr std::uint8_t kDwOpEntryValue = 0xa3;
 constexpr std::uint8_t kDwOpCallFrameCfa = 0x9c;
@@ -1037,6 +1039,64 @@ std::uint64_t decode_integer(const std::vector<std::byte>& bytes, std::size_t of
   return value;
 }
 
+LocalScalarValue decode_structure(const ElfFile& module, std::string_view name,
+                                  const ValueType& value_type,
+                                  const std::vector<std::byte>& bytes) {
+  if (value_type.kind != LocalValueKind::Structure || bytes.size() != value_type.byte_size) {
+    throw std::runtime_error("local struct bytes do not match owned aggregate storage");
+  }
+  LocalScalarValue result{module.path(), std::string(name), 0, value_type.byte_size,
+                          false, LocalValueKind::Structure};
+  result.members.reserve(value_type.members.size());
+  for (const auto& member : value_type.members) {
+    result.members.push_back(LocalStructMember{
+        member.name, decode_integer(bytes, member.offset, member.integer.byte_size),
+        member.integer.byte_size, member.integer.is_signed});
+  }
+  return result;
+}
+
+std::vector<std::byte> evaluate_register_piece_structure(
+    const std::vector<std::byte>& expression, const Debugger& debugger,
+    const ValueType& value_type) {
+  if (value_type.kind != LocalValueKind::Structure || value_type.byte_size != 16) {
+    throw std::runtime_error(
+        "register-piece local requires the compiler-proven 16-byte structure shape");
+  }
+  std::size_t cursor = 0;
+  const auto expect_op = [&](std::uint8_t expected, const char* what) {
+    if (cursor >= expression.size() ||
+        std::to_integer<std::uint8_t>(expression[cursor]) != expected) {
+      throw std::runtime_error(std::string("register-piece local requires ") + what);
+    }
+    ++cursor;
+  };
+  expect_op(kDwOpReg5, "DW_OP_reg5 for the first piece");
+  expect_op(kDwOpPiece, "DW_OP_piece after the first register");
+  if (read_uleb(expression, cursor, expression.size(), "first DW_OP_piece size") != 8) {
+    throw std::runtime_error("register-piece local requires an 8-byte first piece");
+  }
+  expect_op(kDwOpReg4, "DW_OP_reg4 for the second piece");
+  expect_op(kDwOpPiece, "DW_OP_piece after the second register");
+  if (read_uleb(expression, cursor, expression.size(), "second DW_OP_piece size") != 8) {
+    throw std::runtime_error("register-piece local requires an 8-byte second piece");
+  }
+  if (cursor != expression.size()) {
+    throw std::runtime_error("unsupported trailing operations after register-piece local");
+  }
+
+  const auto regs = debugger.registers();
+  std::vector<std::byte> bytes(16);
+  const auto store = [&](std::size_t offset, std::uint64_t value) {
+    for (std::size_t index = 0; index < 8; ++index) {
+      bytes[offset + index] = static_cast<std::byte>((value >> (index * 8U)) & 0xffU);
+    }
+  };
+  store(0, regs.rdi);
+  store(8, regs.rsi);
+  return bytes;
+}
+
 std::uint64_t read_integer(const Debugger& debugger, std::uint64_t address,
                            std::size_t byte_size) {
   const auto bytes = debugger.read_memory(static_cast<std::uintptr_t>(address), byte_size);
@@ -1383,10 +1443,18 @@ std::optional<LocalScalarValue> inspect_unit(const DebugSections& sections,
                             value_type.kind};
   }
 
+  if (value_type.kind == LocalValueKind::Structure && !location_expression.empty() &&
+      std::to_integer<std::uint8_t>(location_expression.front()) == kDwOpReg5) {
+    return decode_structure(module, name, value_type,
+                            evaluate_register_piece_structure(location_expression, debugger,
+                                                              value_type));
+  }
+
   if (location_expression.empty() ||
       std::to_integer<std::uint8_t>(location_expression.front()) != kDwOpFbreg) {
     if (value_type.kind == LocalValueKind::Structure) {
-      throw std::runtime_error("local struct is not in the supported DW_OP_fbreg storage form");
+      throw std::runtime_error(
+          "local struct is not in a supported compiler-proven fbreg/register-piece form");
     }
     throw std::runtime_error(
         "local value location is not a supported compiler-proven register/stack/fbreg form");
@@ -1404,15 +1472,7 @@ std::optional<LocalScalarValue> inspect_unit(const DebugSections& sections,
     if (bytes.size() != value_type.byte_size) {
       throw std::runtime_error("short local-struct memory read");
     }
-    LocalScalarValue result{module.path(), std::string(name), 0, value_type.byte_size,
-                            false, LocalValueKind::Structure};
-    result.members.reserve(value_type.members.size());
-    for (const auto& member : value_type.members) {
-      result.members.push_back(LocalStructMember{
-          member.name, decode_integer(bytes, member.offset, member.integer.byte_size),
-          member.integer.byte_size, member.integer.is_signed});
-    }
-    return result;
+    return decode_structure(module, name, value_type, bytes);
   }
   return LocalScalarValue{module.path(), std::string(name),
                           read_integer(debugger, address, value_type.byte_size),

@@ -52,6 +52,46 @@ CliProcess spawn_cli(const std::string& mdbg, const std::string& driver) {
   return CliProcess{pid, input_pipe[1], output_pipe[0]};
 }
 
+std::string target_for_driver(const std::string& driver) {
+  const auto path = std::filesystem::path(driver);
+  auto name = path.filename().string();
+  constexpr const char* prefix = "exec_driver_";
+  if (name.rfind(prefix, 0) != 0) {
+    throw std::runtime_error("cannot derive exec target from driver path");
+  }
+  name.replace(0, std::string(prefix).size(), "exec_target_");
+  return (path.parent_path() / name).string();
+}
+
+CliProcess spawn_divergence_cli(const std::string& mdbg, const std::string& driver,
+                                const std::string& target) {
+  int input_pipe[2];
+  int output_pipe[2];
+  if (::pipe(input_pipe) != 0 || ::pipe(output_pipe) != 0) {
+    throw std::runtime_error("failed to create divergence CLI pipes");
+  }
+
+  const pid_t pid = ::fork();
+  if (pid == -1) throw std::runtime_error("failed to fork divergence CLI");
+  if (pid == 0) {
+    (void)::setpgid(0, 0);
+    ::dup2(input_pipe[0], STDIN_FILENO);
+    ::dup2(output_pipe[1], STDOUT_FILENO);
+    ::dup2(output_pipe[1], STDERR_FILENO);
+    ::close(input_pipe[0]);
+    ::close(input_pipe[1]);
+    ::close(output_pipe[0]);
+    ::close(output_pipe[1]);
+    ::execl(mdbg.c_str(), mdbg.c_str(), driver.c_str(), "--fork-exec-divergence",
+            target.c_str(), nullptr);
+    _exit(127);
+  }
+
+  ::close(input_pipe[0]);
+  ::close(output_pipe[1]);
+  return CliProcess{pid, input_pipe[1], output_pipe[0]};
+}
+
 void terminate_cli(CliProcess& cli) noexcept {
   if (cli.input != -1) {
     ::close(cli.input);
@@ -333,6 +373,109 @@ void run_two_process_cli(const std::string& driver, const std::string& mdbg) {
   }
 }
 
+void run_process_exec_divergence_cli(const std::string& driver, const std::string& mdbg) {
+  const auto target = target_for_driver(driver);
+  auto cli = spawn_divergence_cli(mdbg, driver, target);
+  pid_t parent = -1;
+  pid_t child = -1;
+  try {
+    auto output = read_until(cli, "(mdbg) ");
+    require(output.find("stopped after exec") != std::string::npos,
+            "divergence CLI did not expose initial exec stop");
+
+    write_cli(cli, "set follow-fork-mode both\n");
+    output = read_until(cli, "(mdbg) ");
+    require(output.find("follow-fork-mode = both") != std::string::npos,
+            "divergence CLI did not accept simultaneous fork ownership");
+
+    write_cli(cli, "continue\n");
+    output = read_until(cli, "(mdbg) ");
+    parent = parse_pid_after(output, "retained parent ");
+    child = parse_pid_after(output, "retained child ");
+    require(parent > 0 && child > 0 && parent != child,
+            "divergence fork did not expose distinct retained processes");
+
+    write_cli(cli, "break fork_shared_probe\n");
+    output = read_until(cli, "(mdbg) ");
+    require(output.find("Breakpoint 1") != std::string::npos,
+            "parent old-image user breakpoint was not installed");
+
+    write_cli(cli, "process " + std::to_string(child) + "\n");
+    output = read_until(cli, "(mdbg) ");
+    require(output.find("selected process " + std::to_string(child)) != std::string::npos,
+            "divergence CLI did not select child");
+
+    write_cli(cli, "break fork_shared_probe\n");
+    output = read_until(cli, "(mdbg) ");
+    require(output.find("Breakpoint 2") != std::string::npos,
+            "child old-image user breakpoint was not installed independently");
+
+    write_cli(cli, "continue\n");
+    output = read_until(cli, "(mdbg) ");
+    require(output.find("image replaced by") != std::string::npos &&
+                output.find(target) != std::string::npos,
+            "child exec did not refresh only the selected process image");
+
+    write_cli(cli, "process " + std::to_string(parent) + "\n");
+    output = read_until(cli, "(mdbg) ");
+    require(output.find("selected process " + std::to_string(parent)) != std::string::npos,
+            "divergence CLI could not return to old-image parent");
+
+    write_cli(cli, "info breakpoints\n");
+    output = read_until(cli, "(mdbg) ");
+    require(output.find("1 ") != std::string::npos &&
+                output.find("fork_shared_probe") != std::string::npos,
+            "child exec invalidated the sibling parent user breakpoint registry");
+
+    write_cli(cli, "process " + std::to_string(child) + "\n");
+    output = read_until(cli, "(mdbg) ");
+    require(output.find("selected process " + std::to_string(child)) != std::string::npos,
+            "divergence CLI could not return to replacement-image child");
+
+    write_cli(cli, "break exec_target_probe\n");
+    output = read_until(cli, "(mdbg) ");
+    require(output.find("Breakpoint 3") != std::string::npos,
+            "replacement-image child could not create a monotonic user breakpoint");
+
+    write_cli(cli, "continue\n");
+    output = read_until(cli, "(mdbg) ");
+    require(output.find("exec_target_probe") != std::string::npos &&
+                output.find("[tid " + std::to_string(child) + "]") != std::string::npos,
+            "replacement-image child did not hit its new symbol breakpoint");
+
+    write_cli(cli, "delete 3\n");
+    (void)read_until(cli, "(mdbg) ");
+    write_cli(cli, "continue\n");
+    output = read_until(cli, "(mdbg) ");
+    require(output.find("process " + std::to_string(child) + " exited with code 0") !=
+                std::string::npos,
+            "replacement-image child exit was not surfaced independently");
+    require(output.find("active process " + std::to_string(parent)) != std::string::npos,
+            "old-image parent was not promoted after child exit");
+
+    write_cli(cli, "continue\n");
+    output = read_until(cli, "(mdbg) ");
+    require(output.find("fork_shared_probe") != std::string::npos &&
+                output.find("[tid " + std::to_string(parent) + "]") != std::string::npos,
+            "old-image parent breakpoint did not survive sibling exec");
+
+    write_cli(cli, "delete 1\n");
+    (void)read_until(cli, "(mdbg) ");
+    write_cli(cli, "continue\n");
+    output = read_to_eof(cli);
+    require(output.find("process exited with code 0") != std::string::npos,
+            "old-image parent did not exit cleanly after sibling exec");
+    require_clean_cli_exit(cli);
+    require_process_gone(parent);
+    require_process_gone(child);
+  } catch (...) {
+    if (parent > 0) (void)::kill(parent, SIGKILL);
+    if (child > 0) (void)::kill(child, SIGKILL);
+    terminate_cli(cli);
+    throw;
+  }
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -343,6 +486,7 @@ int main(int argc, char** argv) {
   try {
     run_follow_child_cli(argv[1], argv[2]);
     run_two_process_cli(argv[1], argv[2]);
+    run_process_exec_divergence_cli(argv[1], argv[2]);
     std::cout << "fork CLI integration passed\n";
   } catch (const std::exception& error) {
     std::cerr << "fork CLI integration failure: " << error.what() << '\n';

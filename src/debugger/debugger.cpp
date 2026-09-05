@@ -9,7 +9,25 @@
 namespace mdbg {
 namespace {
 constexpr std::byte kInt3{0xcc};
+constexpr std::uint64_t kDr6Breakpoint0{1};
+constexpr std::uint64_t kDr7Slot0EnableMask{0x3};
+constexpr std::uint64_t kDr7Slot0ControlMask{std::uint64_t{0xf} << 16U};
+
+std::uint64_t watchpoint_length_encoding(std::size_t length) {
+  switch (length) {
+    case 1:
+      return 0;
+    case 2:
+      return 1;
+    case 4:
+      return 3;
+    case 8:
+      return 2;
+    default:
+      throw std::invalid_argument("write watchpoint length must be 1, 2, 4, or 8 bytes");
+  }
 }
+}  // namespace
 
 Debugger Debugger::launch(const std::string& executable,
                           const std::vector<std::string>& arguments) {
@@ -31,6 +49,7 @@ Debugger::~Debugger() {
   }
   try {
     restore_all_breakpoints();
+    restore_watchpoint_registers();
     process_.detach();
   } catch (...) {
   }
@@ -106,6 +125,67 @@ std::vector<Breakpoint> Debugger::breakpoints() const {
   return result;
 }
 
+std::size_t Debugger::add_write_watchpoint(std::uintptr_t address, std::size_t length) {
+  if (process_.state() != ProcessState::Stopped) {
+    throw std::logic_error("watchpoints can only be modified while the tracee is stopped");
+  }
+  if (watchpoint_) {
+    throw std::invalid_argument("only one hardware watchpoint is currently supported");
+  }
+  const auto length_encoding = watchpoint_length_encoding(length);
+  if (address % length != 0) {
+    throw std::invalid_argument("write watchpoint address must be naturally aligned");
+  }
+
+  const DebugRegisterSnapshot snapshot{lowlevel::get_debug_register(process_.pid(), 0),
+                                       lowlevel::get_debug_register(process_.pid(), 6),
+                                       lowlevel::get_debug_register(process_.pid(), 7)};
+  if ((snapshot.dr7 & kDr7Slot0EnableMask) != 0) {
+    throw std::runtime_error("hardware debug-register slot 0 is already in use");
+  }
+
+  const auto disabled_dr7 =
+      snapshot.dr7 & ~(kDr7Slot0EnableMask | kDr7Slot0ControlMask);
+  const auto configured_dr7 = disabled_dr7 | std::uint64_t{1} |
+                              (std::uint64_t{1} << 16U) | (length_encoding << 18U);
+  try {
+    lowlevel::set_debug_register(process_.pid(), 7, disabled_dr7);
+    lowlevel::set_debug_register(process_.pid(), 0, address);
+    lowlevel::set_debug_register(process_.pid(), 6, snapshot.dr6 & ~kDr6Breakpoint0);
+    lowlevel::set_debug_register(process_.pid(), 7, configured_dr7);
+  } catch (...) {
+    try {
+      lowlevel::set_debug_register(process_.pid(), 7, disabled_dr7);
+      lowlevel::set_debug_register(process_.pid(), 0, snapshot.dr0);
+      lowlevel::set_debug_register(process_.pid(), 6, snapshot.dr6);
+      lowlevel::set_debug_register(process_.pid(), 7, snapshot.dr7);
+    } catch (...) {
+    }
+    throw;
+  }
+
+  const auto id = next_watchpoint_id_++;
+  watchpoint_ = Watchpoint{id, address, length};
+  watchpoint_register_snapshot_ = snapshot;
+  return id;
+}
+
+bool Debugger::remove_watchpoint(std::size_t id) {
+  if (!watchpoint_ || watchpoint_->id != id) return false;
+  if (process_.state() != ProcessState::Stopped) {
+    throw std::logic_error("watchpoints can only be modified while the tracee is stopped");
+  }
+  restore_watchpoint_registers();
+  watchpoint_.reset();
+  watchpoint_register_snapshot_.reset();
+  return true;
+}
+
+std::vector<Watchpoint> Debugger::watchpoints() const {
+  if (!watchpoint_) return {};
+  return {*watchpoint_};
+}
+
 int Debugger::resume_signal(SignalPolicy policy) const {
   if (policy != SignalPolicy::Forward || stop_info_.reason != StopReason::Signal) {
     return 0;
@@ -120,10 +200,7 @@ StopInfo Debugger::continue_execution(SignalPolicy policy) {
 
   if (pending_breakpoint_step_) {
     const auto internal = step_over_pending_breakpoint(false);
-    if (internal.reason == StopReason::Exited || internal.reason == StopReason::Signaled ||
-        internal.reason == StopReason::Signal) {
-      return internal;
-    }
+    if (internal.reason != StopReason::SingleStep) return internal;
   }
 
   const int signal = resume_signal(policy);
@@ -156,10 +233,13 @@ void Debugger::detach(SignalPolicy policy) {
 
   const int signal = resume_signal(policy);
   restore_all_breakpoints();
+  restore_watchpoint_registers();
   process_.detach(signal);
   breakpoints_by_address_.clear();
   breakpoint_ids_.clear();
   pending_breakpoint_step_.reset();
+  watchpoint_.reset();
+  watchpoint_register_snapshot_.reset();
 }
 
 void Debugger::restore_all_breakpoints() {
@@ -172,6 +252,29 @@ void Debugger::restore_all_breakpoints() {
     breakpoint.installed = false;
   }
   pending_breakpoint_step_.reset();
+}
+
+void Debugger::restore_watchpoint_registers() {
+  if (!watchpoint_register_snapshot_) return;
+  if (process_.state() != ProcessState::Stopped) {
+    throw std::logic_error("watchpoint registers can only be restored while stopped");
+  }
+
+  const auto current_dr7 = lowlevel::get_debug_register(process_.pid(), 7);
+  const auto disabled_dr7 = current_dr7 & ~(kDr7Slot0EnableMask | kDr7Slot0ControlMask);
+  lowlevel::set_debug_register(process_.pid(), 7, disabled_dr7);
+  lowlevel::set_debug_register(process_.pid(), 0, watchpoint_register_snapshot_->dr0);
+  lowlevel::set_debug_register(process_.pid(), 6, watchpoint_register_snapshot_->dr6);
+  lowlevel::set_debug_register(process_.pid(), 7, watchpoint_register_snapshot_->dr7);
+}
+
+std::optional<StopInfo> Debugger::classify_watchpoint_stop() {
+  if (!watchpoint_) return std::nullopt;
+  const auto dr6 = lowlevel::get_debug_register(process_.pid(), 6);
+  if ((dr6 & kDr6Breakpoint0) == 0) return std::nullopt;
+  lowlevel::set_debug_register(process_.pid(), 6, dr6 & ~kDr6Breakpoint0);
+  return StopInfo{StopReason::Watchpoint, SIGTRAP, std::nullopt, watchpoint_->id,
+                  watchpoint_->address};
 }
 
 StopInfo Debugger::step_over_pending_breakpoint(bool expose_single_step) {
@@ -213,6 +316,10 @@ StopInfo Debugger::wait_and_classify(bool expected_single_step) {
   const int signal = event.value;
   if (signal != SIGTRAP) {
     stop_info_ = {StopReason::Signal, signal, std::nullopt};
+    return stop_info_;
+  }
+  if (const auto watchpoint = classify_watchpoint_stop()) {
+    stop_info_ = *watchpoint;
     return stop_info_;
   }
   if (expected_single_step) {

@@ -96,6 +96,14 @@ void print_stop(const mdbg::StopInfo& info, const mdbg::ElfFile& elf, pid_t pid)
       std::cout << '\n';
       break;
     }
+    case StopReason::Watchpoint:
+      std::cout << "watchpoint";
+      if (info.watchpoint_id) std::cout << ' ' << *info.watchpoint_id;
+      if (info.watchpoint_address) {
+        std::cout << " at 0x" << std::hex << *info.watchpoint_address << std::dec;
+      }
+      std::cout << '\n';
+      break;
     case StopReason::SingleStep:
       std::cout << "single-step trap\n";
       break;

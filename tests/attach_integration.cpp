@@ -1,4 +1,5 @@
 #include "debugger/debugger.hpp"
+#include "ptrace/ptrace.hpp"
 
 #include <sys/wait.h>
 #include <unistd.h>
@@ -18,6 +19,13 @@ namespace {
 struct FixtureAddresses {
   std::uintptr_t one;
   std::uintptr_t two;
+  std::uintptr_t value;
+};
+
+struct DebugRegisterState {
+  std::uint64_t dr0;
+  std::uint64_t dr6;
+  std::uint64_t dr7;
 };
 
 void require(bool condition, const std::string& message) {
@@ -40,11 +48,27 @@ FixtureAddresses wait_for_addresses(const std::string& path) {
     input >> one >> two >> value;
     if (input) {
       return {static_cast<std::uintptr_t>(std::stoull(one, nullptr, 0)),
-              static_cast<std::uintptr_t>(std::stoull(two, nullptr, 0))};
+              static_cast<std::uintptr_t>(std::stoull(two, nullptr, 0)),
+              static_cast<std::uintptr_t>(std::stoull(value, nullptr, 0))};
     }
     std::this_thread::sleep_for(std::chrono::milliseconds(5));
   }
   throw std::runtime_error("fixture did not publish addresses");
+}
+
+DebugRegisterState debug_register_state(const mdbg::Debugger& debugger) {
+  return {mdbg::lowlevel::get_debug_register(debugger.pid(), 0),
+          mdbg::lowlevel::get_debug_register(debugger.pid(), 6),
+          mdbg::lowlevel::get_debug_register(debugger.pid(), 7)};
+}
+
+void require_debug_register_state(const mdbg::Debugger& debugger,
+                                  const DebugRegisterState& expected,
+                                  const std::string& context) {
+  const auto actual = debug_register_state(debugger);
+  require(actual.dr0 == expected.dr0 && actual.dr6 == expected.dr6 &&
+              actual.dr7 == expected.dr7,
+          context);
 }
 
 struct Child {
@@ -111,9 +135,18 @@ void test_explicit_detach(const std::string& fixture) {
   try {
     auto debugger = mdbg::Debugger::attach(child.pid);
     install_and_hit_breakpoints(debugger, child.addresses);
+    const auto baseline = debug_register_state(debugger);
+    const auto watchpoint_id =
+        debugger.add_write_watchpoint(child.addresses.value, sizeof(std::uint64_t));
+    require(watchpoint_id == 1, "first attached watchpoint id must start at one");
     debugger.detach();
     require(debugger.state() == mdbg::ProcessState::Detached,
             "detach should transition to Detached state");
+
+    auto verifier = mdbg::Debugger::attach(child.pid);
+    require_debug_register_state(verifier, baseline,
+                                 "explicit detach did not restore DR0/DR6/DR7");
+    verifier.detach();
     release_and_require_clean_exit(child);
   } catch (...) {
     terminate_child(child);
@@ -124,10 +157,18 @@ void test_explicit_detach(const std::string& fixture) {
 void test_destructor_detaches_without_killing(const std::string& fixture) {
   const auto child = spawn_fixture(fixture);
   try {
+    DebugRegisterState baseline{};
     {
       auto debugger = mdbg::Debugger::attach(child.pid);
       install_and_hit_breakpoints(debugger, child.addresses);
+      baseline = debug_register_state(debugger);
+      (void)debugger.add_write_watchpoint(child.addresses.value, sizeof(std::uint64_t));
     }
+
+    auto verifier = mdbg::Debugger::attach(child.pid);
+    require_debug_register_state(verifier, baseline,
+                                 "debugger destructor did not restore DR0/DR6/DR7");
+    verifier.detach();
     release_and_require_clean_exit(child);
   } catch (...) {
     terminate_child(child);

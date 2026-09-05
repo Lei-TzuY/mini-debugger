@@ -18,6 +18,13 @@ __attribute__((noinline)) void breakpoint_two(void) {
   fixture_value += 1;
 }
 
+__attribute__((noinline)) void watched_write(void) {
+  __asm__ volatile(".globl watchpoint_write_probe\n"
+                   "watchpoint_write_probe:\n"
+                   "addq $1, fixture_value(%%rip)\n"
+                   ::: "memory");
+}
+
 __attribute__((noinline)) void backtrace_leaf(void) {
   __asm__ volatile(".globl backtrace_probe\n"
                    "backtrace_probe:\n"
@@ -81,6 +88,11 @@ int main(int argc, char** argv) {
   if (strcmp(argv[2], "backtrace") == 0) {
     backtrace_outer();
     return 0;
+  }
+  if (strcmp(argv[2], "watchpoint") == 0) {
+    watched_write();
+    watched_write();
+    return fixture_value == 0x112233445566778aULL ? 0 : 85;
   }
 
   breakpoint_one();

@@ -20,6 +20,7 @@ enum class StopReason {
   InitialExec,
   Attached,
   Breakpoint,
+  Watchpoint,
   SingleStep,
   Signal,
   Trap,
@@ -31,7 +32,15 @@ enum class SignalPolicy { Suppress, Forward };
 struct StopInfo {
   StopReason reason;
   int value{0};
-  std::optional<std::uintptr_t> breakpoint_address;
+  std::optional<std::uintptr_t> breakpoint_address{};
+  std::optional<std::size_t> watchpoint_id{};
+  std::optional<std::uintptr_t> watchpoint_address{};
+};
+
+struct Watchpoint {
+  std::size_t id;
+  std::uintptr_t address;
+  std::size_t length;
 };
 
 class Debugger {
@@ -62,7 +71,17 @@ class Debugger {
   bool remove_breakpoint(std::size_t id);
   [[nodiscard]] std::vector<Breakpoint> breakpoints() const;
 
+  std::size_t add_write_watchpoint(std::uintptr_t address, std::size_t length);
+  bool remove_watchpoint(std::size_t id);
+  [[nodiscard]] std::vector<Watchpoint> watchpoints() const;
+
  private:
+  struct DebugRegisterSnapshot {
+    std::uint64_t dr0;
+    std::uint64_t dr6;
+    std::uint64_t dr7;
+  };
+
   friend class DeferredBreakpoints;
 
   Debugger(Process process, StopInfo initial_stop);
@@ -73,6 +92,8 @@ class Debugger {
   StopInfo step_over_pending_breakpoint(bool expose_single_step);
   void reinsert_breakpoint(std::uintptr_t address);
   void restore_all_breakpoints();
+  void restore_watchpoint_registers();
+  [[nodiscard]] std::optional<StopInfo> classify_watchpoint_stop();
   bool discard_breakpoint(std::size_t id) noexcept;
 
   Process process_;
@@ -81,6 +102,9 @@ class Debugger {
   std::map<std::size_t, std::uintptr_t> breakpoint_ids_;
   std::size_t next_breakpoint_id_{1};
   std::optional<std::uintptr_t> pending_breakpoint_step_;
+  std::optional<Watchpoint> watchpoint_;
+  std::optional<DebugRegisterSnapshot> watchpoint_register_snapshot_;
+  std::size_t next_watchpoint_id_{1};
 };
 
 }  // namespace mdbg

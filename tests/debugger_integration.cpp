@@ -192,6 +192,82 @@ void test_invalid_memory_address(const std::string& fixture) {
   require(failed, "invalid memory read should fail with ptrace error");
 }
 
+void test_write_watchpoint_coexists_with_software_breakpoint(const std::string& fixture) {
+  Session session(fixture, "watchpoint");
+  const mdbg::ElfFile elf(fixture);
+  const auto probe = elf.find_symbol("watchpoint_write_probe");
+  require(probe.has_value(), "watchpoint store probe symbol is unavailable");
+  const auto probe_address = static_cast<std::uintptr_t>(
+      elf.runtime_address(session.debugger.pid(), *probe));
+
+  bool invalid_length = false;
+  try {
+    (void)session.debugger.add_write_watchpoint(session.addresses.value, 3);
+  } catch (const std::invalid_argument&) {
+    invalid_length = true;
+  }
+  require(invalid_length, "unsupported watchpoint length was accepted");
+
+  bool misaligned = false;
+  try {
+    (void)session.debugger.add_write_watchpoint(session.addresses.value + 1, 2);
+  } catch (const std::invalid_argument&) {
+    misaligned = true;
+  }
+  require(misaligned, "misaligned watchpoint address was accepted");
+
+  const auto software_id = session.debugger.add_breakpoint(probe_address);
+  const auto watchpoint_id =
+      session.debugger.add_write_watchpoint(session.addresses.value, sizeof(std::uint64_t));
+  const auto watchpoints = session.debugger.watchpoints();
+  require(watchpoints.size() == 1 && watchpoints.front().id == watchpoint_id &&
+              watchpoints.front().address == session.addresses.value &&
+              watchpoints.front().length == sizeof(std::uint64_t),
+          "write watchpoint ownership was not recorded");
+
+  bool second_slot = false;
+  try {
+    (void)session.debugger.add_write_watchpoint(session.addresses.value, 1);
+  } catch (const std::invalid_argument&) {
+    second_slot = true;
+  }
+  require(second_slot, "single-slot watchpoint bound was not enforced");
+
+  auto info = session.debugger.continue_execution();
+  require(info.reason == mdbg::StopReason::Breakpoint &&
+              info.breakpoint_address == probe_address,
+          "software breakpoint did not stop on the watched store instruction");
+
+  info = session.debugger.continue_execution();
+  require(info.reason == mdbg::StopReason::Watchpoint &&
+              info.watchpoint_id == watchpoint_id &&
+              info.watchpoint_address == session.addresses.value &&
+              !info.breakpoint_address,
+          "watchpoint was not surfaced from the software-breakpoint displaced step");
+
+  const auto bytes =
+      session.debugger.read_memory(session.addresses.value, sizeof(std::uint64_t));
+  std::uint64_t value = 0;
+  for (std::size_t i = 0; i < bytes.size(); ++i) {
+    value |= static_cast<std::uint64_t>(std::to_integer<unsigned>(bytes[i])) << (i * 8U);
+  }
+  require(value == 0x1122334455667789ULL,
+          "watched store did not commit before the hardware trap");
+
+  require(session.debugger.remove_breakpoint(software_id),
+          "software breakpoint could not be removed after watchpoint stop");
+  require(session.debugger.remove_watchpoint(watchpoint_id),
+          "write watchpoint could not be removed");
+  require(!session.debugger.remove_watchpoint(watchpoint_id),
+          "deleting the same watchpoint twice should fail");
+  require(session.debugger.watchpoints().empty(),
+          "watchpoint ownership remained after deletion");
+
+  info = session.debugger.continue_execution();
+  require(info.reason == mdbg::StopReason::Exited && info.value == 0,
+          "deleted watchpoint trapped the second watched store or fixture failed to exit");
+}
+
 void test_unmanaged_sigtrap(const std::string& fixture) {
   Session session(fixture, "trap");
   auto info = session.debugger.continue_execution();
@@ -241,6 +317,7 @@ int main(int argc, char** argv) {
     test_delete_installed_breakpoint(fixture);
     test_invalid_breakpoint_address(fixture);
     test_invalid_memory_address(fixture);
+    test_write_watchpoint_coexists_with_software_breakpoint(fixture);
     test_unmanaged_sigtrap(fixture);
     test_signal_suppression_and_forwarding(fixture);
     std::cout << "all debugger integration tests passed\n";

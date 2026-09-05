@@ -1255,6 +1255,24 @@ std::uint64_t evaluate_breg5_stack_value(const std::vector<std::byte>& expressio
   return add_signed(debugger.registers().rdi, offset, "DW_OP_breg5 value");
 }
 
+std::uint64_t evaluate_breg5_memory_address(
+    const std::vector<std::byte>& expression, const Debugger& debugger) {
+  if (expression.empty() ||
+      std::to_integer<std::uint8_t>(expression.front()) != kDwOpBreg5) {
+    throw std::runtime_error(
+        "local memory location is not the compiler-proven DW_OP_breg5 form");
+  }
+  std::size_t cursor = 1;
+  const auto offset =
+      read_sleb(expression, cursor, expression.size(), "DW_OP_breg5 memory offset");
+  if (cursor != expression.size()) {
+    throw std::runtime_error(
+        "unsupported trailing operations after DW_OP_breg5 memory location");
+  }
+  return add_signed(debugger.registers().rdi, offset,
+                    "DW_OP_breg5 memory address");
+}
+
 std::uint64_t evaluate_entry_rdi(
     const std::vector<std::byte>& expression, const Debugger& debugger,
     const ElfFile& module, const Die& subprogram_die) {
@@ -1435,9 +1453,16 @@ std::optional<LocalScalarValue> inspect_unit(const DebugSections& sections,
 
   if (value_type.kind != LocalValueKind::Structure && !location_expression.empty() &&
       std::to_integer<std::uint8_t>(location_expression.front()) == kDwOpBreg5) {
-    const auto raw = truncate_integer(
-        evaluate_breg5_stack_value(location_expression, debugger),
-        value_type.byte_size);
+    const bool stack_value =
+        std::to_integer<std::uint8_t>(location_expression.back()) == kDwOpStackValue;
+    const auto raw = stack_value
+                         ? truncate_integer(
+                               evaluate_breg5_stack_value(location_expression, debugger),
+                               value_type.byte_size)
+                         : read_integer(
+                               debugger,
+                               evaluate_breg5_memory_address(location_expression, debugger),
+                               value_type.byte_size);
     return LocalScalarValue{module.path(), std::string(name), raw,
                             value_type.byte_size, value_type.is_signed,
                             value_type.kind};

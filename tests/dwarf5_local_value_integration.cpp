@@ -25,9 +25,11 @@ constexpr std::uint64_t kExpectedEntryRdiSentinel = UINT64_C(0x777788889999aaaa)
 constexpr std::uint64_t kExpectedTransformedLocal = UINT64_C(0x458a30bf63ac1619);
 constexpr std::uint64_t kExpectedOptimizedLocal = UINT64_C(0x1e3c1e781e3c1ef0);
 constexpr std::uint64_t kExpectedArithmeticLocal = UINT64_C(0x10203040506070a5);
+constexpr std::uint64_t kExpectedIndirectLocal = UINT64_C(0x8877665544332211);
 constexpr const char* kExpectedEntryCliValue = "entry_parameter = 1161981756646125696";
 constexpr const char* kExpectedTransformedCliValue = "transformed = 5010871133972207129";
 constexpr const char* kExpectedCliValue = "optimized_local = 2178649820992642800";
+constexpr const char* kExpectedIndirectCliValue = "indirect_local = 9833440827789222417";
 
 void require(bool condition, const std::string& message) {
   if (!condition) throw std::runtime_error(message);
@@ -82,10 +84,12 @@ void test_direct_api(const std::string& fixture) {
   const auto transformed_probe = elf.find_symbol("transformed_local_probe");
   const auto optimized_probe = elf.find_symbol("optimized_local_probe");
   const auto arithmetic_probe = elf.find_symbol("arithmetic_local_probe");
+  const auto indirect_probe = elf.find_symbol("indirect_local_probe");
   require(entry_function.has_value(), "DWARF5 entry function symbol is missing");
   require(transformed_probe.has_value(), "DWARF5 transformed-local probe symbol is missing");
   require(optimized_probe.has_value(), "DWARF5 optimized-local probe symbol is missing");
   require(arithmetic_probe.has_value(), "DWARF5 arithmetic-local probe symbol is missing");
+  require(indirect_probe.has_value(), "DWARF5 indirect-local probe symbol is missing");
   const auto function_address = static_cast<std::uintptr_t>(
       elf.runtime_address(debugger.pid(), *entry_function));
   const auto transformed_address = static_cast<std::uintptr_t>(
@@ -95,11 +99,14 @@ void test_direct_api(const std::string& fixture) {
       elf.runtime_address(debugger.pid(), *optimized_probe));
   const auto arithmetic_address = static_cast<std::uintptr_t>(
       elf.runtime_address(debugger.pid(), *arithmetic_probe));
+  const auto indirect_address = static_cast<std::uintptr_t>(
+      elf.runtime_address(debugger.pid(), *indirect_probe));
   debugger.add_breakpoint(function_address);
   debugger.add_breakpoint(transformed_address);
   debugger.add_breakpoint(entry_address);
   debugger.add_breakpoint(optimized_address);
   debugger.add_breakpoint(arithmetic_address);
+  debugger.add_breakpoint(indirect_address);
 
   auto stop = debugger.continue_execution();
   require(stop.reason == mdbg::StopReason::Breakpoint &&
@@ -186,6 +193,22 @@ void test_direct_api(const std::string& fixture) {
   require(std::filesystem::equivalent(arithmetic_value.module_path, fixture),
           "DWARF5 arithmetic lookup lost owning module identity");
 
+  stop = debugger.continue_execution();
+  require(stop.reason == mdbg::StopReason::Breakpoint &&
+              stop.breakpoint_address == indirect_address,
+          "DWARF5 fixture did not stop while indirect_local was live");
+  const auto indirect_value =
+      mdbg::inspect_local_integer(debugger, elf, "indirect_local");
+  require(indirect_value.name == "indirect_local",
+          "DWARF5 indirect lookup returned wrong name");
+  require(indirect_value.raw_value == kExpectedIndirectLocal,
+          "DWARF5 indirect lookup returned wrong runtime value");
+  require(indirect_value.byte_size == sizeof(std::uint64_t) &&
+              !indirect_value.is_signed,
+          "DWARF5 indirect lookup returned wrong uint64_t type metadata");
+  require(std::filesystem::equivalent(indirect_value.module_path, fixture),
+          "DWARF5 indirect lookup lost owning module identity");
+
   const auto exit = debugger.continue_execution();
   require(exit.reason == mdbg::StopReason::Exited && exit.value == 0,
           "DWARF5 optimized-local fixture did not exit cleanly");
@@ -266,6 +289,7 @@ std::string run_cli(const std::string& mdbg_path, const std::string& fixture) {
       "break " + address_text.str() + "\n"
       "break optimized_local_probe\n"
       "break arithmetic_local_probe\n"
+      "break indirect_local_probe\n"
       "continue\n"
       "continue\n"
       "print transformed\n"
@@ -275,6 +299,8 @@ std::string run_cli(const std::string& mdbg_path, const std::string& fixture) {
       "print optimized_local\n"
       "continue\n"
       "print arithmetic_local\n"
+      "continue\n"
+      "print indirect_local\n"
       "continue\n";
   std::size_t offset = 0;
   while (offset < script.size()) {
@@ -324,7 +350,8 @@ void test_cli(const std::string& mdbg_path, const std::string& fixture) {
               output.find("Breakpoint 2") != std::string::npos &&
               output.find("Breakpoint 3") != std::string::npos &&
               output.find("Breakpoint 4") != std::string::npos &&
-              output.find("Breakpoint 5") != std::string::npos,
+              output.find("Breakpoint 5") != std::string::npos &&
+              output.find("Breakpoint 6") != std::string::npos,
           "DWARF5 CLI did not install all source-value breakpoints\n" + output);
   require(output.find(kExpectedTransformedCliValue) != std::string::npos,
           "DWARF5 CLI did not print transformed\n" + output);
@@ -336,6 +363,8 @@ void test_cli(const std::string& mdbg_path, const std::string& fixture) {
       std::string("arithmetic_local = ") + std::to_string(kExpectedArithmeticLocal);
   require(output.find(arithmetic_text) != std::string::npos,
           "DWARF5 CLI did not print arithmetic_local\n" + output);
+  require(output.find(kExpectedIndirectCliValue) != std::string::npos,
+          "DWARF5 CLI did not print indirect_local\n" + output);
 }
 
 }  // namespace

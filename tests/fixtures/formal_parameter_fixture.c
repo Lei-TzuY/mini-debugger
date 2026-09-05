@@ -6,8 +6,10 @@
 #define ENTRY_RESULT_EXPECTED UINT64_C(0x54a805fe32c96390)
 #define OPTIMIZED_LOCAL_EXPECTED UINT64_C(0x1e3c1e781e3c1ef0)
 #define ARITHMETIC_LOCAL_EXPECTED UINT64_C(0x10203040506070a5)
+#define INDIRECT_LOCAL_EXPECTED UINT64_C(0x8877665544332211)
 
 volatile uint64_t parameter_seed = UINT64_C(0x1122334455667788);
+uint64_t indirect_seed = INDIRECT_LOCAL_EXPECTED;
 
 __attribute__((noinline)) uint64_t inspect_parameter_value(uint64_t parameter) {
   __asm__ volatile(".globl formal_parameter_probe\n"
@@ -64,14 +66,25 @@ __attribute__((noinline)) uint64_t inspect_arithmetic_local(
   return arithmetic_local;
 }
 
+__attribute__((noinline)) uint64_t inspect_indirect_local(uint64_t* ptr) {
+  uint64_t indirect_local = *ptr;
+  __asm__ volatile(".globl indirect_local_probe\n"
+                   "indirect_local_probe:\n"
+                   "nop\n"
+                   :
+                   : "r"(ptr));
+  return indirect_local;
+}
+
 int main(void) {
   const uint64_t parameter = parameter_seed ^ UINT64_C(0x0102030405060708);
   if (inspect_parameter_value(parameter) != PARAMETER_EXPECTED) return 1;
   if (inspect_entry_parameter(parameter) != ENTRY_RESULT_EXPECTED) return 2;
   if (inspect_optimized_local() != OPTIMIZED_LOCAL_EXPECTED) return 3;
-  return inspect_arithmetic_local(UINT64_C(0xa5), UINT64_C(0x70), UINT64_C(0x60),
-                                  UINT64_C(0x50), UINT64_C(0x40), UINT64_C(0x102030)) ==
-                 ARITHMETIC_LOCAL_EXPECTED
-             ? 0
-             : 4;
+  if (inspect_arithmetic_local(UINT64_C(0xa5), UINT64_C(0x70), UINT64_C(0x60),
+                               UINT64_C(0x50), UINT64_C(0x40), UINT64_C(0x102030)) !=
+      ARITHMETIC_LOCAL_EXPECTED) {
+    return 4;
+  }
+  return inspect_indirect_local(&indirect_seed) == INDIRECT_LOCAL_EXPECTED ? 0 : 5;
 }

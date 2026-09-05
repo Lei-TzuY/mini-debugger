@@ -96,6 +96,14 @@ if(BUILD_TESTING)
   target_compile_options(formal_parameter_fixture_v5_nopie PRIVATE -O1 -g -gdwarf-5 -fno-pie)
   target_link_options(formal_parameter_fixture_v5_nopie PRIVATE -no-pie)
 
+  add_executable(register_piece_fixture_pie tests/fixtures/register_piece_fixture.c)
+  target_compile_options(register_piece_fixture_pie PRIVATE -O1 -g -gdwarf-5 -fPIE)
+  target_link_options(register_piece_fixture_pie PRIVATE -pie)
+
+  add_executable(register_piece_fixture_nopie tests/fixtures/register_piece_fixture.c)
+  target_compile_options(register_piece_fixture_nopie PRIVATE -O1 -g -gdwarf-5 -fno-pie)
+  target_link_options(register_piece_fixture_nopie PRIVATE -no-pie)
+
   add_executable(pointer_value_fixture_pie tests/fixtures/pointer_value_fixture.c)
   target_compile_options(pointer_value_fixture_pie PRIVATE -O0 -g -gdwarf-4 -fPIE)
   target_link_options(pointer_value_fixture_pie PRIVATE -pie)
@@ -348,6 +356,18 @@ if(BUILD_TESTING)
   add_test(NAME dwarf5_local_value_integration_nopie
     COMMAND dwarf5_local_value_integration
       $<TARGET_FILE:formal_parameter_fixture_v5_nopie>
+      $<TARGET_FILE:mdbg>)
+
+  add_executable(register_piece_value_integration tests/register_piece_value_integration.cpp)
+  target_link_libraries(register_piece_value_integration PRIVATE mdbg_core)
+  target_compile_options(register_piece_value_integration PRIVATE -Wall -Wextra -Wpedantic -Werror)
+  add_test(NAME register_piece_value_integration_pie
+    COMMAND register_piece_value_integration
+      $<TARGET_FILE:register_piece_fixture_pie>
+      $<TARGET_FILE:mdbg>)
+  add_test(NAME register_piece_value_integration_nopie
+    COMMAND register_piece_value_integration
+      $<TARGET_FILE:register_piece_fixture_nopie>
       $<TARGET_FILE:mdbg>)
 
   add_executable(pointer_value_integration tests/pointer_value_integration.cpp)

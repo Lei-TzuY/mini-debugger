@@ -18,6 +18,7 @@ add_library(mdbg_core
   src/registers/registers.cpp
   src/elf/elf.cpp
   src/debugger/debugger.cpp
+  src/debugger/memory_mutation.cpp
   src/loader/deferred_symbol_breakpoints.cpp
   src/unwind/frame_pointer.cpp
   src/unwind/cfi.cpp
@@ -143,6 +144,18 @@ if(BUILD_TESTING)
     COMMAND debugger_integration $<TARGET_FILE:debugger_fixture_pie>)
   add_test(NAME debugger_integration_nopie
     COMMAND debugger_integration $<TARGET_FILE:debugger_fixture_nopie>)
+
+  add_executable(memory_mutation_integration tests/memory_mutation_integration.cpp)
+  target_link_libraries(memory_mutation_integration PRIVATE mdbg_core)
+  target_compile_options(memory_mutation_integration PRIVATE -Wall -Wextra -Wpedantic -Werror)
+  add_test(NAME memory_mutation_integration_pie
+    COMMAND memory_mutation_integration
+      $<TARGET_FILE:debugger_fixture_pie>
+      $<TARGET_FILE:mdbg>)
+  add_test(NAME memory_mutation_integration_nopie
+    COMMAND memory_mutation_integration
+      $<TARGET_FILE:debugger_fixture_nopie>
+      $<TARGET_FILE:mdbg>)
 
   add_executable(attach_integration tests/attach_integration.cpp)
   target_link_libraries(attach_integration PRIVATE mdbg_core)

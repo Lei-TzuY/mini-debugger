@@ -118,12 +118,55 @@ void test_pointer_api(const std::string& fixture) {
           "pointer lookup did not recover the live pointee address");
   require(value.byte_size == sizeof(std::uint64_t) && !value.is_signed,
           "pointer lookup returned the wrong pointer width/sign metadata");
+  require(value.members.empty(), "pointer lookup unexpectedly returned aggregate members");
   require(std::filesystem::equivalent(value.module_path, fixture),
           "pointer lookup lost owning module identity");
 
   const auto exit = debugger.continue_execution();
   require(exit.reason == mdbg::StopReason::Exited && exit.value == 0,
           "pointer fixture did not exit cleanly after inspection");
+}
+
+void test_struct_api(const std::string& fixture) {
+  auto debugger = mdbg::Debugger::launch(fixture, {});
+  const mdbg::ElfFile elf(fixture);
+  const auto probe = elf.find_symbol("local_struct_probe");
+  require(probe.has_value(), "struct fixture probe symbol is unavailable");
+  const auto probe_address =
+      static_cast<std::uintptr_t>(elf.runtime_address(debugger.pid(), *probe));
+  debugger.add_breakpoint(probe_address);
+  const auto stop = debugger.continue_execution();
+  require(stop.reason == mdbg::StopReason::Breakpoint &&
+              stop.breakpoint_address == probe_address,
+          "struct fixture did not stop while local_struct was live");
+
+  const auto value = mdbg::inspect_local_value(debugger, elf, "local_struct");
+  require(value.name == "local_struct" && value.kind == mdbg::LocalValueKind::Structure,
+          "struct lookup did not preserve aggregate type metadata");
+  require(value.byte_size == 16 && !value.is_signed && value.raw_value == 0,
+          "struct lookup returned the wrong aggregate size/scalar metadata");
+  require(value.members.size() == 2, "struct lookup did not return two direct members");
+  require(value.members[0].name == "count" && value.members[0].raw_value == 0x11223344ULL &&
+              value.members[0].byte_size == 4 && !value.members[0].is_signed,
+          "struct lookup decoded count incorrectly");
+  require(value.members[1].name == "delta" &&
+              value.members[1].raw_value == static_cast<std::uint64_t>(INT64_C(-123456789)) &&
+              value.members[1].byte_size == 8 && value.members[1].is_signed,
+          "struct lookup decoded delta incorrectly");
+  require(std::filesystem::equivalent(value.module_path, fixture),
+          "struct lookup lost owning module identity");
+
+  bool integer_rejected = false;
+  try {
+    (void)mdbg::inspect_local_integer(debugger, elf, "local_struct");
+  } catch (const std::runtime_error&) {
+    integer_rejected = true;
+  }
+  require(integer_rejected, "integer-only compatibility API accepted a struct aggregate");
+
+  const auto exit = debugger.continue_execution();
+  require(exit.reason == mdbg::StopReason::Exited && exit.value == 0,
+          "struct fixture did not exit cleanly after inspection");
 }
 
 void test_pointer_cli(const std::string& integration_path, const std::string& fixture) {
@@ -158,6 +201,7 @@ int main(int argc, char** argv) {
   }
   try {
     test_pointer_api(argv[1]);
+    test_struct_api(argv[1]);
     test_pointer_cli(argv[0], argv[1]);
     test_struct_cli(argv[0], argv[1]);
     std::cout << "pointer and struct value integration passed\n";

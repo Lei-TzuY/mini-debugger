@@ -27,8 +27,10 @@ namespace mdbg {
 namespace {
 
 constexpr std::uint64_t kDwTagFormalParameter = 0x05;
+constexpr std::uint64_t kDwTagMember = 0x0d;
 constexpr std::uint64_t kDwTagLexicalBlock = 0x0b;
 constexpr std::uint64_t kDwTagPointerType = 0x0f;
+constexpr std::uint64_t kDwTagStructureType = 0x13;
 constexpr std::uint64_t kDwTagTypedef = 0x16;
 constexpr std::uint64_t kDwTagBaseType = 0x24;
 constexpr std::uint64_t kDwTagSubprogram = 0x2e;
@@ -39,6 +41,7 @@ constexpr std::uint64_t kDwAtName = 0x03;
 constexpr std::uint64_t kDwAtByteSize = 0x0b;
 constexpr std::uint64_t kDwAtLowPc = 0x11;
 constexpr std::uint64_t kDwAtHighPc = 0x12;
+constexpr std::uint64_t kDwAtDataMemberLocation = 0x38;
 constexpr std::uint64_t kDwAtEncoding = 0x3e;
 constexpr std::uint64_t kDwAtFrameBase = 0x40;
 constexpr std::uint64_t kDwAtType = 0x49;
@@ -62,6 +65,8 @@ constexpr std::uint8_t kDwOpFbreg = 0x91;
 constexpr std::uint8_t kDwOpCallFrameCfa = 0x9c;
 constexpr std::uint64_t kDwAteSigned = 0x05;
 constexpr std::uint64_t kDwAteUnsigned = 0x07;
+constexpr std::size_t kMaxLocalStructSize = 256;
+constexpr std::size_t kMaxLocalStructMembers = 32;
 
 struct DebugSections {
   std::vector<std::byte> info;
@@ -101,10 +106,17 @@ struct IntegerType {
   bool is_signed;
 };
 
-struct ScalarType {
+struct AggregateMemberType {
+  std::string name;
+  std::size_t offset;
+  IntegerType integer;
+};
+
+struct ValueType {
   std::size_t byte_size;
   bool is_signed;
   LocalValueKind kind;
+  std::vector<AggregateMemberType> members;
 };
 
 std::string normalized_source_path(const std::filesystem::path& path) {
@@ -498,7 +510,12 @@ IntegerType resolve_integer_type(const std::vector<Die>& dies, std::uint64_t typ
   throw std::runtime_error("local variable typedef chain is too deep");
 }
 
-ScalarType resolve_scalar_type(const std::vector<Die>& dies, std::uint64_t type_offset) {
+bool is_constant_member_offset_form(std::uint64_t form) {
+  return form == kDwFormData1 || form == kDwFormData2 || form == kDwFormData4 ||
+         form == kDwFormData8;
+}
+
+ValueType resolve_value_type(const std::vector<Die>& dies, std::uint64_t type_offset) {
   for (unsigned depth = 0; depth < 16; ++depth) {
     const auto index = die_index_by_offset(dies, type_offset);
     if (!index) throw std::runtime_error("local variable type references an unknown DIE");
@@ -523,14 +540,55 @@ ScalarType resolve_scalar_type(const std::vector<Die>& dies, std::uint64_t type_
         throw std::runtime_error("local pointer type has no supported DW_FORM_ref4 pointee");
       }
       (void)resolve_integer_type(dies, pointee->number);
-      return ScalarType{pointer_size, false, LocalValueKind::Pointer};
+      return ValueType{pointer_size, false, LocalValueKind::Pointer, {}};
     }
     if (die.tag == kDwTagBaseType) {
       const auto integer = resolve_integer_type(dies, type_offset);
-      return ScalarType{integer.byte_size, integer.is_signed, LocalValueKind::Integer};
+      return ValueType{integer.byte_size, integer.is_signed, LocalValueKind::Integer, {}};
+    }
+    if (die.tag == kDwTagStructureType) {
+      const auto* size = attribute(die, kDwAtByteSize);
+      if (size == nullptr || size->number == 0 || size->number > kMaxLocalStructSize) {
+        throw std::runtime_error("local struct has an unsupported byte size");
+      }
+      const auto struct_size = static_cast<std::size_t>(size->number);
+      std::vector<AggregateMemberType> members;
+      for (std::size_t child_index = 0; child_index < dies.size(); ++child_index) {
+        if (dies[child_index].parent != *index) continue;
+        const auto& member = dies[child_index];
+        if (member.tag != kDwTagMember) {
+          throw std::runtime_error("local struct has an unsupported direct child DIE");
+        }
+        if (members.size() >= kMaxLocalStructMembers) {
+          throw std::runtime_error("local struct has too many direct members");
+        }
+        const auto* member_name = attribute(member, kDwAtName);
+        const auto* member_type = attribute(member, kDwAtType);
+        const auto* member_offset = attribute(member, kDwAtDataMemberLocation);
+        if (member_name == nullptr || member_name->text.empty()) {
+          throw std::runtime_error("local struct member has no supported name");
+        }
+        if (member_type == nullptr || member_type->form != kDwFormRef4) {
+          throw std::runtime_error("local struct member has no supported DW_FORM_ref4 type");
+        }
+        if (member_offset == nullptr || !is_constant_member_offset_form(member_offset->form)) {
+          throw std::runtime_error("local struct member has no supported constant offset");
+        }
+        if (member_offset->number > std::numeric_limits<std::size_t>::max()) {
+          throw std::runtime_error("local struct member offset is too large");
+        }
+        const auto offset = static_cast<std::size_t>(member_offset->number);
+        const auto integer = resolve_integer_type(dies, member_type->number);
+        if (offset > struct_size || integer.byte_size > struct_size - offset) {
+          throw std::runtime_error("local struct member extends past aggregate storage");
+        }
+        members.push_back(AggregateMemberType{member_name->text, offset, integer});
+      }
+      if (members.empty()) throw std::runtime_error("local struct has no supported direct members");
+      return ValueType{struct_size, false, LocalValueKind::Structure, std::move(members)};
     }
     throw std::runtime_error(
-        "local variable type is not a supported typedef/base-type/pointer chain");
+        "local variable type is not a supported typedef/base-type/pointer/structure chain");
   }
   throw std::runtime_error("local variable type chain is too deep");
 }
@@ -616,15 +674,25 @@ std::uint64_t frame_base(const Debugger& debugger, const ElfFile& module,
   return caller->stack_pointer;
 }
 
+std::uint64_t decode_integer(const std::vector<std::byte>& bytes, std::size_t offset,
+                             std::size_t byte_size) {
+  if (byte_size == 0 || byte_size > 8 || offset > bytes.size() ||
+      byte_size > bytes.size() - offset) {
+    throw std::runtime_error("local integer decode exceeds owned storage");
+  }
+  std::uint64_t value = 0;
+  for (std::size_t index = 0; index < byte_size; ++index) {
+    value |= static_cast<std::uint64_t>(std::to_integer<unsigned>(bytes[offset + index]))
+             << (index * 8U);
+  }
+  return value;
+}
+
 std::uint64_t read_integer(const Debugger& debugger, std::uint64_t address,
                            std::size_t byte_size) {
   const auto bytes = debugger.read_memory(static_cast<std::uintptr_t>(address), byte_size);
   if (bytes.size() != byte_size) throw std::runtime_error("short local-variable memory read");
-  std::uint64_t value = 0;
-  for (std::size_t index = 0; index < byte_size; ++index) {
-    value |= static_cast<std::uint64_t>(std::to_integer<unsigned>(bytes[index])) << (index * 8U);
-  }
-  return value;
+  return decode_integer(bytes, 0, byte_size);
 }
 
 std::uint64_t truncate_integer(std::uint64_t value, std::size_t byte_size) {
@@ -710,7 +778,7 @@ std::optional<LocalScalarValue> inspect_unit(const DebugSections& sections,
     throw std::runtime_error("local value has no supported DW_FORM_ref4 type");
   }
 
-  const auto scalar_type = resolve_scalar_type(dies, type->number);
+  const auto value_type = resolve_value_type(dies, type->number);
   std::vector<std::byte> location_expression;
   if (location->form == kDwFormExprloc) {
     location_expression = location->expression;
@@ -721,25 +789,28 @@ std::optional<LocalScalarValue> inspect_unit(const DebugSections& sections,
     throw std::runtime_error("local value has no supported DW_AT_location form");
   }
 
-  if (location_expression.size() == 1) {
+  if (value_type.kind != LocalValueKind::Structure && location_expression.size() == 1) {
     const auto op = std::to_integer<std::uint8_t>(location_expression.front());
     const auto regs = debugger.registers();
     if (op == kDwOpReg0) {
-      const auto raw = truncate_integer(regs.rax, scalar_type.byte_size);
+      const auto raw = truncate_integer(regs.rax, value_type.byte_size);
       return LocalScalarValue{module.path(), std::string(name), raw,
-                              scalar_type.byte_size, scalar_type.is_signed,
-                              scalar_type.kind};
+                              value_type.byte_size, value_type.is_signed,
+                              value_type.kind};
     }
     if (op == kDwOpReg5) {
-      const auto raw = truncate_integer(regs.rdi, scalar_type.byte_size);
+      const auto raw = truncate_integer(regs.rdi, value_type.byte_size);
       return LocalScalarValue{module.path(), std::string(name), raw,
-                              scalar_type.byte_size, scalar_type.is_signed,
-                              scalar_type.kind};
+                              value_type.byte_size, value_type.is_signed,
+                              value_type.kind};
     }
   }
 
   if (location_expression.empty() ||
       std::to_integer<std::uint8_t>(location_expression.front()) != kDwOpFbreg) {
+    if (value_type.kind == LocalValueKind::Structure) {
+      throw std::runtime_error("local struct is not in the supported DW_OP_fbreg storage form");
+    }
     throw std::runtime_error(
         "local value location is not a supported DW_OP_reg0/DW_OP_reg5/DW_OP_fbreg form");
   }
@@ -750,10 +821,26 @@ std::optional<LocalScalarValue> inspect_unit(const DebugSections& sections,
   const auto base = frame_base(debugger, module, base_expression->expression);
   const auto address = add_signed(base, fbreg_offset(location_expression),
                                   "local variable address");
+  if (value_type.kind == LocalValueKind::Structure) {
+    const auto bytes = debugger.read_memory(static_cast<std::uintptr_t>(address),
+                                            value_type.byte_size);
+    if (bytes.size() != value_type.byte_size) {
+      throw std::runtime_error("short local-struct memory read");
+    }
+    LocalScalarValue result{module.path(), std::string(name), 0, value_type.byte_size,
+                            false, LocalValueKind::Structure};
+    result.members.reserve(value_type.members.size());
+    for (const auto& member : value_type.members) {
+      result.members.push_back(LocalStructMember{
+          member.name, decode_integer(bytes, member.offset, member.integer.byte_size),
+          member.integer.byte_size, member.integer.is_signed});
+    }
+    return result;
+  }
   return LocalScalarValue{module.path(), std::string(name),
-                          read_integer(debugger, address, scalar_type.byte_size),
-                          scalar_type.byte_size, scalar_type.is_signed,
-                          scalar_type.kind};
+                          read_integer(debugger, address, value_type.byte_size),
+                          value_type.byte_size, value_type.is_signed,
+                          value_type.kind};
 }
 
 }  // namespace

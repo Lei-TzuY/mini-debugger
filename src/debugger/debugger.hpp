@@ -34,7 +34,7 @@ enum class StopReason {
   Signaled
 };
 enum class SignalPolicy { Suppress, Forward };
-enum class ProcessEventKind { None, Fork };
+enum class ProcessEventKind { None, Fork, Vfork };
 
 struct StopInfo {
   StopReason reason;

@@ -45,7 +45,14 @@ std::string process_executable(pid_t pid) {
 }
 
 unsigned long tracing_options(ProcessOrigin origin) {
-  unsigned long options = PTRACE_O_TRACECLONE | PTRACE_O_TRACEEXEC | PTRACE_O_TRACEFORK;
+  unsigned long options = PTRACE_O_TRACECLONE | PTRACE_O_TRACEEXEC | PTRACE_O_TRACEFORK |
+                          PTRACE_O_TRACEVFORK | PTRACE_O_TRACEVFORKDONE;
+  if (origin == ProcessOrigin::Launched) options |= PTRACE_O_EXITKILL;
+  return options;
+}
+
+unsigned long transient_vfork_child_options(ProcessOrigin origin) {
+  unsigned long options = PTRACE_O_TRACEEXEC;
   if (origin == ProcessOrigin::Launched) options |= PTRACE_O_EXITKILL;
   return options;
 }
@@ -57,11 +64,23 @@ void wait_for_unfollowed_child_stop(pid_t child) {
     result = ::waitpid(child, &status, __WALL);
   } while (result == -1 && errno == EINTR);
   if (result != child) {
-    throw std::runtime_error("failed to consume fork child's initial ptrace stop");
+    throw std::runtime_error("failed to consume process child's initial ptrace stop");
   }
   if (!WIFSTOPPED(status)) {
-    throw std::runtime_error("fork child did not enter an initial ptrace stop");
+    throw std::runtime_error("process child did not enter an initial ptrace stop");
   }
+}
+
+int wait_for_transient_child(pid_t child) {
+  int status = 0;
+  pid_t result;
+  do {
+    result = ::waitpid(child, &status, __WALL);
+  } while (result == -1 && errno == EINTR);
+  if (result != child) {
+    throw std::runtime_error("failed to wait for transient vfork child");
+  }
+  return status;
 }
 }  // namespace
 
@@ -453,6 +472,90 @@ StopInfo Debugger::wait_and_classify(bool expected_single_step) {
       stop_info_ = make_stop(StopReason::Exec, SIGTRAP, event.tid);
       stop_info_.former_tid = former_tid;
       return stop_info_;
+    }
+
+    if (event.ptrace_event == PTRACE_EVENT_VFORK) {
+      const auto message = lowlevel::get_event_message(event.tid);
+      if (message == 0 ||
+          message > static_cast<std::uint64_t>(std::numeric_limits<pid_t>::max())) {
+        throw std::runtime_error("PTRACE_EVENT_VFORK returned an invalid child process id");
+      }
+      const auto child = static_cast<pid_t>(message);
+      wait_for_unfollowed_child_stop(child);
+
+      bool child_owned = true;
+      try {
+        if (watchpoint_register_snapshot_ && watchpoint_register_snapshot_->tid == event.tid) {
+          const auto& snapshot = *watchpoint_register_snapshot_;
+          const auto current_dr7 = lowlevel::get_debug_register(child, 7);
+          const auto disabled_dr7 =
+              current_dr7 & ~(kDr7Slot0EnableMask | kDr7Slot0ControlMask);
+          lowlevel::set_debug_register(child, 7, disabled_dr7);
+          lowlevel::set_debug_register(child, 0, snapshot.dr0);
+          lowlevel::set_debug_register(child, 6, snapshot.dr6);
+          lowlevel::set_debug_register(child, 7, snapshot.dr7);
+        }
+
+        lowlevel::set_options(child, transient_vfork_child_options(process_.origin()));
+        lowlevel::continue_process(child);
+
+        for (;;) {
+          const int status = wait_for_transient_child(child);
+          if (WIFEXITED(status) || WIFSIGNALED(status)) {
+            child_owned = false;
+            break;
+          }
+          if (!WIFSTOPPED(status)) {
+            throw std::runtime_error("vfork child entered an unsupported wait state");
+          }
+
+          const auto ptrace_event = static_cast<unsigned int>(status >> 16);
+          if (ptrace_event == PTRACE_EVENT_EXEC) {
+            lowlevel::detach(child);
+            child_owned = false;
+            break;
+          }
+          if (ptrace_event != 0) {
+            throw std::runtime_error("vfork child produced an unsupported ptrace event before VM release");
+          }
+
+          const int signal = WSTOPSIG(status);
+          if (signal == SIGTRAP) {
+            throw std::runtime_error("vfork child trapped before releasing the shared address space");
+          }
+          lowlevel::continue_process(child, signal);
+        }
+
+        lowlevel::continue_process(event.tid);
+        process_.mark_running(event.tid);
+        const auto done = process_.wait();
+        if (done.kind != WaitEvent::Kind::Stopped || done.tid != event.tid ||
+            done.ptrace_event != PTRACE_EVENT_VFORK_DONE) {
+          throw std::runtime_error("followed parent did not stop at PTRACE_EVENT_VFORK_DONE");
+        }
+        const auto done_message = lowlevel::get_event_message(done.tid);
+        if (done_message != static_cast<std::uint64_t>(child)) {
+          throw std::runtime_error("PTRACE_EVENT_VFORK_DONE did not match the released child");
+        }
+      } catch (...) {
+        if (child_owned) {
+          try {
+            lowlevel::detach(child, SIGKILL);
+          } catch (...) {
+            (void)::kill(child, SIGKILL);
+          }
+        }
+        throw;
+      }
+
+      stop_info_ = make_stop(StopReason::Trap, SIGTRAP, event.tid);
+      stop_info_.process_event = ProcessEventKind::Vfork;
+      stop_info_.child_pid = child;
+      return stop_info_;
+    }
+
+    if (event.ptrace_event == PTRACE_EVENT_VFORK_DONE) {
+      throw std::runtime_error("unexpected standalone PTRACE_EVENT_VFORK_DONE");
     }
 
     if (event.ptrace_event == PTRACE_EVENT_FORK) {

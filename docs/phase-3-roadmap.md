@@ -20,30 +20,41 @@ This closes the bounded launched-exec milestone. The tracing option is also inst
 
 ## Priority 1: fork/vfork process topology — current frontier
 
-Forked children are not threads in the current task registry: the existing model validates TIDs against one `/proc/<leader>/task` set and owns one process-wide software-breakpoint namespace. `PTRACE_O_TRACEFORK`/`PTRACE_O_TRACEVFORK` therefore require a process-topology abstraction rather than inserting child PIDs into the P4 thread map.
+Forked children are not threads in the current task registry: the existing model validates TIDs against one `/proc/<leader>/task` set and owns one process-wide software-breakpoint namespace. Fork/vfork therefore use an explicit follow-parent/unfollow-child process-topology policy rather than inserting child PIDs into the P4 thread map.
 
-P1-A follow-parent `fork()` is complete as the first bounded process-topology slice:
+P1-A follow-parent `fork()` is complete:
 
-- the policy is explicit follow-parent/unfollow-child: `PTRACE_O_TRACEFORK` is enabled, `StopInfo` exposes `ProcessEventKind::Fork` plus the distinct child PID, and the child is never inserted into the followed parent's TID registry;
+- `PTRACE_O_TRACEFORK` is enabled, `StopInfo` exposes `ProcessEventKind::Fork` plus the distinct child PID, and the child is never inserted into the followed parent's TID registry;
 - the debugger consumes the kernel-created child's initial ptrace stop before releasing it, so transient ptrace ownership cannot leak outside the topology transition;
 - installed software breakpoints inherited across `fork()` are restored in the child's copy-on-write address space before detach while the parent's breakpoint metadata and physical `INT3` remain owned by the parent session;
 - when the forking TID owns the bounded hardware watchpoint, the child's inherited DR0/DR6/DR7 state is restored to the pre-watchpoint snapshot before detach rather than silently extending parent watchpoint ownership to the child process;
 - detach failure uses a bounded best-effort kill/detach cleanup path rather than releasing a partially restored child;
 - a real fork fixture executes the same managed-breakpointed probe in both domains: the child reaches an independent SIGSTOP with `TracerPid: 0`, is externally resumed and exits, while the followed parent retains its one-process task registry, later hits the original managed breakpoint, removes it, and exits cleanly;
 - the fixture blocks SIGCHLD only to isolate this topology test from the already independent signal-delivery policy; production does not swallow or special-case SIGCHLD;
-- PIE and non-PIE run through the full GCC and Clang-large matrices. Test-first coverage initially failed because no process-event identity existed, and the first production candidate then exposed the real child-exit/SIGCHLD ordering before the fixture isolated that orthogonal signal stop.
+- PIE and non-PIE run through the full GCC and Clang-large matrices.
 
-Priority 1 remains in progress. P1-A deliberately does not enable `PTRACE_O_TRACEVFORK`: a vfork child shares the parent's address space until exec/exit, so restoring inherited `INT3` bytes in the child would also mutate the followed parent. The next topology slice must define a shared-VM ownership protocol around `PTRACE_EVENT_VFORK`/`PTRACE_EVENT_VFORK_DONE` before enabling those events. Process-event identity is currently exposed through the debugger API; dedicated CLI rendering for fork/vfork ownership remains part of Priority 1 product integration and is not claimed complete by P1-A.
+P1-B shared-VM-safe `vfork()` ownership is complete for the launched follow-parent policy:
+
+- tracing enables both `PTRACE_O_TRACEVFORK` and `PTRACE_O_TRACEVFORKDONE`, and completed transitions are surfaced as `ProcessEventKind::Vfork` with the transient child PID while ownership remains on the followed parent;
+- the parent stays ptrace-stopped for the entire shared-address-space window; the transient child is waited directly by the debugger and never enters the parent's thread registry;
+- unlike ordinary fork handling, the debugger never restores or rewrites inherited software-breakpoint bytes through the vfork child while VM ownership is shared, so a child cannot accidentally remove the followed parent's physical `INT3`;
+- inherited hardware debug-register state is per-task rather than shared VM state, so a child of the watchpoint-owning TID is restored to the pre-watchpoint DR0/DR6/DR7 snapshot before it runs, without transferring the parent's logical watchpoint ownership;
+- the transient child is internally advanced only until the shared VM is released by either `_exit()` or `exec`; an exec child is detached only after its `PTRACE_EVENT_EXEC` stop, when it owns an independent image, while an exited child is already reaped;
+- only after child VM release does the debugger resume the parent and require the matching `PTRACE_EVENT_VFORK_DONE`; no completed topology event is exposed before that synchronization point;
+- this ordering also keeps a restored byte behind any pending parent displaced-breakpoint step untouched throughout the shared-VM window; normal breakpoint reinsertion occurs only after the vfork handler returns past `VFORK_DONE`;
+- a real fixture executes two transitions in one session—one vfork child releases via `_exit()`, another via `exec()`—while a managed parent breakpoint and thread-owned hardware watchpoint remain armed across both transitions; the parent then hits the original breakpoint, hits the original watchpoint on its data write, removes both, and exits cleanly;
+- PIE and non-PIE run through the full GCC and Clang-large matrices. Test-first coverage failed only because no vfork process event existed; the final protocol proves both child-release paths rather than relying on synthetic ptrace-event injection.
+
+Priority 1 remains in progress only at the interactive product boundary. P1-C is the current slice: render fork/vfork topology stops through the CLI with explicit event kind, followed parent identity, and transient child identity, while preserving the existing follow-parent policy and without introducing a second process registry.
 
 Remaining Priority 1 acceptance:
 
-- define and prove the `vfork()` shared-address-space policy without corrupting parent breakpoint/displaced-step/watchpoint ownership;
-- preserve independent lifecycle and cleanup semantics across `VFORK_DONE`, child exec/exit, signals, detach, and terminal parent exit;
-- expose process-topology ownership clearly through the interactive CLI once fork/vfork semantics are stable;
-- add real PIE/non-PIE vfork integration rather than relying on synthetic ptrace-event injection.
+- expose `Fork` and `Vfork` ownership clearly through the interactive CLI, including parent/child identity and an unambiguous indication that the child is unfollowed;
+- drive the existing real fork and vfork workflows through `mdbg` subprocess integration so the interactive contract is executable rather than API-only;
+- keep attached-process fork/vfork as an explicit evidence boundary unless a separate real attached topology workflow proves it.
 
-Do not complete this milestone by merely enabling `PTRACE_O_TRACEVFORK`. vfork is shared-address-space ownership, not a fork flag variant.
+Do not expand Priority 1 into follow-child or multi-process debugging while the current bounded follow-parent product contract is being closed.
 
 ## Selection rule
 
-Priority 1 remains the current frontier, with vfork/VFORK_DONE ownership as the next architectural slice. Expression evaluation, richer register classes, and convenience UI are lower priority until fork/vfork has an executable process-topology contract. As in Phase 2, compiler/kernel variants are added only when a reproducible real workflow demonstrates a gap.
+Priority 1 remains the current frontier, with P1-C CLI process-topology rendering as the next coherent slice. Expression evaluation, richer register classes, follow-child policy, and convenience UI are lower priority until the bounded follow-parent fork/vfork contract is executable end to end. As in Phase 2, compiler/kernel variants are added only when a reproducible real workflow demonstrates a gap.

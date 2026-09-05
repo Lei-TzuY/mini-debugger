@@ -31,3 +31,17 @@ jobs:
         run: cmake --build build --parallel 2
       - name: Test
         run: ctest --test-dir build --output-on-failure
+      - name: DWARF5 optimized source-value integration
+        run: |
+          "$CC" -O1 -g -gdwarf-5 -fPIE tests/fixtures/formal_parameter_fixture.c -pie -o build/formal_parameter_fixture_v5_pie
+          "$CC" -O1 -g -gdwarf-5 -fno-pie tests/fixtures/formal_parameter_fixture.c -no-pie -o build/formal_parameter_fixture_v5_nopie
+          build/dwarf_line_integration \
+            build/debug_line_fixture_pie \
+            build/debugger_fixture_stripped \
+            build/debug_line_fixture_v5 \
+            build/formal_parameter_fixture_v5_pie
+          build/dwarf_line_integration \
+            build/debug_line_fixture_nopie \
+            build/debugger_fixture_stripped \
+            build/debug_line_fixture_v5 \
+            build/formal_parameter_fixture_v5_nopie

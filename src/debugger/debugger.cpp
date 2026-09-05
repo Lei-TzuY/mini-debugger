@@ -161,10 +161,6 @@ std::vector<Breakpoint> Debugger::breakpoints() const {
 
 std::size_t Debugger::add_write_watchpoint(std::uintptr_t address, std::size_t length) {
   const auto tid = stopped_tid();
-  if (process_.tids().size() != 1) {
-    throw std::logic_error(
-        "hardware watchpoints are currently limited to a single traced thread");
-  }
   if (watchpoint_) {
     throw std::invalid_argument("only one hardware watchpoint is currently supported");
   }
@@ -366,6 +362,10 @@ StopInfo Debugger::wait_and_classify(bool expected_single_step) {
     if (event.kind == WaitEvent::Kind::Exited) {
       pending_thread_starts_.erase(event.tid);
       pending_signals_.erase(event.tid);
+      if (watchpoint_register_snapshot_ && watchpoint_register_snapshot_->tid == event.tid) {
+        watchpoint_.reset();
+        watchpoint_register_snapshot_.reset();
+      }
       if (process_.tids().empty()) {
         stop_info_ = make_stop(StopReason::Exited, event.value, event.tid);
         return stop_info_;
@@ -377,6 +377,10 @@ StopInfo Debugger::wait_and_classify(bool expected_single_step) {
     if (event.kind == WaitEvent::Kind::Signaled) {
       pending_thread_starts_.erase(event.tid);
       pending_signals_.erase(event.tid);
+      if (watchpoint_register_snapshot_ && watchpoint_register_snapshot_->tid == event.tid) {
+        watchpoint_.reset();
+        watchpoint_register_snapshot_.reset();
+      }
       if (process_.tids().empty()) {
         stop_info_ = make_stop(StopReason::Signaled, event.value, event.tid);
         return stop_info_;

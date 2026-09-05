@@ -148,6 +148,63 @@ void run_follow_parent_fork(const std::string& driver) {
           "followed parent did not exit cleanly after detached child completion");
 }
 
+void run_follow_parent_vfork(const std::string& driver, const std::string& target) {
+  auto debugger = mdbg::Debugger::launch(driver, {"--vfork-topology", target});
+  require(debugger.stop_info().reason == mdbg::StopReason::InitialExec,
+          "vfork driver did not expose the initial exec stop");
+  const auto leader = debugger.pid();
+
+  const mdbg::ElfFile image(driver);
+  const auto probe = image.find_symbol("vfork_parent_probe");
+  const auto value = image.find_symbol("vfork_parent_value");
+  require(probe.has_value() && value.has_value(),
+          "vfork parent probe/value symbols are unavailable");
+  const auto probe_address =
+      static_cast<std::uintptr_t>(image.runtime_address(leader, *probe));
+  const auto value_address =
+      static_cast<std::uintptr_t>(image.runtime_address(leader, *value));
+
+  const auto breakpoint_id = debugger.add_breakpoint(probe_address);
+  const auto watchpoint_id =
+      debugger.add_write_watchpoint(value_address, sizeof(std::uint64_t));
+
+  auto info = debugger.continue_execution();
+  require(info.process_event != mdbg::ProcessEventKind::None,
+          "real vfork was not surfaced as a process-topology event");
+  require(info.tid == leader, "vfork event did not remain owned by the followed parent");
+  require(info.child_pid.has_value() && *info.child_pid > 0 && *info.child_pid != leader,
+          "vfork event did not expose a distinct child process identity");
+
+  const auto threads = debugger.threads();
+  require(threads.size() == 1 && threads.front().tid == leader && threads.front().active,
+          "transient vfork child leaked into the parent's TID registry");
+  require(debugger.breakpoints().size() == 1 &&
+              debugger.breakpoints().front().id == breakpoint_id,
+          "parent breakpoint ownership changed across vfork shared-VM release");
+  require(debugger.watchpoints().size() == 1 &&
+              debugger.watchpoints().front().id == watchpoint_id,
+          "parent watchpoint ownership changed across vfork shared-VM release");
+
+  info = debugger.continue_execution();
+  require(info.reason == mdbg::StopReason::Breakpoint && info.tid == leader &&
+              info.breakpoint_address == probe_address,
+          "parent managed breakpoint did not survive vfork shared-VM handling");
+
+  info = debugger.continue_execution();
+  require(info.reason == mdbg::StopReason::Watchpoint && info.tid == leader &&
+              info.watchpoint_id == watchpoint_id &&
+              info.watchpoint_address == value_address,
+          "parent hardware watchpoint did not survive vfork shared-VM handling");
+
+  require(debugger.remove_breakpoint(breakpoint_id),
+          "parent managed breakpoint could not be removed after vfork");
+  require(debugger.remove_watchpoint(watchpoint_id),
+          "parent hardware watchpoint could not be removed after vfork");
+  info = debugger.continue_execution();
+  require(info.reason == mdbg::StopReason::Exited && info.value == 0,
+          "followed parent did not exit cleanly after vfork completion");
+}
+
 struct CliProcess {
   pid_t pid{-1};
   int input{-1};
@@ -303,6 +360,7 @@ int main(int argc, char** argv) {
   try {
     run_exec_replacement(argv[1], argv[2]);
     run_follow_parent_fork(argv[1]);
+    run_follow_parent_vfork(argv[1], argv[2]);
     run_cli_exec_replacement(argv[1], argv[2]);
     std::cout << "exec/process topology integration passed\n";
   } catch (const std::exception& error) {

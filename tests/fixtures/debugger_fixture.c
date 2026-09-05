@@ -177,6 +177,31 @@ static int run_threaded_select_attach(const char* path) {
   return worker_marker == 6 && fixture_value == 0x1122334455667789ULL ? 0 : 104;
 }
 
+static void* watchpoint_worker(void* argument) {
+  (void)argument;
+  worker_marker = 7;
+  while (!selection_release) usleep(1000);
+  watched_write();
+  worker_marker = 8;
+  return NULL;
+}
+
+static int run_threaded_watchpoint_attach(const char* path) {
+  struct sigaction action;
+  memset(&action, 0, sizeof(action));
+  action.sa_handler = release_selection_worker;
+  sigemptyset(&action.sa_mask);
+  if (sigaction(SIGUSR2, &action, NULL) != 0) return 105;
+
+  pthread_t thread;
+  if (pthread_create(&thread, NULL, watchpoint_worker, NULL) != 0) return 106;
+  while (worker_marker != 7) usleep(1000);
+  publish_addresses(path);
+  if (pthread_join(thread, NULL) != 0) return 107;
+  watched_write();
+  return worker_marker == 8 && fixture_value == 0x112233445566778aULL ? 0 : 108;
+}
+
 int main(int argc, char** argv) {
   if (argc == 2 && strcmp(argv[1], "thread-lifecycle") == 0) {
     return run_thread_lifecycle();
@@ -188,6 +213,9 @@ int main(int argc, char** argv) {
   }
   if (strcmp(argv[2], "attach-thread-select") == 0) {
     return run_threaded_select_attach(argv[1]);
+  }
+  if (strcmp(argv[2], "attach-thread-watchpoint") == 0) {
+    return run_threaded_watchpoint_attach(argv[1]);
   }
   publish_addresses(argv[1]);
 

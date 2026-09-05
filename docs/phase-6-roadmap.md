@@ -6,22 +6,36 @@ Execution ownership remains the live active process/TID that ptrace may resume, 
 
 A caller-frame value must never be faked by reading the active callee TID register file. Registers required by a non-current frame must come from explicit unwind recovery. Inferior-memory reads remain owned by the correct process domain/TID. Unsupported or unavailable state fails explicitly.
 
-## Priority 0: caller-frame source-value ownership — current frontier
+## Priority 0: caller-frame source-value ownership — complete
 
-The first Phase 6 slice must be an executable frame-inspection workflow, not a presentation-only `frame` command. Select a real two-or-more-frame compiler fixture with a caller local or parameter that is visible at a stable callee stop and prove caller inspection uses an explicit frame context.
+The first Phase 6 slice establishes an executable caller-frame inspection boundary rather than a presentation-only frame selector.
+
+Completed bounded capability:
+
+- `InspectionFrameContext` carries the owning process/TID, monotonic debugger-stop identity, origin live-register fingerprint, frame PC/module identity, stack/frame cursors, and bounded recovered register state;
+- frame 0 is constructed from the actual active stopped TID and preserves the existing live-frame source-value path;
+- the existing CFI machinery derives a real caller frame and PIE/non-PIE GCC/Clang-large integration recovers a compiler-produced caller local from `DW_OP_fbreg` stack storage without substituting callee registers;
+- caller-frame source lookup preserves module, type, lexical-scope, and process/TID ownership and fails explicitly when the caller expression requires unavailable historical state;
+- inspection contexts are bound to a monotonic stop sequence as well as the live RIP/RSP/RBP fingerprint, so a new stop invalidates an older frame even when the tracee returns to an identical machine state;
+- process-domain selection advances the same inspection generation, preventing an old frame from becoming valid again after an A→B→A process-selection round trip;
+- execution ownership remains independent: constructing or using an inspection frame does not redirect resume, step, signal delivery, register/memory mutation, breakpoint displacement, or hardware-watchpoint ownership.
+
+This milestone deliberately does not claim an arbitrary historical register file, generic frame UI, or post-mortem debugging.
+
+## Priority 1: compiler-proven caller register recovery — current frontier
+
+The next Phase 6 slice should extend caller inspection only when real compiler output demonstrates a caller local or parameter whose selected location needs historical register state that Priority 0 does not recover.
 
 Acceptance criteria:
 
-- introduce an explicit inspection-frame context containing at least the owning process domain/TID, frame PC/module identity, and the bounded unwind register state required by the selected compiler-produced location;
-- frame 0 derives from the actual active stopped TID and remains behaviorally identical to the existing current-frame source-value path;
-- derive at least one real caller frame through the existing bounded unwind/CFI machinery and recover a compiler-produced caller local or parameter with correct module/type/lexical ownership in PIE and non-PIE under both permanent compiler lanes;
-- if the selected caller expression requires a register that the current CFI cursor does not recover, extend register recovery only for the compiler/CFI evidence required by that fixture; never substitute the callee's current register;
-- real CLI coverage may expose `frame <index>` or frame selection only in the same slice that can successfully inspect a caller value; a shell-only selector is not sufficient;
-- changing the inspection frame must not redirect `continue`, `step`, breakpoint displacement, signal delivery, register mutation, memory mutation, or hardware-watchpoint ownership away from the live active TID;
-- any resume, new stop, process-domain switch, exec/image replacement, detach, or equivalent execution-state transition invalidates stale non-current frame contexts before further inspection;
-- invalid frame indices, unavailable unwind state, unsupported caller expressions, and cross-domain ambiguity remain deterministic failures.
+- first capture a deterministic GCC or Clang caller-frame source-value failure whose active location is register-resident or otherwise requires a specific historical GPR; do not choose a register or DWARF expression speculatively;
+- recover only the required caller register from the owning frame's actual `.eh_frame`/CFI rule and propagate it through `InspectionRegisterState`; never copy the currently active callee register as a substitute;
+- keep current-frame inspection and the proven `DW_OP_fbreg` caller path unchanged;
+- preserve stop-sequence, process-domain, TID, module, type, and lexical-scope ownership checks for the extended caller value;
+- unsupported CFI register rules or DWARF register expressions remain deterministic failures rather than guessed values;
+- prove the selected compiler-produced workflow in PIE and non-PIE and preserve both permanent compiler CI lanes, extending cross-compiler evidence only when the emitted location/rule is actually present.
 
-Priority 0 is not a promise of an arbitrary historical register file or post-mortem debugger. It establishes the ownership boundary required before deeper frame-aware locals, arguments, inline-frame inspection, or richer historical value reconstruction can be added safely.
+Do not broaden this milestone into a generic saved-register database or enumerate DW_CFA/DW_OP register forms without a failing compiler-produced caller-value scenario.
 
 ## Selection rule
 

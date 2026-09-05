@@ -5,6 +5,8 @@
 #define ENTRY_RDI_SENTINEL UINT64_C(0x777788889999aaaa)
 #define ENTRY_RESULT_EXPECTED UINT64_C(0x54a805fe32c96390)
 #define OPTIMIZED_LOCAL_EXPECTED UINT64_C(0x1e3c1e781e3c1ef0)
+#define ARITHMETIC_ADDEND UINT64_C(0x25)
+#define ARITHMETIC_LOCAL_EXPECTED UINT64_C(0x10203040506070a5)
 
 volatile uint64_t parameter_seed = UINT64_C(0x1122334455667788);
 
@@ -47,9 +49,21 @@ __attribute__((noinline)) uint64_t inspect_optimized_local(void) {
   return optimized_local;
 }
 
+__attribute__((noinline)) uint64_t inspect_arithmetic_local(uint64_t parameter) {
+  const uint64_t arithmetic_local = parameter + ARITHMETIC_ADDEND;
+  __asm__ volatile(".globl arithmetic_local_probe\n"
+                   "arithmetic_local_probe:\n"
+                   "nop\n"
+                   :
+                   : "D"(parameter)
+                   : "memory");
+  return arithmetic_local;
+}
+
 int main(void) {
   const uint64_t parameter = parameter_seed ^ UINT64_C(0x0102030405060708);
   if (inspect_parameter_value(parameter) != PARAMETER_EXPECTED) return 1;
   if (inspect_entry_parameter(parameter) != ENTRY_RESULT_EXPECTED) return 2;
-  return inspect_optimized_local() == OPTIMIZED_LOCAL_EXPECTED ? 0 : 3;
+  if (inspect_optimized_local() != OPTIMIZED_LOCAL_EXPECTED) return 3;
+  return inspect_arithmetic_local(parameter) == ARITHMETIC_LOCAL_EXPECTED ? 0 : 4;
 }

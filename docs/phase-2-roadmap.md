@@ -59,18 +59,19 @@ Completed slices:
 
 - P4-A: launched tracees enable `PTRACE_O_TRACECLONE`; `Process` waits across traced tasks with `__WALL`, records the TID on every wait event, reads the kernel-reported child TID from `PTRACE_GETEVENTMSG`, tracks per-TID stopped/running state, and removes exited tasks from the registry. A real pthread fixture exercises clone discovery, the worker's initial ptrace stop, worker exit, leader exit, and empty-registry convergence in both PIE and non-PIE integration runs.
 - P4-B: debugger execution is bound to the active stopped TID. Clone creator stops are held while the new worker's initial ptrace stop becomes the user-visible `ThreadCreated` event; `registers`, continue, single-step, breakpoint RIP repair, and displaced execution target that active TID. Process-wide software-breakpoint ownership remains singular while the restore/step/reinsert window executes with all other traced tasks stopped. Non-final task exit/signal events are distinguished from whole-process termination, and PIE/non-PIE integration proves repeated worker-thread breakpoint hits plus same-TID displaced stepping.
+- P4-C: signal and teardown ownership now follow the same per-TID model. Forwarded signal delivery is allowed only for the TID that produced the active signal-delivery stop; attached processes enumerate and attach every pre-existing `/proc/<pid>/task` entry, apply clone tracing per TID, and detach every owned stopped task while injecting a forwarded signal only into its originating active TID. Attached debugger destruction releases all traced tasks, launched teardown drains the traced thread group after termination, and focused PIE/non-PIE integration covers worker signal suppress/forward, explicit multi-thread detach, destructor detach, and launched leader/worker cleanup.
 
-Current slice: P4-C — complete multi-thread signal routing and teardown. Forward/suppress decisions must apply to the correct stopped TID, and attached/launched teardown must leave no traced task behind. Hardware watchpoints remain explicitly single-thread-only until per-TID debug-register ownership is designed.
+Current slice: P4-D — make thread selection and scheduling explicit for pre-existing attached threads. The single-runner policy must allow a stopped worker to become active when the leader cannot make progress without it, instead of permanently privileging the leader selected at attach time.
 
 Acceptance criteria:
 
-- tracee state is tracked per TID where required;
-- stop/resume policy is documented and deterministic;
-- software breakpoint ownership remains process-wide while displaced execution is associated with the correct stopped thread;
-- thread creation/exit and signal routing have regression coverage;
-- detach/teardown leaves no traced thread behind.
+- the debugger exposes the currently traced TIDs and can select a specific stopped TID as active without changing process-wide breakpoint ownership;
+- register access, continue, single-step, signal routing, and displaced execution continue to follow the selected active TID;
+- a real pre-existing leader/worker fixture where the leader waits on the worker can be attached, the worker selected and advanced, and the leader subsequently allowed to finish;
+- invalid, exited, or non-stopped TID selection is rejected deterministically;
+- detach/teardown still leaves no traced thread behind after thread selection changes.
 
-P4-A established the real two-thread lifecycle; P4-B carries that identity through debugger execution with a single-runner policy. P4 remains open until per-TID signal routing and teardown cross the same boundary.
+P4-A established lifecycle identity, P4-B bound execution to that identity, and P4-C closed signal and ownership cleanup. P4 remains open until attached pre-existing threads can be deliberately selected and scheduled under the same single-runner policy. Hardware watchpoints remain explicitly single-thread-only until per-TID debug-register ownership is designed.
 
 ## Priority 5: broader CFI recovery
 

@@ -12,6 +12,7 @@
 
 #include <elf.h>
 
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -481,8 +482,40 @@ int main(int argc, char** argv) {
           }
           continue;
         }
+        if (topic == "memory") {
+          std::string location;
+          input >> location;
+          std::vector<std::byte> bytes;
+          std::string byte_text;
+          while (input >> byte_text) {
+            try {
+              std::size_t consumed = 0;
+              const auto value = std::stoull(byte_text, &consumed, 0);
+              if (consumed != byte_text.size() || value > 0xffU) {
+                throw std::invalid_argument("invalid byte value: " + byte_text);
+              }
+              bytes.push_back(static_cast<std::byte>(value));
+            } catch (const std::exception&) {
+              bytes.clear();
+              break;
+            }
+          }
+          if (location.empty() || bytes.empty()) {
+            std::cout << "usage: set memory <address|symbol> <byte> [byte...]\n";
+            continue;
+          }
+          try {
+            const auto address = resolve_location(location, elf, debugger.pid());
+            debugger.write_memory(address, bytes);
+            std::cout << "wrote " << bytes.size() << " byte" << (bytes.size() == 1 ? "" : "s")
+                      << " at 0x" << std::hex << address << std::dec << '\n';
+          } catch (const std::exception& error) {
+            std::cout << "memory assignment failed: " << error.what() << '\n';
+          }
+          continue;
+        }
         if (topic != "substitute-path") {
-          std::cout << "usage: set <register|substitute-path> ...\n";
+          std::cout << "usage: set <memory|register|substitute-path> ...\n";
           continue;
         }
 
@@ -586,6 +619,7 @@ int main(int argc, char** argv) {
       } else {
         std::cout << "commands: continue, step, next, finish, stepi, regs, bt, list, "
                      "line <addr|symbol>, set register <name> <value>, "
+                     "set memory <addr|symbol> <byte> [byte...], "
                      "set substitute-path <from> <to>, reg <name>, x <addr|symbol> [len], "
                      "break <addr|symbol|file:line>, delete <id>, thread <tid>, "
                      "info <breakpoints|threads>, symbols [filter], detach, quit\n";

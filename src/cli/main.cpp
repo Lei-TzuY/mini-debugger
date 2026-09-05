@@ -104,6 +104,20 @@ std::uintptr_t resolve_location(const std::string& text, const mdbg::ElfFile& el
 
 void print_stop(const mdbg::StopInfo& info, const mdbg::ElfFile& elf, pid_t pid) {
   using mdbg::StopReason;
+  if (info.process_event != mdbg::ProcessEventKind::None) {
+    const bool is_vfork = info.process_event == mdbg::ProcessEventKind::Vfork;
+    std::cout << "process " << (is_vfork ? "vfork" : "fork")
+              << ": followed parent " << pid << ", ";
+    if (is_vfork) std::cout << "transient ";
+    std::cout << "child ";
+    if (info.child_pid) {
+      std::cout << *info.child_pid;
+    } else {
+      std::cout << "<unknown>";
+    }
+    std::cout << " unfollowed\n";
+    return;
+  }
   switch (info.reason) {
     case StopReason::InitialExec:
       std::cout << "stopped after exec\n";

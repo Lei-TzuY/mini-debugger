@@ -15,6 +15,7 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <vector>
 
 namespace {
 
@@ -222,7 +223,7 @@ struct CliProcess {
 };
 
 CliProcess spawn_cli(const std::string& mdbg, const std::string& driver,
-                     const std::string& target) {
+                     const std::vector<std::string>& arguments) {
   int input_pipe[2];
   int output_pipe[2];
   if (::pipe(input_pipe) != 0 || ::pipe(output_pipe) != 0) {
@@ -232,6 +233,7 @@ CliProcess spawn_cli(const std::string& mdbg, const std::string& driver,
   const pid_t pid = ::fork();
   if (pid == -1) throw std::runtime_error("failed to fork CLI");
   if (pid == 0) {
+    (void)::setpgid(0, 0);
     ::dup2(input_pipe[0], STDIN_FILENO);
     ::dup2(output_pipe[1], STDOUT_FILENO);
     ::dup2(output_pipe[1], STDERR_FILENO);
@@ -239,13 +241,39 @@ CliProcess spawn_cli(const std::string& mdbg, const std::string& driver,
     ::close(input_pipe[1]);
     ::close(output_pipe[0]);
     ::close(output_pipe[1]);
-    ::execl(mdbg.c_str(), mdbg.c_str(), driver.c_str(), target.c_str(), nullptr);
+
+    std::vector<std::string> command{mdbg, driver};
+    command.insert(command.end(), arguments.begin(), arguments.end());
+    std::vector<char*> argv;
+    argv.reserve(command.size() + 1);
+    for (auto& value : command) argv.push_back(value.data());
+    argv.push_back(nullptr);
+    ::execv(mdbg.c_str(), argv.data());
     _exit(127);
   }
 
   ::close(input_pipe[0]);
   ::close(output_pipe[1]);
   return CliProcess{pid, input_pipe[1], output_pipe[0]};
+}
+
+void terminate_cli(CliProcess& cli) noexcept {
+  if (cli.input != -1) {
+    ::close(cli.input);
+    cli.input = -1;
+  }
+  if (cli.output != -1) {
+    ::close(cli.output);
+    cli.output = -1;
+  }
+  if (cli.pid > 0) {
+    (void)::kill(-cli.pid, SIGKILL);
+    (void)::kill(cli.pid, SIGKILL);
+    int status = 0;
+    while (::waitpid(cli.pid, &status, 0) == -1 && errno == EINTR) {
+    }
+    cli.pid = -1;
+  }
 }
 
 void write_cli(CliProcess& cli, const std::string& command) {
@@ -307,13 +335,37 @@ void require_clean_cli_exit(CliProcess& cli) {
     result = ::waitpid(cli.pid, &status, 0);
   } while (result == -1 && errno == EINTR);
   require(result == cli.pid && WIFEXITED(status) && WEXITSTATUS(status) == 0,
-          "mdbg CLI did not exit cleanly after replacement image exit");
+          "mdbg CLI did not exit cleanly");
   cli.pid = -1;
+}
+
+pid_t parse_pid_after(const std::string& output, const std::string& marker) {
+  const auto position = output.find(marker);
+  if (position == std::string::npos) {
+    throw std::runtime_error("CLI output missing process-topology marker: " + marker);
+  }
+  const auto begin = position + marker.size();
+  std::size_t end = begin;
+  while (end < output.size() && output[end] >= '0' && output[end] <= '9') ++end;
+  if (end == begin) throw std::runtime_error("CLI process-topology PID is missing");
+  return static_cast<pid_t>(std::stol(output.substr(begin, end - begin)));
+}
+
+void require_topology_text(const std::string& output, const std::string& kind,
+                           pid_t& parent, pid_t& child) {
+  const auto parent_marker = "process " + kind + ": followed parent ";
+  parent = parse_pid_after(output, parent_marker);
+  const auto child_marker = kind == "vfork" ? ", transient child " : ", child ";
+  child = parse_pid_after(output, child_marker);
+  require(parent > 0 && child > 0 && parent != child,
+          "CLI process-topology identities are not distinct positive PIDs");
+  require(output.find("unfollowed") != std::string::npos,
+          "CLI process-topology stop did not say the child is unfollowed");
 }
 
 void run_cli_exec_replacement(const std::string& driver, const std::string& target) {
   const auto mdbg = (std::filesystem::path(driver).parent_path() / "mdbg").string();
-  auto cli = spawn_cli(mdbg, driver, target);
+  auto cli = spawn_cli(mdbg, driver, {target});
 
   auto output = read_until(cli, "(mdbg) ");
   require(output.find("stopped after exec") != std::string::npos,
@@ -360,6 +412,68 @@ void run_cli_exec_replacement(const std::string& driver, const std::string& targ
   require_clean_cli_exit(cli);
 }
 
+void run_cli_follow_parent_fork(const std::string& driver) {
+  const auto mdbg = (std::filesystem::path(driver).parent_path() / "mdbg").string();
+  auto cli = spawn_cli(mdbg, driver, {"--fork-topology"});
+  try {
+    auto output = read_until(cli, "(mdbg) ");
+    require(output.find("stopped after exec") != std::string::npos,
+            "CLI fork workflow did not expose initial exec stop");
+
+    write_cli(cli, "continue\n");
+    output = read_until(cli, "(mdbg) ");
+    pid_t parent = -1;
+    pid_t child = -1;
+    require_topology_text(output, "fork", parent, child);
+    DetachedChildGuard guard{child};
+    require_child_stopped_untraced(child);
+    require(::kill(child, SIGCONT) == 0, "failed to release CLI-unfollowed fork child");
+
+    write_cli(cli, "continue\n");
+    output = read_to_eof(cli);
+    require(output.find("process exited with code 0") != std::string::npos,
+            "CLI followed parent did not exit cleanly after fork");
+    guard.pid = -1;
+    require_clean_cli_exit(cli);
+  } catch (...) {
+    terminate_cli(cli);
+    throw;
+  }
+}
+
+void run_cli_follow_parent_vfork(const std::string& driver, const std::string& target) {
+  const auto mdbg = (std::filesystem::path(driver).parent_path() / "mdbg").string();
+  auto cli = spawn_cli(mdbg, driver, {"--vfork-topology", target});
+  try {
+    auto output = read_until(cli, "(mdbg) ");
+    require(output.find("stopped after exec") != std::string::npos,
+            "CLI vfork workflow did not expose initial exec stop");
+
+    write_cli(cli, "continue\n");
+    output = read_until(cli, "(mdbg) ");
+    pid_t parent = -1;
+    pid_t first_child = -1;
+    require_topology_text(output, "vfork", parent, first_child);
+
+    write_cli(cli, "continue\n");
+    output = read_until(cli, "(mdbg) ");
+    pid_t second_parent = -1;
+    pid_t second_child = -1;
+    require_topology_text(output, "vfork", second_parent, second_child);
+    require(second_parent == parent,
+            "CLI vfork transitions changed the followed parent identity");
+
+    write_cli(cli, "continue\n");
+    output = read_to_eof(cli);
+    require(output.find("process exited with code 0") != std::string::npos,
+            "CLI followed parent did not exit cleanly after vfork");
+    require_clean_cli_exit(cli);
+  } catch (...) {
+    terminate_cli(cli);
+    throw;
+  }
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -372,6 +486,8 @@ int main(int argc, char** argv) {
     run_follow_parent_fork(argv[1]);
     run_follow_parent_vfork(argv[1], argv[2]);
     run_cli_exec_replacement(argv[1], argv[2]);
+    run_cli_follow_parent_fork(argv[1]);
+    run_cli_follow_parent_vfork(argv[1], argv[2]);
     std::cout << "exec/process topology integration passed\n";
   } catch (const std::exception& error) {
     std::cerr << "exec/process topology integration failure: " << error.what() << '\n';

@@ -18,8 +18,11 @@
 namespace {
 
 constexpr std::uint64_t kExpectedLocalRawValue = 0x1020304050607080ULL;
+constexpr std::uint64_t kExpectedOuterLocalRawValue = 0xe1c2e384e5c6e708ULL;
 constexpr std::uint64_t kExpectedOptimizedLocalRawValue = 0x1e3c1e781e3c1ef0ULL;
 constexpr const char* kExpectedLocalValue = "local_value = 1161981756646125696";
+constexpr const char* kExpectedOuterLocalValue =
+    "local_value = 16267814963945858824";
 constexpr const char* kExpectedParameterValue = "parameter = 1161981756646125696";
 constexpr const char* kExpectedOptimizedLocalValue =
     "optimized_local = 2178649820992642800";
@@ -97,22 +100,44 @@ void test_runtime_mapping(const std::string& fixture) {
 void test_local_value_api(const std::string& fixture) {
   auto debugger = mdbg::Debugger::launch(fixture, {"value"});
   const mdbg::ElfFile elf(fixture);
-  const auto probe = elf.find_symbol("local_value_probe");
-  require(probe.has_value(), "local_value_probe symbol missing from fixture");
-  const auto address = static_cast<std::uintptr_t>(elf.runtime_address(debugger.pid(), *probe));
-  debugger.add_breakpoint(address);
-  const auto stop = debugger.continue_execution();
-  require(stop.reason == mdbg::StopReason::Breakpoint && stop.breakpoint_address == address,
-          "local-value fixture did not stop at the compiler-generated probe");
+  const auto outer_before_probe = elf.find_symbol("outer_local_before_probe");
+  const auto inner_probe = elf.find_symbol("local_value_probe");
+  const auto outer_after_probe = elf.find_symbol("outer_local_after_probe");
+  require(outer_before_probe && inner_probe && outer_after_probe,
+          "lexical-scope probe symbols are missing from fixture");
 
-  const auto value = mdbg::inspect_local_integer(debugger, elf, "local_value");
-  require(value.name == "local_value", "local-value API returned the wrong variable name");
-  require(value.raw_value == kExpectedLocalRawValue,
-          "local-value API returned the wrong runtime integer value");
-  require(value.byte_size == sizeof(std::uint64_t) && !value.is_signed,
-          "local-value API returned the wrong uint64_t type metadata");
-  require(std::filesystem::equivalent(value.module_path, fixture),
-          "local-value API did not preserve the owning module identity");
+  const auto outer_before = static_cast<std::uintptr_t>(
+      elf.runtime_address(debugger.pid(), *outer_before_probe));
+  const auto inner = static_cast<std::uintptr_t>(elf.runtime_address(debugger.pid(), *inner_probe));
+  const auto outer_after = static_cast<std::uintptr_t>(
+      elf.runtime_address(debugger.pid(), *outer_after_probe));
+  require(outer_before < inner && inner < outer_after,
+          "lexical-scope probes must execute outer-before, inner, outer-after");
+
+  debugger.add_breakpoint(outer_before);
+  debugger.add_breakpoint(inner);
+  debugger.add_breakpoint(outer_after);
+
+  auto require_local_value = [&](std::uint64_t expected, const char* context) {
+    const auto value = mdbg::inspect_local_integer(debugger, elf, "local_value");
+    require(value.name == "local_value", std::string(context) + " returned the wrong name");
+    require(value.raw_value == expected, std::string(context) + " returned the wrong value");
+    require(value.byte_size == sizeof(std::uint64_t) && !value.is_signed,
+            std::string(context) + " returned the wrong uint64_t type metadata");
+    require(std::filesystem::equivalent(value.module_path, fixture),
+            std::string(context) + " lost owning module identity");
+  };
+
+  auto stop = debugger.continue_execution();
+  require(stop.reason == mdbg::StopReason::Breakpoint &&
+              stop.breakpoint_address == outer_before,
+          "fixture did not stop in the outer scope before shadowing");
+  require_local_value(kExpectedOuterLocalRawValue, "outer-before local lookup");
+
+  stop = debugger.continue_execution();
+  require(stop.reason == mdbg::StopReason::Breakpoint && stop.breakpoint_address == inner,
+          "fixture did not stop in the nested shadowing scope");
+  require_local_value(kExpectedLocalRawValue, "inner local lookup");
 
   bool missing_failed = false;
   try {
@@ -122,9 +147,15 @@ void test_local_value_api(const std::string& fixture) {
   }
   require(missing_failed, "missing local variable did not fail explicitly");
 
+  stop = debugger.continue_execution();
+  require(stop.reason == mdbg::StopReason::Breakpoint &&
+              stop.breakpoint_address == outer_after,
+          "fixture did not stop in the outer scope after shadowing");
+  require_local_value(kExpectedOuterLocalRawValue, "outer-after local lookup");
+
   const auto exit = debugger.continue_execution();
   require(exit.reason == mdbg::StopReason::Exited && exit.value == 0,
-          "local-value fixture did not exit cleanly after inspection");
+          "local-value fixture did not exit cleanly after lexical-scope inspection");
 }
 
 void test_formal_parameter_api(const std::string& fixture) {
@@ -283,15 +314,29 @@ std::string run_cli_script(const std::string& integration_path, const std::strin
 void test_cli_local_value(const std::string& integration_path, const std::string& fixture) {
   const auto output = run_cli_script(
       integration_path, fixture, "value",
+      "break outer_local_before_probe\n"
       "break local_value_probe\n"
+      "break outer_local_after_probe\n"
+      "continue\n"
+      "print local_value\n"
+      "continue\n"
+      "print local_value\n"
       "continue\n"
       "print local_value\n"
       "continue\n",
-      "value-inspection CLI");
-  require(output.find("Breakpoint 1") != std::string::npos,
-          "CLI did not install the local-value probe breakpoint\n" + output);
-  require(output.find(kExpectedLocalValue) != std::string::npos,
-          "CLI did not render the compiler-generated local integer value\n" + output);
+      "lexical-scope value-inspection CLI");
+  require(output.find("Breakpoint 3") != std::string::npos,
+          "CLI did not install all lexical-scope probe breakpoints\n" + output);
+  const auto first_outer = output.find(kExpectedOuterLocalValue);
+  const auto inner = first_outer == std::string::npos
+                         ? std::string::npos
+                         : output.find(kExpectedLocalValue, first_outer + 1);
+  const auto second_outer = inner == std::string::npos
+                                ? std::string::npos
+                                : output.find(kExpectedOuterLocalValue, inner + 1);
+  require(first_outer != std::string::npos && inner != std::string::npos &&
+              second_outer != std::string::npos,
+          "CLI did not render outer/inner/outer shadow ownership in order\n" + output);
 }
 
 void test_cli_formal_parameter(const std::string& integration_path,

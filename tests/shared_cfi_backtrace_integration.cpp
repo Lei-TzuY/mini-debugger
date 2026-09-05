@@ -16,6 +16,7 @@
 #include <filesystem>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 namespace {
 
@@ -88,6 +89,29 @@ std::size_t module_qualified_source_position_count(const std::string& output,
     begin = end + 1;
   }
   return count;
+}
+
+std::filesystem::path fixture_source_directory(const std::string& library) {
+  std::vector<std::filesystem::path> candidates;
+  const std::filesystem::path compiled_file(__FILE__);
+  if (compiled_file.is_absolute()) {
+    candidates.push_back(compiled_file.parent_path() / "fixtures");
+  } else {
+    candidates.push_back(std::filesystem::current_path() / compiled_file.parent_path() /
+                         "fixtures");
+    candidates.push_back(std::filesystem::current_path().parent_path() /
+                         compiled_file.parent_path() / "fixtures");
+  }
+  candidates.push_back(std::filesystem::path(library).parent_path().parent_path() /
+                       "tests" / "fixtures");
+
+  for (const auto& candidate : candidates) {
+    std::error_code error;
+    if (std::filesystem::is_regular_file(candidate / "shared_cfi_library.c", error)) {
+      return std::filesystem::absolute(candidate).lexically_normal();
+    }
+  }
+  throw std::runtime_error("could not locate shared_cfi_library.c source fixture");
 }
 
 void require_same_module(const std::string& actual, const std::string& expected,
@@ -363,6 +387,9 @@ void test_cli_module_qualification(const std::string& integration_path,
       (std::filesystem::absolute(integration_path).parent_path() / "mdbg").string();
   require(std::filesystem::exists(mdbg_path), "mdbg executable is missing beside integration test");
 
+  const auto recorded_prefix = std::filesystem::path(library).parent_path().string();
+  const auto local_prefix = fixture_source_directory(library).string();
+
   int input_pipe[2] = {-1, -1};
   int output_pipe[2] = {-1, -1};
   require(::pipe(input_pipe) == 0, "failed to create CLI stdin pipe");
@@ -385,14 +412,18 @@ void test_cli_module_qualification(const std::string& integration_path,
   ::close(input_pipe[0]);
   ::close(output_pipe[1]);
   try {
-    write_all(input_pipe[1],
-              "continue\n"
-              "break shared_cfi_probe\n"
-              "continue\n"
-              "bt\n"
-              "list\n"
-              "step\n"
-              "quit\n");
+    const std::string command_stream =
+        "continue\n"
+        "break shared_cfi_probe\n"
+        "continue\n"
+        "bt\n"
+        "list\n"
+        "set substitute-path \"" + recorded_prefix + "\" \"" + local_prefix +
+        "\"\n"
+        "list\n"
+        "step\n"
+        "quit\n";
+    write_all(input_pipe[1], command_stream);
     ::close(input_pipe[1]);
     input_pipe[1] = -1;
 
@@ -413,10 +444,16 @@ void test_cli_module_qualification(const std::string& integration_path,
     require(has_module_qualified_backtrace_source(output, library),
             "backtrace frame did not qualify both symbol and source with the owning module\n" +
                 output);
-    require(module_qualified_source_position_count(output, library) >= 2,
-            "list and source step did not both preserve shared-object module identity\n" + output);
+    require(module_qualified_source_position_count(output, library) >= 3,
+            "list, remapped list, and source step did not preserve shared-object module identity\n" +
+                output);
     require(output.find("source unavailable: ") != std::string::npos,
-            "missing shared-object source path did not remain a deterministic non-fatal fallback\n" +
+            "missing shared-object source path did not remain a deterministic pre-map fallback\n" +
+                output);
+    require(output.find("source path substitution ") != std::string::npos,
+            "CLI did not acknowledge the explicit source path substitution\n" + output);
+    require(output.find("scratch[0] = 1;") != std::string::npos,
+            "explicit source path substitution did not recover real shared-object source context\n" +
                 output);
   } catch (...) {
     if (input_pipe[1] != -1) ::close(input_pipe[1]);

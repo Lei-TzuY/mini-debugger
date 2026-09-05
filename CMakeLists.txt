@@ -88,6 +88,14 @@ if(BUILD_TESTING)
   target_compile_options(formal_parameter_fixture_nopie PRIVATE -O1 -g -gdwarf-4 -fno-pie)
   target_link_options(formal_parameter_fixture_nopie PRIVATE -no-pie)
 
+  add_executable(pointer_value_fixture_pie tests/fixtures/pointer_value_fixture.c)
+  target_compile_options(pointer_value_fixture_pie PRIVATE -O0 -g -gdwarf-4 -fPIE)
+  target_link_options(pointer_value_fixture_pie PRIVATE -pie)
+
+  add_executable(pointer_value_fixture_nopie tests/fixtures/pointer_value_fixture.c)
+  target_compile_options(pointer_value_fixture_nopie PRIVATE -O0 -g -gdwarf-4 -fno-pie)
+  target_link_options(pointer_value_fixture_nopie PRIVATE -no-pie)
+
   add_executable(source_next_fixture_pie tests/fixtures/source_next_fixture.c)
   target_compile_options(source_next_fixture_pie PRIVATE
     -O0 -g -gdwarf-4 -fno-omit-frame-pointer -fPIE)
@@ -321,6 +329,14 @@ if(BUILD_TESTING)
       $<TARGET_FILE:debugger_fixture_stripped>
       $<TARGET_FILE:debug_line_fixture_v5>
       $<TARGET_FILE:formal_parameter_fixture_nopie>)
+
+  add_executable(pointer_value_integration tests/pointer_value_integration.cpp)
+  target_link_libraries(pointer_value_integration PRIVATE mdbg_core)
+  target_compile_options(pointer_value_integration PRIVATE -Wall -Wextra -Wpedantic -Werror)
+  add_test(NAME pointer_value_integration_pie
+    COMMAND pointer_value_integration $<TARGET_FILE:pointer_value_fixture_pie>)
+  add_test(NAME pointer_value_integration_nopie
+    COMMAND pointer_value_integration $<TARGET_FILE:pointer_value_fixture_nopie>)
 
   add_executable(source_step_integration tests/source_step_integration.cpp)
   target_link_libraries(source_step_integration PRIVATE mdbg_core)

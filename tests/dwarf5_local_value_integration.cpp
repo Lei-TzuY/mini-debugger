@@ -43,15 +43,18 @@ void test_missing_entry_snapshot(const std::string& fixture) {
           "entry-value helper did not leave the expected current RDI sentinel");
 
   bool missing_snapshot_failed = false;
+  std::string missing_snapshot_error = "inspection unexpectedly succeeded";
   try {
     (void)mdbg::inspect_local_integer(debugger, elf, "entry_parameter");
   } catch (const std::runtime_error& error) {
+    missing_snapshot_error = error.what();
     missing_snapshot_failed =
-        std::string(error.what()).find("observed function-entry breakpoint snapshot") !=
+        missing_snapshot_error.find("observed function-entry breakpoint snapshot") !=
         std::string::npos;
   }
   require(missing_snapshot_failed,
-          "DW_OP_entry_value must not fall back to the current register state");
+          "DW_OP_entry_value must require historical entry state; actual result: " +
+              missing_snapshot_error);
 
   const auto exit = debugger.continue_execution();
   require(exit.reason == mdbg::StopReason::Exited && exit.value == 0,

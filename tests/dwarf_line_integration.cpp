@@ -1,5 +1,6 @@
 #include "debugger/debugger.hpp"
 #include "dwarf/line_table.hpp"
+#include "dwarf/local_value.hpp"
 #include "elf/elf.hpp"
 
 #include <poll.h>
@@ -16,6 +17,7 @@
 
 namespace {
 
+constexpr std::uint64_t kExpectedLocalRawValue = 0x1020304050607080ULL;
 constexpr const char* kExpectedLocalValue = "local_value = 1161981756646125696";
 
 void require(bool condition, const std::string& message) {
@@ -86,6 +88,39 @@ void test_runtime_mapping(const std::string& fixture) {
       lines.find_runtime_address(debugger.pid(), repaired_rip, elf);
   require(stopped_location.has_value(), "stopped RIP did not resolve to a source line");
   require_mapped_source(*stopped_location);
+}
+
+void test_local_value_api(const std::string& fixture) {
+  auto debugger = mdbg::Debugger::launch(fixture, {"value"});
+  const mdbg::ElfFile elf(fixture);
+  const auto probe = elf.find_symbol("local_value_probe");
+  require(probe.has_value(), "local_value_probe symbol missing from fixture");
+  const auto address = static_cast<std::uintptr_t>(elf.runtime_address(debugger.pid(), *probe));
+  debugger.add_breakpoint(address);
+  const auto stop = debugger.continue_execution();
+  require(stop.reason == mdbg::StopReason::Breakpoint && stop.breakpoint_address == address,
+          "local-value fixture did not stop at the compiler-generated probe");
+
+  const auto value = mdbg::inspect_local_integer(debugger, elf, "local_value");
+  require(value.name == "local_value", "local-value API returned the wrong variable name");
+  require(value.raw_value == kExpectedLocalRawValue,
+          "local-value API returned the wrong runtime integer value");
+  require(value.byte_size == sizeof(std::uint64_t) && !value.is_signed,
+          "local-value API returned the wrong uint64_t type metadata");
+  require(std::filesystem::equivalent(value.module_path, fixture),
+          "local-value API did not preserve the owning module identity");
+
+  bool missing_failed = false;
+  try {
+    (void)mdbg::inspect_local_integer(debugger, elf, "missing_local");
+  } catch (const std::exception&) {
+    missing_failed = true;
+  }
+  require(missing_failed, "missing local variable did not fail explicitly");
+
+  const auto exit = debugger.continue_execution();
+  require(exit.reason == mdbg::StopReason::Exited && exit.value == 0,
+          "local-value fixture did not exit cleanly after inspection");
 }
 
 std::string run_value_cli(const std::string& integration_path, const std::string& fixture) {
@@ -197,6 +232,7 @@ int main(int argc, char** argv) {
   if (argc != 4) return 2;
   try {
     test_runtime_mapping(argv[1]);
+    test_local_value_api(argv[1]);
     test_cli_local_value(argv[0], argv[1]);
     test_missing_debug_line(argv[2]);
     test_runtime_mapping(argv[3]);

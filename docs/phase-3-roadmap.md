@@ -18,7 +18,7 @@ The first image-lifecycle milestone is complete for launched tracees. The implem
 
 This closes the bounded launched-exec milestone. The tracing option is also installed for attached tracees, but attached-process exec is not claimed as separately proven by this milestone.
 
-## Priority 1: fork/vfork process topology — current frontier
+## Priority 1: fork/vfork follow-parent process topology — complete
 
 Forked children are not threads in the current task registry: the existing model validates TIDs against one `/proc/<leader>/task` set and owns one process-wide software-breakpoint namespace. Fork/vfork therefore use an explicit follow-parent/unfollow-child process-topology policy rather than inserting child PIDs into the P4 thread map.
 
@@ -45,16 +45,32 @@ P1-B shared-VM-safe `vfork()` ownership is complete for the launched follow-pare
 - a real fixture executes two transitions in one session—one vfork child releases via `_exit()`, another via `exec()`—while a managed parent breakpoint and thread-owned hardware watchpoint remain armed across both transitions; the parent then hits the original breakpoint, hits the original watchpoint on its data write, removes both, and exits cleanly;
 - PIE and non-PIE run through the full GCC and Clang-large matrices. Test-first coverage failed only because no vfork process event existed; the final protocol proves both child-release paths rather than relying on synthetic ptrace-event injection.
 
-Priority 1 remains in progress only at the interactive product boundary. P1-C is the current slice: render fork/vfork topology stops through the CLI with explicit event kind, followed parent identity, and transient child identity, while preserving the existing follow-parent policy and without introducing a second process registry.
+P1-C interactive process-topology rendering is complete:
 
-Remaining Priority 1 acceptance:
+- the CLI recognizes process-topology metadata before generic `SIGTRAP` rendering, so a `Fork` stop is presented as `process fork: followed parent <pid>, child <pid> unfollowed` and a `Vfork` stop as `process vfork: followed parent <pid>, transient child <pid> unfollowed`;
+- presentation uses the already-proven `StopInfo::process_event` and `child_pid` contract; it does not add a second process registry or alter ptrace ownership;
+- a real `mdbg` subprocess drives the existing fork workflow, parses both identities from the stop text, verifies the child is independently stopped with `TracerPid: 0`, releases that unfollowed child, and then observes the followed parent exit cleanly;
+- a real `mdbg` subprocess also drives both vfork release paths in one session and proves the followed parent identity stays stable while each transient child is identified as unfollowed;
+- test-first coverage built cleanly in both compiler lanes and failed only because the topology marker was absent; the production renderer returns the full PIE/non-PIE suite to green under GCC and Clang-large.
 
-- expose `Fork` and `Vfork` ownership clearly through the interactive CLI, including parent/child identity and an unambiguous indication that the child is unfollowed;
-- drive the existing real fork and vfork workflows through `mdbg` subprocess integration so the interactive contract is executable rather than API-only;
-- keep attached-process fork/vfork as an explicit evidence boundary unless a separate real attached topology workflow proves it.
+Priority 1 is complete for the bounded launched follow-parent policy. Attached-process fork/vfork remains an explicit unproven evidence boundary rather than being implied by these launched workflows. Follow-child and simultaneous multi-process debugging are intentionally outside this completed policy.
 
-Do not expand Priority 1 into follow-child or multi-process debugging while the current bounded follow-parent product contract is being closed.
+## Priority 2: bounded follow-child fork handoff — current frontier
+
+The next architectural gap is not another fork/vfork display variant. The session can now observe a child while deterministically retaining the parent, but it cannot transfer its single followed-process identity to a regular fork child. Priority 2 adds one bounded follow-child handoff without creating a simultaneous multi-process debugger.
+
+First coherent slice acceptance:
+
+- choose an explicit follow-child policy for a real `fork()` and surface that policy through executable API/CLI behavior; the default completed follow-parent policy must remain deterministic and unchanged;
+- after `PTRACE_EVENT_FORK`, consume the child's initial ptrace stop, restore debugger-owned software-breakpoint bytes and any debugger-owned hardware debug-register state in the parent's copy-on-write execution domain, then detach the parent before allowing it to run independently;
+- adopt the child as the session's sole process identity and task registry without temporarily pretending the child PID is a thread of the old parent;
+- transfer the child copy's inherited managed-breakpoint ownership coherently: physical `INT3` state, saved original bytes, pending displaced-step constraints, and user-breakpoint identity may not diverge merely because process ownership moved;
+- when the forking TID owns the bounded hardware watchpoint, transfer logical ownership only to the adopted child while restoring the detached parent's pre-watchpoint debug-register snapshot;
+- subsequent register/memory operations, signals, breakpoints, detach/destructor cleanup, and terminal exit must route through the adopted child identity; the detached parent must remain externally owned and untraced;
+- PIE and non-PIE integration must execute a real fork where the parent and child take distinguishable paths, prove the parent becomes untraced, prove the adopted child hits a retained managed breakpoint, and finish with no leaked ptrace ownership under both GCC and Clang-large.
+
+Start with ordinary `fork()`. Do not generalize this slice to vfork follow-child: shared-VM handoff before `VFORK_DONE` has different ownership constraints and requires separate evidence. Do not introduce a multi-process registry merely to implement one ownership transfer.
 
 ## Selection rule
 
-Priority 1 remains the current frontier, with P1-C CLI process-topology rendering as the next coherent slice. Expression evaluation, richer register classes, follow-child policy, and convenience UI are lower priority until the bounded follow-parent fork/vfork contract is executable end to end. As in Phase 2, compiler/kernel variants are added only when a reproducible real workflow demonstrates a gap.
+Priority 2 is the current frontier, with regular-fork follow-child handoff as the next coherent architectural slice. Attached-origin lifecycle evidence, vfork follow-child, expression evaluation, richer register classes, and convenience UI remain lower priority until one-process ownership can actually transfer across a real fork. As in earlier phases, kernel/compiler variants are added only when a reproducible workflow demonstrates a gap.

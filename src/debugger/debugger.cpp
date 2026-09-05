@@ -54,7 +54,8 @@ Debugger Debugger::launch(const std::string& executable,
   auto process = Process::launch(executable, arguments);
   lowlevel::set_options(process.current_tid(), tracing_options(ProcessOrigin::Launched));
   auto initial = make_stop(StopReason::InitialExec, SIGTRAP, process.current_tid());
-  return Debugger(std::move(process), std::move(initial), process_executable(process.pid()));
+  const auto executable_path = process_executable(process.pid());
+  return Debugger(std::move(process), std::move(initial), executable_path);
 }
 
 Debugger Debugger::attach(pid_t pid) {

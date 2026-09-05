@@ -106,7 +106,7 @@ if(BUILD_TESTING)
   target_link_options(source_finish_omit_fixture_nopie PRIVATE -no-pie)
 
   add_library(shared_cfi_fixture SHARED tests/fixtures/shared_cfi_library.c)
-  target_compile_options(shared_cfi_fixture PRIVATE -O0 -g -gdwarf-4 -fomit-frame-pointer -fPIC)
+  target_compile_options(shared_cfi_fixture PRIVATE -O0 -g -gdwarf-5 -fomit-frame-pointer -fPIC)
 
   add_library(deferred_symbol_plugin SHARED tests/fixtures/deferred_symbol_plugin.c)
   target_compile_options(deferred_symbol_plugin PRIVATE -O0 -g -gdwarf-4 -fPIC)

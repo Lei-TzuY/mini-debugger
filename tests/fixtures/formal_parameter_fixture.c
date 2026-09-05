@@ -31,10 +31,7 @@ __attribute__((noinline)) uint64_t clobber_argument_registers(
 __attribute__((noinline)) uint64_t inspect_entry_parameter(uint64_t entry_parameter) {
   const uint64_t transformed = entry_parameter ^ ENTRY_PARAMETER_XOR;
   const uint64_t side_effect = clobber_argument_registers(1, 2, 3, 4, 5, 6);
-  __asm__ volatile("nop\n"
-                   ".globl entry_parameter_probe\n"
-                   "entry_parameter_probe:\n"
-                   ::: "memory");
+  __asm__ volatile("nop\n" ::: "memory");
   return transformed ^ side_effect;
 }
 

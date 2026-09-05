@@ -69,7 +69,7 @@ __attribute__((noinline)) uint64_t inspect_arithmetic_local(
 }
 
 __attribute__((noinline)) uint64_t inspect_indirect_local(uint64_t* ptr) {
-  uint64_t indirect_local = *ptr;
+  const uint64_t indirect_local = *ptr;
   __asm__ volatile(".globl indirect_local_probe\n"
                    "indirect_local_probe:\n"
                    "nop\n"

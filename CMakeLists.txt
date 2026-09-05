@@ -80,6 +80,14 @@ if(BUILD_TESTING)
   target_compile_options(debug_line_fixture_v5 PRIVATE -O0 -g -gdwarf-5 -fno-pie)
   target_link_options(debug_line_fixture_v5 PRIVATE -no-pie)
 
+  add_executable(formal_parameter_fixture_pie tests/fixtures/formal_parameter_fixture.c)
+  target_compile_options(formal_parameter_fixture_pie PRIVATE -O1 -g -gdwarf-4 -fPIE)
+  target_link_options(formal_parameter_fixture_pie PRIVATE -pie)
+
+  add_executable(formal_parameter_fixture_nopie tests/fixtures/formal_parameter_fixture.c)
+  target_compile_options(formal_parameter_fixture_nopie PRIVATE -O1 -g -gdwarf-4 -fno-pie)
+  target_link_options(formal_parameter_fixture_nopie PRIVATE -no-pie)
+
   add_executable(source_next_fixture_pie tests/fixtures/source_next_fixture.c)
   target_compile_options(source_next_fixture_pie PRIVATE
     -O0 -g -gdwarf-4 -fno-omit-frame-pointer -fPIE)
@@ -305,12 +313,14 @@ if(BUILD_TESTING)
     COMMAND dwarf_line_integration
       $<TARGET_FILE:debug_line_fixture_pie>
       $<TARGET_FILE:debugger_fixture_stripped>
-      $<TARGET_FILE:debug_line_fixture_v5>)
+      $<TARGET_FILE:debug_line_fixture_v5>
+      $<TARGET_FILE:formal_parameter_fixture_pie>)
   add_test(NAME dwarf_line_integration_nopie
     COMMAND dwarf_line_integration
       $<TARGET_FILE:debug_line_fixture_nopie>
       $<TARGET_FILE:debugger_fixture_stripped>
-      $<TARGET_FILE:debug_line_fixture_v5>)
+      $<TARGET_FILE:debug_line_fixture_v5>
+      $<TARGET_FILE:formal_parameter_fixture_nopie>)
 
   add_executable(source_step_integration tests/source_step_integration.cpp)
   target_link_libraries(source_step_integration PRIVATE mdbg_core)

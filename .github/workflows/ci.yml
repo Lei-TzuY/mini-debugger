@@ -32,10 +32,14 @@ jobs:
       - name: DWARF5 compiler shape diagnostic
         run: |
           "$CC" -O1 -g -gdwarf-5 -fno-pie tests/fixtures/formal_parameter_fixture.c -no-pie -o build/formal_parameter_fixture_v5_nopie
-          echo "=== ${CC} DWARF5 info ==="
-          readelf --debug-dump=info build/formal_parameter_fixture_v5_nopie | sed -n '1,240p'
-          echo "=== ${CC} DWARF5 loclists ==="
-          readelf --debug-dump=loc build/formal_parameter_fixture_v5_nopie | sed -n '1,240p'
+          echo "=== ${CC} DWARF5 abbrev ==="
+          readelf --debug-dump=abbrev build/formal_parameter_fixture_v5_nopie | sed -n '1,260p'
+          echo "=== ${CC} DWARF5 loclists bytes ==="
+          readelf -x .debug_loclists build/formal_parameter_fixture_v5_nopie || true
+          echo "=== ${CC} DWARF5 addr bytes ==="
+          readelf -x .debug_addr build/formal_parameter_fixture_v5_nopie || true
+          echo "=== ${CC} DWARF5 str-offset bytes ==="
+          readelf -x .debug_str_offsets build/formal_parameter_fixture_v5_nopie || true
       - name: Test
         run: ctest --test-dir build --output-on-failure
       - name: DWARF5 optimized source-value integration

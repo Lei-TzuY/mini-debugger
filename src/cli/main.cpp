@@ -87,6 +87,11 @@ std::string process_executable(pid_t pid) {
   return std::filesystem::read_symlink("/proc/" + std::to_string(pid) + "/exe").string();
 }
 
+void print_module_qualified(const std::string& module_path, const std::string& value) {
+  if (!module_path.empty()) std::cout << module_path << '!';
+  std::cout << value;
+}
+
 std::uintptr_t resolve_location(const std::string& text, const mdbg::ElfFile& elf, pid_t pid) {
   if (const auto address = try_parse_address(text)) return *address;
   const auto symbol = elf.find_symbol(text);
@@ -117,7 +122,8 @@ void print_stop(const mdbg::StopInfo& info, const mdbg::ElfFile& elf, pid_t pid)
       try {
         if (const auto symbol =
                 mdbg::find_module_symbol_by_runtime_address(pid, *info.breakpoint_address, elf)) {
-          std::cout << " (" << symbol->name;
+          std::cout << " (";
+          print_module_qualified(symbol->module_path, symbol->name);
           if (symbol->offset != 0) std::cout << "+0x" << std::hex << symbol->offset << std::dec;
           std::cout << ')';
         }
@@ -166,7 +172,8 @@ void print_symbolized_frame(std::size_t index, std::uintptr_t address,
   try {
     if (const auto symbol =
             mdbg::find_module_symbol_by_runtime_address(debugger.pid(), address, elf)) {
-      std::cout << ' ' << symbol->name;
+      std::cout << ' ';
+      print_module_qualified(symbol->module_path, symbol->name);
       if (symbol->offset != 0) {
         std::cout << "+0x" << std::hex << symbol->offset << std::dec;
       }
@@ -176,7 +183,9 @@ void print_symbolized_frame(std::size_t index, std::uintptr_t address,
   try {
     if (const auto source =
             mdbg::find_module_source_by_runtime_address(debugger.pid(), address, elf)) {
-      std::cout << ' ' << source->file << ':' << source->line;
+      std::cout << ' ';
+      print_module_qualified(source->module_path, source->file);
+      std::cout << ':' << source->line;
       if (source->column != 0) std::cout << ':' << source->column;
     }
   } catch (const std::exception&) {
@@ -266,32 +275,38 @@ void print_source_excerpt(const std::string& file, std::uint64_t line,
   }
 }
 
-void print_source_position(std::uintptr_t address, const mdbg::SourceLocation& source) {
-  std::cout << "0x" << std::hex << address << std::dec << ' ' << source.file << ':'
-            << source.line;
+void print_source_position(std::uintptr_t address, const mdbg::SourceLocation& source,
+                           const std::optional<std::string>& module_path = std::nullopt) {
+  std::cout << "0x" << std::hex << address << std::dec << ' ';
+  if (module_path && !module_path->empty()) {
+    print_module_qualified(*module_path, source.file);
+  } else {
+    std::cout << source.file;
+  }
+  std::cout << ':' << source.line;
   if (source.column != 0) std::cout << ':' << source.column;
   std::cout << '\n';
-  print_source_excerpt(source.file, source.line);
+  print_source_excerpt(source.file, source.line, module_path.value_or(""));
 }
 
 void print_source_position(std::uintptr_t address, const mdbg::ModuleResolvedSource& source) {
-  std::cout << "0x" << std::hex << address << std::dec << ' ' << source.file << ':'
-            << source.line;
-  if (source.column != 0) std::cout << ':' << source.column;
-  std::cout << '\n';
-  print_source_excerpt(source.file, source.line, source.module_path);
+  print_source_position(address,
+                        mdbg::SourceLocation{source.file, source.line, source.column},
+                        source.module_path);
 }
 
 void print_source_motion_result(const char* operation, const mdbg::SourceStepResult& result,
                                 const mdbg::Debugger& debugger, const mdbg::ElfFile& elf) {
   if (result.reason == mdbg::SourceStepStopReason::LineChanged) {
-    print_source_position(static_cast<std::uintptr_t>(debugger.registers().rip), *result.source);
+    print_source_position(static_cast<std::uintptr_t>(debugger.registers().rip), *result.source,
+                          result.source_module_path);
     return;
   }
   if (result.reason == mdbg::SourceStepStopReason::Interrupted) {
     print_stop(result.stop, elf, debugger.pid());
     if (debugger.state() == mdbg::ProcessState::Stopped && result.source) {
-      print_source_position(static_cast<std::uintptr_t>(debugger.registers().rip), *result.source);
+      print_source_position(static_cast<std::uintptr_t>(debugger.registers().rip), *result.source,
+                            result.source_module_path);
     }
     return;
   }
@@ -299,7 +314,8 @@ void print_source_motion_result(const char* operation, const mdbg::SourceStepRes
   std::cout << operation << " stopped after " << result.instructions
             << " instructions: instruction limit reached\n";
   if (result.source) {
-    print_source_position(static_cast<std::uintptr_t>(debugger.registers().rip), *result.source);
+    print_source_position(static_cast<std::uintptr_t>(debugger.registers().rip), *result.source,
+                          result.source_module_path);
   }
 }
 

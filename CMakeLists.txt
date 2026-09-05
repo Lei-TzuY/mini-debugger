@@ -152,6 +152,26 @@ if(BUILD_TESTING)
   add_test(NAME attach_integration_nopie
     COMMAND attach_integration $<TARGET_FILE:debugger_fixture_nopie>)
 
+  add_executable(multithread_signal_teardown_integration
+    tests/multithread_signal_teardown_integration.cpp)
+  target_link_libraries(multithread_signal_teardown_integration PRIVATE mdbg_core)
+  target_compile_options(multithread_signal_teardown_integration PRIVATE
+    -Wall -Wextra -Wpedantic -Werror)
+  add_test(NAME multithread_signal_teardown_integration_pie
+    COMMAND multithread_signal_teardown_integration $<TARGET_FILE:debugger_fixture_pie>)
+  add_test(NAME multithread_signal_teardown_integration_nopie
+    COMMAND multithread_signal_teardown_integration $<TARGET_FILE:debugger_fixture_nopie>)
+
+  add_executable(multithread_attach_teardown_integration
+    tests/multithread_attach_teardown_integration.cpp)
+  target_link_libraries(multithread_attach_teardown_integration PRIVATE mdbg_core)
+  target_compile_options(multithread_attach_teardown_integration PRIVATE
+    -Wall -Wextra -Wpedantic -Werror)
+  add_test(NAME multithread_attach_teardown_integration_pie
+    COMMAND multithread_attach_teardown_integration $<TARGET_FILE:debugger_fixture_pie>)
+  add_test(NAME multithread_attach_teardown_integration_nopie
+    COMMAND multithread_attach_teardown_integration $<TARGET_FILE:debugger_fixture_nopie>)
+
   add_executable(backtrace_integration tests/backtrace_integration.cpp)
   target_link_libraries(backtrace_integration PRIVATE mdbg_core)
   target_compile_options(backtrace_integration PRIVATE -Wall -Wextra -Wpedantic -Werror)

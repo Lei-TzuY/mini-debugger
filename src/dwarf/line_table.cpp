@@ -10,6 +10,7 @@
 #include <fstream>
 #include <iterator>
 #include <stdexcept>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -34,9 +35,32 @@ constexpr std::uint8_t kLneSetAddress = 2;
 constexpr std::uint8_t kLneDefineFile = 3;
 constexpr std::uint8_t kLneSetDiscriminator = 4;
 
+constexpr std::uint64_t kLnctPath = 0x01;
+constexpr std::uint64_t kLnctDirectoryIndex = 0x02;
+
+constexpr std::uint64_t kFormData2 = 0x05;
+constexpr std::uint64_t kFormData4 = 0x06;
+constexpr std::uint64_t kFormData8 = 0x07;
+constexpr std::uint64_t kFormString = 0x08;
+constexpr std::uint64_t kFormData1 = 0x0b;
+constexpr std::uint64_t kFormSdata = 0x0d;
+constexpr std::uint64_t kFormUdata = 0x0f;
+constexpr std::uint64_t kFormData16 = 0x1e;
+constexpr std::uint64_t kFormLineStrp = 0x1f;
+
 struct FileEntry {
   std::string name;
   std::uint64_t directory_index;
+};
+
+struct EntryFormat {
+  std::uint64_t content_type;
+  std::uint64_t form;
+};
+
+struct SectionRange {
+  std::size_t offset;
+  std::size_t size;
 };
 
 struct Row {
@@ -143,8 +167,8 @@ std::vector<std::byte> read_file(const std::string& path) {
   return bytes;
 }
 
-std::optional<std::pair<std::size_t, std::size_t>> find_debug_line_section(
-    const std::vector<std::byte>& bytes) {
+std::optional<SectionRange> find_debug_section(const std::vector<std::byte>& bytes,
+                                               std::string_view wanted_name) {
   const auto header = read_at<Elf64_Ehdr>(bytes, 0, "ELF header");
   if (std::memcmp(header.e_ident, ELFMAG, SELFMAG) != 0) {
     throw std::runtime_error("file is not ELF");
@@ -182,19 +206,33 @@ std::optional<std::pair<std::size_t, std::size_t>> find_debug_line_section(
     if (section.sh_name >= names.sh_size) continue;
     auto cursor = names_begin + static_cast<std::size_t>(section.sh_name);
     const auto name = read_c_string(bytes, cursor, names_end, "ELF section name");
-    if (name != ".debug_line") continue;
+    if (name != wanted_name) continue;
     if ((section.sh_flags & SHF_COMPRESSED) != 0) {
-      throw std::runtime_error("compressed .debug_line sections are unsupported");
+      throw std::runtime_error("compressed " + std::string(wanted_name) +
+                               " sections are unsupported");
     }
-    require_range(bytes, section.sh_offset, section.sh_size, ".debug_line section");
-    return std::pair<std::size_t, std::size_t>{
-        static_cast<std::size_t>(section.sh_offset), static_cast<std::size_t>(section.sh_size)};
+    require_range(bytes, section.sh_offset, section.sh_size,
+                  std::string(wanted_name).c_str());
+    return SectionRange{static_cast<std::size_t>(section.sh_offset),
+                        static_cast<std::size_t>(section.sh_size)};
   }
   return std::nullopt;
 }
 
-FileEntry read_file_entry(const std::vector<std::byte>& bytes, std::size_t& cursor,
-                          std::size_t limit) {
+std::string read_section_string(const std::vector<std::byte>& bytes,
+                                const std::optional<SectionRange>& section,
+                                std::uint64_t offset, const char* what) {
+  if (!section) throw std::runtime_error(std::string(what) + " section is missing");
+  if (offset >= section->size) {
+    throw std::runtime_error(std::string(what) + " offset is outside its string section");
+  }
+  auto cursor = section->offset + static_cast<std::size_t>(offset);
+  const auto limit = section->offset + section->size;
+  return read_c_string(bytes, cursor, limit, what);
+}
+
+FileEntry read_v4_file_entry(const std::vector<std::byte>& bytes, std::size_t& cursor,
+                             std::size_t limit) {
   auto name = read_c_string(bytes, cursor, limit, "DWARF file name");
   const auto directory_index = read_uleb(bytes, cursor, limit);
   static_cast<void>(read_uleb(bytes, cursor, limit));
@@ -202,17 +240,178 @@ FileEntry read_file_entry(const std::vector<std::byte>& bytes, std::size_t& curs
   return {std::move(name), directory_index};
 }
 
+std::vector<EntryFormat> read_v5_entry_formats(const std::vector<std::byte>& bytes,
+                                                std::size_t& cursor,
+                                                std::size_t header_end,
+                                                const char* what) {
+  const auto count = read_scalar<std::uint8_t>(bytes, cursor, header_end, what);
+  std::vector<EntryFormat> formats;
+  formats.reserve(count);
+  for (std::uint16_t index = 0; index < count; ++index) {
+    formats.push_back({read_uleb(bytes, cursor, header_end),
+                       read_uleb(bytes, cursor, header_end)});
+  }
+  return formats;
+}
+
+std::uint64_t read_v5_unsigned_form(const std::vector<std::byte>& bytes,
+                                    std::size_t& cursor, std::size_t limit,
+                                    std::uint64_t form) {
+  switch (form) {
+    case kFormUdata:
+      return read_uleb(bytes, cursor, limit);
+    case kFormData1:
+      return read_scalar<std::uint8_t>(bytes, cursor, limit, "DWARF5 data1 form");
+    case kFormData2:
+      return read_scalar<std::uint16_t>(bytes, cursor, limit, "DWARF5 data2 form");
+    case kFormData4:
+      return read_scalar<std::uint32_t>(bytes, cursor, limit, "DWARF5 data4 form");
+    case kFormData8:
+      return read_scalar<std::uint64_t>(bytes, cursor, limit, "DWARF5 data8 form");
+    default:
+      throw std::runtime_error("unsupported DWARF5 unsigned line-table form " +
+                               std::to_string(form));
+  }
+}
+
+std::string read_v5_path_form(const std::vector<std::byte>& bytes,
+                              std::size_t& cursor, std::size_t limit,
+                              std::uint64_t form,
+                              const std::optional<SectionRange>& line_strings) {
+  switch (form) {
+    case kFormString:
+      return read_c_string(bytes, cursor, limit, "DWARF5 inline path");
+    case kFormLineStrp: {
+      const auto offset =
+          read_scalar<std::uint32_t>(bytes, cursor, limit, "DWARF5 line_strp offset");
+      return read_section_string(bytes, line_strings, offset, "DWARF5 line string");
+    }
+    default:
+      throw std::runtime_error("unsupported DWARF5 path line-table form " +
+                               std::to_string(form));
+  }
+}
+
+void skip_v5_form(const std::vector<std::byte>& bytes, std::size_t& cursor,
+                  std::size_t limit, std::uint64_t form) {
+  switch (form) {
+    case kFormString:
+      static_cast<void>(read_c_string(bytes, cursor, limit, "DWARF5 string form"));
+      return;
+    case kFormLineStrp:
+      static_cast<void>(read_scalar<std::uint32_t>(bytes, cursor, limit,
+                                                   "DWARF5 line_strp offset"));
+      return;
+    case kFormUdata:
+      static_cast<void>(read_uleb(bytes, cursor, limit));
+      return;
+    case kFormSdata:
+      static_cast<void>(read_sleb(bytes, cursor, limit));
+      return;
+    case kFormData1:
+      static_cast<void>(read_scalar<std::uint8_t>(bytes, cursor, limit,
+                                                  "DWARF5 data1 form"));
+      return;
+    case kFormData2:
+      static_cast<void>(read_scalar<std::uint16_t>(bytes, cursor, limit,
+                                                   "DWARF5 data2 form"));
+      return;
+    case kFormData4:
+      static_cast<void>(read_scalar<std::uint32_t>(bytes, cursor, limit,
+                                                   "DWARF5 data4 form"));
+      return;
+    case kFormData8:
+      static_cast<void>(read_scalar<std::uint64_t>(bytes, cursor, limit,
+                                                   "DWARF5 data8 form"));
+      return;
+    case kFormData16:
+      if (cursor > limit || 16 > limit - cursor) {
+        throw std::runtime_error("DWARF5 data16 form extends past header boundary");
+      }
+      cursor += 16;
+      return;
+    default:
+      throw std::runtime_error("unsupported DWARF5 line-table form " +
+                               std::to_string(form));
+  }
+}
+
+FileEntry read_v5_entry(const std::vector<std::byte>& bytes, std::size_t& cursor,
+                        std::size_t limit, const std::vector<EntryFormat>& formats,
+                        const std::optional<SectionRange>& line_strings) {
+  std::optional<std::string> path;
+  std::uint64_t directory_index = 0;
+  for (const auto& format : formats) {
+    if (format.content_type == kLnctPath) {
+      if (path) throw std::runtime_error("duplicate DWARF5 path column");
+      path = read_v5_path_form(bytes, cursor, limit, format.form, line_strings);
+    } else if (format.content_type == kLnctDirectoryIndex) {
+      directory_index = read_v5_unsigned_form(bytes, cursor, limit, format.form);
+    } else {
+      skip_v5_form(bytes, cursor, limit, format.form);
+    }
+  }
+  if (!path) throw std::runtime_error("DWARF5 line-table entry has no path column");
+  return {std::move(*path), directory_index};
+}
+
+void read_v5_directory_and_file_tables(
+    const std::vector<std::byte>& bytes, std::size_t& cursor,
+    std::size_t header_end, const std::optional<SectionRange>& line_strings,
+    std::vector<std::string>& directories, std::vector<FileEntry>& files) {
+  const auto directory_formats =
+      read_v5_entry_formats(bytes, cursor, header_end, "directory format count");
+  const auto directory_count = read_uleb(bytes, cursor, header_end);
+  if (directory_count > header_end - cursor) {
+    throw std::runtime_error("DWARF5 directory count exceeds header bounds");
+  }
+  directories.reserve(static_cast<std::size_t>(directory_count));
+  for (std::uint64_t index = 0; index < directory_count; ++index) {
+    directories.push_back(
+        read_v5_entry(bytes, cursor, header_end, directory_formats, line_strings).name);
+  }
+
+  const auto file_formats =
+      read_v5_entry_formats(bytes, cursor, header_end, "file format count");
+  const auto file_count = read_uleb(bytes, cursor, header_end);
+  if (file_count > header_end - cursor) {
+    throw std::runtime_error("DWARF5 file count exceeds header bounds");
+  }
+  files.reserve(static_cast<std::size_t>(file_count));
+  for (std::uint64_t index = 0; index < file_count; ++index) {
+    files.push_back(read_v5_entry(bytes, cursor, header_end, file_formats, line_strings));
+  }
+}
+
 std::optional<SourceLocation> source_location(const State& state,
                                               const std::vector<std::string>& directories,
-                                              const std::vector<FileEntry>& files) {
-  if (state.file == 0 || state.file > files.size() || state.line <= 0) return std::nullopt;
-  const auto& file = files[static_cast<std::size_t>(state.file - 1)];
+                                              const std::vector<FileEntry>& files,
+                                              bool dwarf5) {
+  if (state.line <= 0) return std::nullopt;
+
+  std::size_t file_index = 0;
+  if (dwarf5) {
+    if (state.file >= files.size()) return std::nullopt;
+    file_index = static_cast<std::size_t>(state.file);
+  } else {
+    if (state.file == 0 || state.file > files.size()) return std::nullopt;
+    file_index = static_cast<std::size_t>(state.file - 1);
+  }
+
+  const auto& file = files[file_index];
   std::filesystem::path path(file.name);
-  if (!path.is_absolute() && file.directory_index != 0 &&
-      file.directory_index <= directories.size()) {
-    path = std::filesystem::path(
-               directories[static_cast<std::size_t>(file.directory_index - 1)]) /
-           path;
+  if (!path.is_absolute()) {
+    if (dwarf5) {
+      if (file.directory_index < directories.size()) {
+        path = std::filesystem::path(
+                   directories[static_cast<std::size_t>(file.directory_index)]) /
+               path;
+      }
+    } else if (file.directory_index != 0 && file.directory_index <= directories.size()) {
+      path = std::filesystem::path(
+                 directories[static_cast<std::size_t>(file.directory_index - 1)]) /
+             path;
+    }
   }
   return SourceLocation{path.string(), static_cast<std::uint64_t>(state.line), state.column};
 }
@@ -223,11 +422,12 @@ DwarfLineTable::DwarfLineTable(std::string path) : path_(std::move(path)) { pars
 
 void DwarfLineTable::parse() {
   const auto bytes = read_file(path_);
-  const auto section = find_debug_line_section(bytes);
+  const auto section = find_debug_section(bytes, ".debug_line");
   if (!section) return;
+  const auto line_strings = find_debug_section(bytes, ".debug_line_str");
 
-  std::size_t cursor = section->first;
-  const auto section_end = section->first + section->second;
+  std::size_t cursor = section->offset;
+  const auto section_end = section->offset + section->size;
   while (cursor < section_end) {
     const auto unit_length = read_scalar<std::uint32_t>(bytes, cursor, section_end,
                                                         "DWARF unit length");
@@ -242,9 +442,23 @@ void DwarfLineTable::parse() {
 
     const auto version = read_scalar<std::uint16_t>(bytes, cursor, unit_end,
                                                      "DWARF line-table version");
-    if (version != 4) {
+    if (version != 4 && version != 5) {
       throw std::runtime_error("DWARF line table version " + std::to_string(version) +
-                               " is unsupported; only version 4 is supported");
+                               " is unsupported; versions 4 and 5 are supported");
+    }
+    const bool dwarf5 = version == 5;
+    std::uint8_t address_size = sizeof(std::uint64_t);
+    if (dwarf5) {
+      address_size = read_scalar<std::uint8_t>(bytes, cursor, unit_end,
+                                               "DWARF5 address size");
+      const auto segment_selector_size = read_scalar<std::uint8_t>(
+          bytes, cursor, unit_end, "DWARF5 segment selector size");
+      if (address_size != sizeof(std::uint64_t)) {
+        throw std::runtime_error("DWARF5 line table address size does not match ELF64");
+      }
+      if (segment_selector_size != 0) {
+        throw std::runtime_error("DWARF5 segmented addresses are unsupported");
+      }
     }
 
     const auto header_length = read_scalar<std::uint32_t>(bytes, cursor, unit_end,
@@ -260,7 +474,7 @@ void DwarfLineTable::parse() {
         bytes, cursor, header_end, "maximum operations per instruction");
     if (minimum_instruction_length == 0 || maximum_operations_per_instruction != 1) {
       throw std::runtime_error(
-          "DWARF v4 line tables with multi-operation instructions are unsupported");
+          "DWARF line tables with multi-operation instructions are unsupported");
     }
     static_cast<void>(
         read_scalar<std::uint8_t>(bytes, cursor, header_end, "default is_stmt"));
@@ -283,19 +497,28 @@ void DwarfLineTable::parse() {
     }
 
     std::vector<std::string> directories;
-    while (cursor < header_end) {
-      auto directory = read_c_string(bytes, cursor, header_end, "DWARF include directory");
-      if (directory.empty()) break;
-      directories.push_back(std::move(directory));
-    }
-
     std::vector<FileEntry> files;
-    while (cursor < header_end) {
-      const auto before = cursor;
-      auto name = read_c_string(bytes, cursor, header_end, "DWARF file name");
-      if (name.empty()) break;
-      cursor = before;
-      files.push_back(read_file_entry(bytes, cursor, header_end));
+    if (dwarf5) {
+      read_v5_directory_and_file_tables(bytes, cursor, header_end, line_strings,
+                                        directories, files);
+      if (cursor != header_end) {
+        throw std::runtime_error("DWARF5 line-table header has trailing bytes");
+      }
+    } else {
+      while (cursor < header_end) {
+        auto directory = read_c_string(bytes, cursor, header_end,
+                                       "DWARF include directory");
+        if (directory.empty()) break;
+        directories.push_back(std::move(directory));
+      }
+
+      while (cursor < header_end) {
+        const auto before = cursor;
+        auto name = read_c_string(bytes, cursor, header_end, "DWARF file name");
+        if (name.empty()) break;
+        cursor = before;
+        files.push_back(read_v4_file_entry(bytes, cursor, header_end));
+      }
     }
     cursor = header_end;
 
@@ -308,7 +531,7 @@ void DwarfLineTable::parse() {
       if (end_sequence) {
         previous.reset();
       } else {
-        previous = Row{state.address, source_location(state, directories, files)};
+        previous = Row{state.address, source_location(state, directories, files, dwarf5)};
       }
     };
     auto reset_state = [&]() { state = State{}; };
@@ -330,14 +553,17 @@ void DwarfLineTable::parse() {
             reset_state();
             break;
           case kLneSetAddress:
-            if (payload_end - cursor != sizeof(std::uint64_t)) {
-              throw std::runtime_error("DWARF set_address width does not match ELF64");
+            if (payload_end - cursor != address_size) {
+              throw std::runtime_error("DWARF set_address width does not match line header");
             }
             state.address = read_scalar<std::uint64_t>(bytes, cursor, payload_end,
                                                        "DWARF set_address operand");
             break;
           case kLneDefineFile:
-            files.push_back(read_file_entry(bytes, cursor, payload_end));
+            if (dwarf5) {
+              throw std::runtime_error("DWARF5 define_file opcode is unsupported");
+            }
+            files.push_back(read_v4_file_entry(bytes, cursor, payload_end));
             break;
           case kLneSetDiscriminator:
             static_cast<void>(read_uleb(bytes, cursor, payload_end));

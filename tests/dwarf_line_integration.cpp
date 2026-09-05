@@ -24,7 +24,7 @@ void test_runtime_mapping(const std::string& fixture) {
   auto debugger = mdbg::Debugger::launch(fixture, {});
   const mdbg::ElfFile elf(fixture);
   const mdbg::DwarfLineTable lines(fixture);
-  require(lines.available(), "DWARF v4 fixture should expose line ranges");
+  require(lines.available(), "DWARF fixture should expose line ranges");
 
   const auto probe = elf.find_symbol("line_probe");
   require(probe.has_value(), "line_probe symbol missing from fixture");
@@ -89,20 +89,6 @@ void test_missing_debug_line(const std::string& stripped_fixture) {
           "empty line table must not resolve source locations");
 }
 
-void test_unsupported_version(const std::string& dwarf5_fixture) {
-  try {
-    const mdbg::DwarfLineTable lines(dwarf5_fixture);
-    static_cast<void>(lines);
-  } catch (const std::runtime_error& error) {
-    const std::string message = error.what();
-    require(message.find("version 5") != std::string::npos &&
-                message.find("unsupported") != std::string::npos,
-            "DWARF5 rejection should identify the unsupported version");
-    return;
-  }
-  throw std::runtime_error("DWARF5 fixture must be rejected explicitly");
-}
-
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -110,7 +96,7 @@ int main(int argc, char** argv) {
   try {
     test_runtime_mapping(argv[1]);
     test_missing_debug_line(argv[2]);
-    test_unsupported_version(argv[3]);
+    test_runtime_mapping(argv[3]);
     return 0;
   } catch (const std::exception& error) {
     std::fprintf(stderr, "DWARF line integration failure: %s\n", error.what());

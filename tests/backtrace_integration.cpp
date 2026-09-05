@@ -14,6 +14,33 @@
 
 namespace {
 
+volatile int exception_fixture_value = 0;
+
+extern "C" __attribute__((noinline)) void cfi_exception_throw_helper(bool should_throw) {
+  if (should_throw) throw std::runtime_error("CFI fixture exception");
+  exception_fixture_value += 1;
+}
+
+extern "C" __attribute__((noinline)) void cfi_exception_middle() {
+  try {
+    cfi_exception_throw_helper(false);
+    exception_fixture_value += 1;
+  } catch (const std::exception&) {
+    exception_fixture_value += 100;
+  }
+}
+
+extern "C" __attribute__((noinline)) void cfi_exception_outer() {
+  cfi_exception_middle();
+  exception_fixture_value += 1;
+}
+
+int run_exception_fixture() {
+  exception_fixture_value = 0;
+  cfi_exception_outer();
+  return exception_fixture_value == 3 ? 0 : 97;
+}
+
 void require(bool condition, const std::string& message) {
   if (!condition) throw std::runtime_error(message);
 }
@@ -138,13 +165,43 @@ void test_cfi_backtrace_without_frame_pointer(const std::string& fixture) {
           "unreadable CFI stack state must return a bounded partial trace");
 }
 
+void test_compiler_exception_cfi(const std::string& fixture) {
+  auto debugger = mdbg::Debugger::launch(fixture, {"--exception-fixture"});
+  const mdbg::ElfFile elf(fixture);
+  const mdbg::EhFrame cfi(fixture);
+  require(cfi.available(), "C++ exception fixture is missing .eh_frame");
+
+  const auto middle = elf.find_symbol("cfi_exception_middle");
+  require(middle.has_value(), "cfi_exception_middle symbol missing from fixture");
+  const auto middle_address =
+      static_cast<std::uintptr_t>(elf.runtime_address(debugger.pid(), *middle));
+  debugger.add_breakpoint(middle_address);
+
+  const auto hit = debugger.continue_execution();
+  require(hit.reason == mdbg::StopReason::Breakpoint &&
+              hit.breakpoint_address == middle_address,
+          "exception CFI breakpoint was not hit");
+
+  const auto caller = cfi.caller_return_address(debugger, elf);
+  require(caller.has_value(), "exception CFI did not recover a caller return address");
+  require_frame_name(elf, debugger.pid(), *caller, "cfi_exception_outer");
+
+  const auto done = debugger.continue_execution();
+  require(done.reason == mdbg::StopReason::Exited && done.value == 0,
+          "exception CFI fixture did not exit cleanly");
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
+  if (argc == 2 && std::string(argv[1]) == "--exception-fixture") {
+    return run_exception_fixture();
+  }
   if (argc != 3) return 2;
   try {
     test_frame_pointer_backtrace(argv[1]);
     test_cfi_backtrace_without_frame_pointer(argv[2]);
+    test_compiler_exception_cfi(argv[0]);
     return 0;
   } catch (const std::exception& error) {
     std::fprintf(stderr, "backtrace integration failure: %s\n", error.what());

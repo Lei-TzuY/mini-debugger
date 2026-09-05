@@ -1334,7 +1334,7 @@ std::uint64_t evaluate_breg5_stack_value(const std::vector<std::byte>& expressio
         "unsupported trailing operations after DW_OP_breg5 dereference value");
   }
   return value ^ constant;
-  }
+}
 
 std::uint64_t evaluate_breg5_memory_address(
     const std::vector<std::byte>& expression, const Debugger& debugger) {

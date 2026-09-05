@@ -1,5 +1,6 @@
 #include "debugger/debugger.hpp"
 
+#include <poll.h>
 #include <sys/syscall.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -123,6 +124,150 @@ pid_t worker_tid(pid_t leader, const std::vector<pid_t>& tids) {
     if (tid != leader) return tid;
   }
   throw std::runtime_error("worker TID is unavailable");
+}
+
+struct CliProcess {
+  pid_t pid{-1};
+  int input{-1};
+  int output{-1};
+};
+
+CliProcess spawn_cli(const std::string& mdbg, const std::string& fixture) {
+  int input_pipe[2];
+  int output_pipe[2];
+  if (::pipe(input_pipe) != 0 || ::pipe(output_pipe) != 0) {
+    throw std::runtime_error("failed to create CLI pipes");
+  }
+
+  const pid_t pid = ::fork();
+  if (pid == -1) throw std::runtime_error("failed to fork CLI");
+  if (pid == 0) {
+    ::setpgid(0, 0);
+    ::dup2(input_pipe[0], STDIN_FILENO);
+    ::dup2(output_pipe[1], STDOUT_FILENO);
+    ::dup2(output_pipe[1], STDERR_FILENO);
+    ::close(input_pipe[0]);
+    ::close(input_pipe[1]);
+    ::close(output_pipe[0]);
+    ::close(output_pipe[1]);
+    ::execl(mdbg.c_str(), mdbg.c_str(), fixture.c_str(), "thread-lifecycle", nullptr);
+    _exit(127);
+  }
+
+  ::close(input_pipe[0]);
+  ::close(output_pipe[1]);
+  return CliProcess{pid, input_pipe[1], output_pipe[0]};
+}
+
+void terminate_cli(CliProcess& cli) noexcept {
+  if (cli.input != -1) {
+    ::close(cli.input);
+    cli.input = -1;
+  }
+  if (cli.output != -1) {
+    ::close(cli.output);
+    cli.output = -1;
+  }
+  if (cli.pid > 0) {
+    ::kill(-cli.pid, SIGKILL);
+    ::kill(cli.pid, SIGKILL);
+    int status = 0;
+    while (::waitpid(cli.pid, &status, 0) == -1 && errno == EINTR) {
+    }
+    cli.pid = -1;
+  }
+}
+
+void write_cli(CliProcess& cli, const std::string& command) {
+  std::size_t offset = 0;
+  while (offset < command.size()) {
+    const auto written = ::write(cli.input, command.data() + offset, command.size() - offset);
+    if (written == -1 && errno == EINTR) continue;
+    if (written <= 0) throw std::runtime_error("failed to write CLI command");
+    offset += static_cast<std::size_t>(written);
+  }
+}
+
+std::string read_cli_until(CliProcess& cli, const std::string& needle) {
+  std::string output;
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  while (output.find(needle) == std::string::npos) {
+    const auto now = std::chrono::steady_clock::now();
+    if (now >= deadline) throw std::runtime_error("timed out waiting for CLI output: " + needle);
+    const auto remaining =
+        std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now).count();
+    pollfd descriptor{cli.output, POLLIN | POLLHUP, 0};
+    const int result = ::poll(&descriptor, 1, static_cast<int>(remaining));
+    if (result == -1 && errno == EINTR) continue;
+    if (result <= 0) throw std::runtime_error("timed out reading CLI output: " + needle);
+
+    char buffer[512];
+    const auto count = ::read(cli.output, buffer, sizeof(buffer));
+    if (count == -1 && errno == EINTR) continue;
+    if (count <= 0) throw std::runtime_error("CLI exited before output: " + needle);
+    output.append(buffer, static_cast<std::size_t>(count));
+  }
+  return output;
+}
+
+std::string read_cli_to_eof(CliProcess& cli) {
+  std::string output;
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  while (true) {
+    const auto now = std::chrono::steady_clock::now();
+    if (now >= deadline) throw std::runtime_error("timed out waiting for CLI exit");
+    const auto remaining =
+        std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now).count();
+    pollfd descriptor{cli.output, POLLIN | POLLHUP, 0};
+    const int result = ::poll(&descriptor, 1, static_cast<int>(remaining));
+    if (result == -1 && errno == EINTR) continue;
+    if (result <= 0) throw std::runtime_error("timed out waiting for CLI EOF");
+
+    char buffer[512];
+    const auto count = ::read(cli.output, buffer, sizeof(buffer));
+    if (count == -1 && errno == EINTR) continue;
+    if (count == 0) break;
+    if (count < 0) throw std::runtime_error("failed to read CLI output");
+    output.append(buffer, static_cast<std::size_t>(count));
+  }
+  return output;
+}
+
+pid_t created_thread_tid(const std::string& output) {
+  const std::string prefix = "thread ";
+  const std::string suffix = " created and stopped";
+  const auto begin = output.find(prefix);
+  if (begin == std::string::npos) throw std::runtime_error("CLI did not report thread creation");
+  const auto digits = begin + prefix.size();
+  const auto end = output.find(suffix, digits);
+  if (end == std::string::npos) throw std::runtime_error("CLI thread creation output is malformed");
+  return static_cast<pid_t>(std::stol(output.substr(digits, end - digits)));
+}
+
+std::vector<pid_t> listed_thread_ids(const std::string& output) {
+  std::vector<pid_t> result;
+  std::istringstream lines(output);
+  std::string line;
+  while (std::getline(lines, line)) {
+    std::istringstream fields(line);
+    std::string first;
+    fields >> first;
+    if (first.empty()) continue;
+    if (first == "*") fields >> first;
+    try {
+      std::size_t consumed = 0;
+      const auto value = std::stoll(first, &consumed, 10);
+      std::string state;
+      fields >> state;
+      if (consumed == first.size() && value > 0 && state == "stopped") {
+        result.push_back(static_cast<pid_t>(value));
+      }
+    } catch (const std::exception&) {
+    }
+  }
+  std::sort(result.begin(), result.end());
+  result.erase(std::unique(result.begin(), result.end()), result.end());
+  return result;
 }
 
 void test_explicit_multithread_detach(const std::string& fixture) {
@@ -258,6 +403,87 @@ void test_explicit_thread_selection_progress(const std::string& fixture) {
   }
 }
 
+void test_cli_thread_selection(const std::string& fixture, const std::string& mdbg) {
+  auto cli = spawn_cli(mdbg, fixture);
+  try {
+    const auto initial = read_cli_until(cli, "(mdbg) ");
+    require(initial.find("stopped after exec") != std::string::npos,
+            "CLI did not reach the initial exec stop");
+
+    write_cli(cli, "continue\n");
+    const auto created = read_cli_until(cli, "(mdbg) ");
+    const auto worker = created_thread_tid(created);
+
+    write_cli(cli, "info threads\n");
+    const auto initial_listing = read_cli_until(cli, "(mdbg) ");
+    const auto tids = listed_thread_ids(initial_listing);
+    require(tids.size() == 2, "CLI did not list both stopped threads");
+    require(std::find(tids.begin(), tids.end(), worker) != tids.end(),
+            "CLI thread list omitted the created worker");
+    const auto leader = tids.front() == worker ? tids.back() : tids.front();
+
+    write_cli(cli, "thread " + std::to_string(leader) + "\n");
+    auto selected = read_cli_until(cli, "(mdbg) ");
+    require(selected.find("selected thread " + std::to_string(leader)) != std::string::npos,
+            "CLI did not acknowledge leader selection");
+
+    write_cli(cli, "info threads\n");
+    auto listing = read_cli_until(cli, "(mdbg) ");
+    require(listing.find("* " + std::to_string(leader) + " stopped") != std::string::npos,
+            "CLI did not mark the selected leader active");
+
+    write_cli(cli, "thread " + std::to_string(worker) + "\n");
+    selected = read_cli_until(cli, "(mdbg) ");
+    require(selected.find("selected thread " + std::to_string(worker)) != std::string::npos,
+            "CLI did not acknowledge worker selection");
+
+    write_cli(cli, "info threads\n");
+    listing = read_cli_until(cli, "(mdbg) ");
+    require(listing.find("* " + std::to_string(worker) + " stopped") != std::string::npos,
+            "CLI did not mark the selected worker active");
+
+    write_cli(cli, "regs\n");
+    const auto registers = read_cli_until(cli, "(mdbg) ");
+    require(registers.find("rip") != std::string::npos,
+            "CLI register read failed after worker selection");
+
+    write_cli(cli, "continue\n");
+    const auto worker_exit = read_cli_until(cli, "(mdbg) ");
+    require(worker_exit.find("thread " + std::to_string(worker) + " exited with code 0") !=
+                std::string::npos,
+            "CLI execution did not follow the selected worker through exit");
+
+    write_cli(cli, "info threads\n");
+    const auto final_listing = read_cli_until(cli, "(mdbg) ");
+    require(final_listing.find(std::to_string(worker) + " stopped") == std::string::npos,
+            "CLI retained an exited worker in the thread list");
+    require(final_listing.find("* " + std::to_string(leader) + " stopped") !=
+                std::string::npos,
+            "CLI did not return active ownership to the stopped leader");
+
+    write_cli(cli, "continue\n");
+    ::close(cli.input);
+    cli.input = -1;
+    const auto exited = read_cli_to_eof(cli);
+    require(exited.find("process exited with code 0") != std::string::npos,
+            "CLI tracee did not exit cleanly after worker scheduling");
+
+    int status = 0;
+    pid_t result;
+    do {
+      result = ::waitpid(cli.pid, &status, 0);
+    } while (result == -1 && errno == EINTR);
+    require(result == cli.pid && WIFEXITED(status) && WEXITSTATUS(status) == 0,
+            "mdbg CLI process did not exit cleanly");
+    cli.pid = -1;
+    ::close(cli.output);
+    cli.output = -1;
+  } catch (...) {
+    terminate_cli(cli);
+    throw;
+  }
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -266,9 +492,13 @@ int main(int argc, char** argv) {
     return 2;
   }
   try {
+    const auto executable_dir = std::filesystem::path(argv[0]).parent_path();
+    const auto mdbg = (executable_dir.empty() ? std::filesystem::current_path() : executable_dir) /
+                      "mdbg";
     test_explicit_multithread_detach(argv[1]);
     test_destructor_multithread_detach(argv[1]);
     test_explicit_thread_selection_progress(argv[1]);
+    test_cli_thread_selection(argv[1], mdbg.string());
   } catch (const std::exception& error) {
     std::cerr << "multi-thread attach/teardown integration failure: " << error.what() << '\n';
     return 1;

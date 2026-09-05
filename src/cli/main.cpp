@@ -62,6 +62,22 @@ pid_t parse_pid(const std::string& text) {
   return static_cast<pid_t>(value);
 }
 
+const char* process_state_name(mdbg::ProcessState state) {
+  switch (state) {
+    case mdbg::ProcessState::Stopped: return "stopped";
+    case mdbg::ProcessState::Running: return "running";
+    case mdbg::ProcessState::Exited: return "exited";
+    case mdbg::ProcessState::Signaled: return "signaled";
+    case mdbg::ProcessState::Detached: return "detached";
+  }
+  return "unknown";
+}
+
+void print_thread(const mdbg::ThreadInfo& thread) {
+  std::cout << (thread.active ? "* " : "  ") << thread.tid << ' '
+            << process_state_name(thread.state) << '\n';
+}
+
 std::string process_executable(pid_t pid) {
   return std::filesystem::read_symlink("/proc/" + std::to_string(pid) + "/exe").string();
 }
@@ -420,15 +436,31 @@ int main(int argc, char** argv) {
         std::size_t id = 0;
         input >> id;
         if (!breakpoints.remove(id)) std::cout << "no such breakpoint\n";
+      } else if (command == "thread") {
+        std::string tid_text;
+        input >> tid_text;
+        if (tid_text.empty()) {
+          std::cout << "usage: thread <tid>\n";
+          continue;
+        }
+        try {
+          const auto tid = parse_pid(tid_text);
+          debugger.select_thread(tid);
+          std::cout << "selected thread " << tid << '\n';
+        } catch (const std::exception& error) {
+          std::cout << "thread selection failed: " << error.what() << '\n';
+        }
       } else if (command == "info") {
         std::string topic;
         input >> topic;
-        if (topic != "breakpoints") {
-          std::cout << "usage: info breakpoints\n";
-          continue;
-        }
-        for (const auto& breakpoint : breakpoints.breakpoints()) {
-          print_user_breakpoint(breakpoint);
+        if (topic == "breakpoints") {
+          for (const auto& breakpoint : breakpoints.breakpoints()) {
+            print_user_breakpoint(breakpoint);
+          }
+        } else if (topic == "threads") {
+          for (const auto& thread : debugger.threads()) print_thread(thread);
+        } else {
+          std::cout << "usage: info <breakpoints|threads>\n";
         }
       } else if (command == "symbols") {
         std::string filter;
@@ -442,8 +474,8 @@ int main(int argc, char** argv) {
       } else {
         std::cout << "commands: continue, step, next, finish, stepi, regs, bt, "
                      "line <addr|symbol>, reg <name>, x <addr|symbol> [len], "
-                     "break <addr|symbol|file:line>, delete <id>, info breakpoints, "
-                     "symbols [filter], detach, quit\n";
+                     "break <addr|symbol|file:line>, delete <id>, thread <tid>, "
+                     "info <breakpoints|threads>, symbols [filter], detach, quit\n";
       }
     }
   } catch (const std::exception& error) {

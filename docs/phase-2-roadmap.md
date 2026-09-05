@@ -66,32 +66,35 @@ The completed PIE/non-PIE coverage also rejects unknown and exited TID selection
 
 This seals the current multi-thread milestone. The stop policy remains intentionally single-runner: one selected task executes while the other traced tasks remain stopped. Hardware watchpoints remain explicitly single-thread-only because x86 debug-register ownership is per TID; broadening them requires a separate concrete debug-register allocation scenario rather than being hidden inside the thread milestone. CLI thread-list/selection presentation belongs with Priority 6 productization now that the underlying scheduling contract is stable.
 
-## Priority 5: broader CFI recovery — current frontier
+## Priority 5: broader CFI recovery — complete for the current compiler-proven milestone
 
-Broaden `.eh_frame` support only when driven by real compiler output that currently fails.
+The bounded `.eh_frame` interpreter has been broadened only where real compiler output demonstrated an executable recovery gap.
 
-Acceptance criteria:
+Completed slices:
 
-- each added pointer encoding/opcode/register rule is justified by a reproducible fixture;
-- malformed/unsupported CFI remains distinguishable from "no applicable CFI";
-- arbitrary register values are never invented;
-- cross-module unwind behavior remains bounded and deterministic.
+- P5-A: a real GCC C++ exception fixture proved the version-1 `zPLR` augmentation surface required for exception-bearing frames. The parser now accepts the bounded personality/LSDA/FDE metadata used by that fixture while retaining explicit malformed and unsupported-encoding failures.
+- P5-B: Clang 18.1.3 with `-mcmodel=large` proved the signed 64-bit PC-relative encoding family used by the same exception recovery workflow. The interpreter accepts `pcrel|sdata4` and `pcrel|sdata8` FDE/LSDA widths plus the corresponding indirect personality form, and the CI permanently runs both the GCC baseline and Clang large-code-model lane.
 
-The next slice should start from an actual compiler-produced `.eh_frame` sequence that the current bounded interpreter rejects, then add only the minimum recovery rule needed to unwind that fixture. Do not turn this milestone into speculative opcode enumeration.
+The milestone remains deliberately bounded: this is not general `DW_EH_PE`, arbitrary CFI opcode, DWARF64, or arbitrary-register recovery support. Malformed/unsupported CFI remains distinguishable from "no applicable CFI", arbitrary register values are never invented, and cross-module unwind behavior remains bounded and deterministic.
 
-## Priority 6: source display and CLI productization
+Future CFI work is allowed when a new reproducible compiler-produced `.eh_frame` sequence breaks a real `bt`/`finish` workflow. In the absence of such evidence, adding encoding/opcode variants would be speculative enumeration and is not a continuation of this milestone.
 
-Improve presentation after the underlying execution semantics are stable.
+## Priority 6: source display and CLI productization — current frontier
 
-Possible scope:
+Improve presentation now that the underlying execution, loader, thread, source, and bounded unwind semantics are stable.
 
-- source-context display around the current line;
+Completed slices:
+
+- P6-A: the completed P4 scheduling contract is exposed to users through `info threads` and `thread <tid>`. Thread listing reports each tracked TID and state with an explicit active marker; selection delegates to the existing single-runner debugger API rather than duplicating scheduling policy in the CLI. A real CLI subprocess integration drives a pthread tracee through thread creation, leader/worker selection, selected-thread register access, worker execution/exit, active ownership returning to the leader, and clean process exit in both PIE and non-PIE runs.
+
+Next productization candidates:
+
+- source-context display around the current source location;
 - clearer module-qualified symbol/source rendering;
-- explicit thread listing/selection commands over the completed P4 scheduling API;
-- CLI help/usage consistency;
-- release packaging and examples.
+- CLI help/usage consistency beyond the commands already exercised by integration;
+- release packaging and examples after the interactive workflows are coherent.
 
-This work should not precede correctness-critical lifecycle, loader, watchpoint, thread, or unwind work when those are active milestones.
+The next slice should again be executable and user-visible. Prefer closing a complete interactive workflow over adding isolated presentation helpers.
 
 ## Selection rule
 

@@ -1584,6 +1584,163 @@ std::optional<LocalScalarValue> inspect_unit(const DebugSections& sections,
                           value_type.kind};
 }
 
+std::uint64_t caller_frame_base(const Debugger& debugger, const ElfFile& module,
+                                const InspectionFrameContext& frame,
+                                const std::vector<std::byte>& expression) {
+  if (expression.size() != 1) {
+    throw std::runtime_error("caller-frame inspection does not support compound DW_AT_frame_base");
+  }
+  const auto op = std::to_integer<std::uint8_t>(expression.front());
+  if (op == kDwOpReg6) {
+    if (!frame.registers.rbp) {
+      throw std::runtime_error("caller-frame DW_OP_reg6 requires recovered RBP");
+    }
+    return *frame.registers.rbp;
+  }
+  if (op != kDwOpCallFrameCfa) {
+    throw std::runtime_error("unsupported caller-frame DW_AT_frame_base operation");
+  }
+  const EhFrame cfi(module.path());
+  if (!cfi.available()) {
+    throw std::runtime_error("caller-frame DW_OP_call_frame_cfa requires .eh_frame");
+  }
+  const EhFrameCursor current{frame.runtime_pc, frame.stack_pointer, frame.frame_pointer};
+  const auto caller = cfi.caller_frame(debugger, module, current);
+  if (!caller) {
+    throw std::runtime_error("CFI did not recover caller-frame CFA");
+  }
+  return caller->stack_pointer;
+}
+
+std::optional<LocalScalarValue> inspect_caller_stack_unit(
+    const DebugSections& sections, const Debugger& debugger, const ElfFile& module,
+    const InspectionFrameContext& frame, std::uint64_t virtual_pc,
+    std::string_view name, std::size_t unit_start, std::size_t& next_unit) {
+  std::uint16_t unit_version = 0;
+  const auto dies = parse_unit_dies(sections, unit_start, next_unit, unit_version);
+  std::uint64_t compilation_unit_base = 0;
+  for (const auto& die : dies) {
+    if (die.parent) continue;
+    const auto* low_pc = attribute(die, kDwAtLowPc);
+    if (low_pc != nullptr && low_pc->form == kDwFormAddr) {
+      compilation_unit_base = low_pc->number;
+      break;
+    }
+  }
+
+  std::optional<std::size_t> subprogram;
+  for (std::size_t index = 0; index < dies.size(); ++index) {
+    if (dies[index].tag != kDwTagSubprogram || !die_contains_pc(dies[index], virtual_pc)) {
+      continue;
+    }
+    if (subprogram) {
+      throw std::runtime_error("inspection frame PC matches multiple DWARF subprograms");
+    }
+    subprogram = index;
+  }
+  if (!subprogram) return std::nullopt;
+
+  std::optional<std::size_t> value_die_index;
+  std::optional<std::size_t> best_depth;
+  bool nested_name = false;
+  for (std::size_t index = 0; index < dies.size(); ++index) {
+    const bool supported_value_tag =
+        dies[index].tag == kDwTagVariable || dies[index].tag == kDwTagFormalParameter;
+    if (!supported_value_tag) continue;
+    const auto* die_name = attribute_with_abstract_origin(dies, index, kDwAtName);
+    if (die_name == nullptr || die_name->text != name) continue;
+    const auto depth = active_scope_depth(dies, index, *subprogram, virtual_pc);
+    if (!depth) {
+      if (is_descendant_of(dies, index, *subprogram)) nested_name = true;
+      continue;
+    }
+    if (!value_die_index || *depth > *best_depth) {
+      value_die_index = index;
+      best_depth = *depth;
+      continue;
+    }
+    if (*depth == *best_depth) {
+      throw std::runtime_error("ambiguous local value in inspection-frame lexical scope: " +
+                               std::string(name));
+    }
+  }
+  if (!value_die_index) {
+    if (nested_name) {
+      throw std::runtime_error("local value is outside the inspection-frame lexical scope: " +
+                               std::string(name));
+    }
+    throw std::runtime_error("local value is not in the inspection-frame subprogram: " +
+                             std::string(name));
+  }
+
+  const auto& subprogram_die = dies[*subprogram];
+  const auto& value_die = dies[*value_die_index];
+  const auto* location = attribute(value_die, kDwAtLocation);
+  const auto* type = attribute_with_abstract_origin(dies, *value_die_index, kDwAtType);
+  if (location == nullptr) throw std::runtime_error("local value has no DW_AT_location");
+  if (type == nullptr || type->form != kDwFormRef4) {
+    throw std::runtime_error("local value has no supported DW_FORM_ref4 type");
+  }
+
+  const auto value_type = resolve_value_type(dies, type->number);
+  std::vector<std::byte> location_expression;
+  if (location->form == kDwFormExprloc) {
+    location_expression = location->expression;
+  } else if (location->form == kDwFormSecOffset || location->form == kDwFormLoclistx) {
+    location_expression = active_location_expression(
+        sections, location->number, virtual_pc, compilation_unit_base, unit_version);
+  } else {
+    throw std::runtime_error("local value has no supported DW_AT_location form");
+  }
+
+  if (location_expression.empty() ||
+      std::to_integer<std::uint8_t>(location_expression.front()) != kDwOpFbreg) {
+    throw std::runtime_error(
+        "caller-frame local requires compiler-proven DW_OP_fbreg stack storage; "
+        "unrecovered historical registers are unavailable");
+  }
+  const auto* base_expression = attribute(subprogram_die, kDwAtFrameBase);
+  if (base_expression == nullptr || base_expression->form != kDwFormExprloc) {
+    throw std::runtime_error(
+        "caller-frame subprogram has no supported DW_AT_frame_base expression");
+  }
+  const auto base = caller_frame_base(debugger, module, frame, base_expression->expression);
+  const auto address = add_signed(base, fbreg_offset(location_expression),
+                                  "caller-frame local variable address");
+  if (value_type.kind == LocalValueKind::Structure) {
+    const auto bytes = debugger.read_memory(static_cast<std::uintptr_t>(address),
+                                            value_type.byte_size);
+    if (bytes.size() != value_type.byte_size) {
+      throw std::runtime_error("short caller-frame local-struct memory read");
+    }
+    return decode_structure(module, name, value_type, bytes);
+  }
+  return LocalScalarValue{module.path(), std::string(name),
+                          read_integer(debugger, address, value_type.byte_size),
+                          value_type.byte_size, value_type.is_signed,
+                          value_type.kind};
+}
+
+void validate_inspection_frame(const Debugger& debugger,
+                               const InspectionFrameContext& frame) {
+  if (debugger.state() != ProcessState::Stopped) {
+    throw std::logic_error("inspection-frame local-value lookup requires a stopped tracee");
+  }
+  if (frame.process_pid != debugger.pid() || frame.tid != debugger.active_tid()) {
+    throw std::logic_error("inspection frame belongs to a different process/TID domain");
+  }
+  const auto live = debugger.registers();
+  if (static_cast<std::uintptr_t>(live.rip) != frame.origin_runtime_pc ||
+      static_cast<std::uintptr_t>(live.rsp) != frame.origin_stack_pointer ||
+      (frame.origin_frame_pointer &&
+       static_cast<std::uintptr_t>(live.rbp) != *frame.origin_frame_pointer)) {
+    throw std::logic_error("inspection frame is stale after execution state changed");
+  }
+  if (frame.runtime_pc == 0 || frame.stack_pointer == 0 || frame.module_path.empty()) {
+    throw std::invalid_argument("inspection frame is incomplete");
+  }
+}
+
 }  // namespace
 
 LocalScalarValue inspect_local_value(const Debugger& debugger,
@@ -1616,10 +1773,53 @@ LocalScalarValue inspect_local_value(const Debugger& debugger,
   throw std::runtime_error("current PC is not covered by a supported DWARF4/5 subprogram");
 }
 
+LocalScalarValue inspect_local_value(const Debugger& debugger,
+                                     const ElfFile& preferred_elf,
+                                     const InspectionFrameContext& frame,
+                                     std::string_view name) {
+  if (name.empty()) throw std::invalid_argument("local variable name must not be empty");
+  validate_inspection_frame(debugger, frame);
+  if (frame.index == 0) {
+    return inspect_local_value(debugger, preferred_elf, name);
+  }
+
+  const ElfFile module(frame.module_path);
+  const auto bias = module.load_bias(frame.process_pid);
+  if (frame.runtime_pc < bias) {
+    throw std::runtime_error("inspection-frame PC is below module load bias");
+  }
+  const auto virtual_pc = static_cast<std::uint64_t>(frame.runtime_pc - bias);
+  const auto sections = read_debug_sections(module.path());
+  std::size_t unit = 0;
+  while (unit < sections.info.size()) {
+    std::size_t next = unit;
+    const auto result = inspect_caller_stack_unit(sections, debugger, module, frame,
+                                                  virtual_pc, name, unit, next);
+    if (result) return *result;
+    if (next <= unit) {
+      throw std::runtime_error("DWARF parser did not advance to the next unit");
+    }
+    unit = next;
+  }
+  throw std::runtime_error(
+      "inspection-frame PC is not covered by a supported DWARF4/5 subprogram");
+}
+
 LocalIntegerValue inspect_local_integer(const Debugger& debugger,
                                         const ElfFile& preferred_elf,
                                         std::string_view name) {
   auto value = inspect_local_value(debugger, preferred_elf, name);
+  if (value.kind != LocalValueKind::Integer) {
+    throw std::runtime_error("local value is not an integer scalar: " + std::string(name));
+  }
+  return value;
+}
+
+LocalIntegerValue inspect_local_integer(const Debugger& debugger,
+                                        const ElfFile& preferred_elf,
+                                        const InspectionFrameContext& frame,
+                                        std::string_view name) {
+  auto value = inspect_local_value(debugger, preferred_elf, frame, name);
   if (value.kind != LocalValueKind::Integer) {
     throw std::runtime_error("local value is not an integer scalar: " + std::string(name));
   }

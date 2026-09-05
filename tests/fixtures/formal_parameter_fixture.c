@@ -1,6 +1,9 @@
 #include <stdint.h>
 
 #define PARAMETER_EXPECTED UINT64_C(0x1020304050607080)
+#define ENTRY_PARAMETER_XOR UINT64_C(0x55aa00ff33cc6699)
+#define ENTRY_RDI_SENTINEL UINT64_C(0x777788889999aaaa)
+#define ENTRY_RESULT_EXPECTED UINT64_C(0x54a805fe32c96390)
 #define OPTIMIZED_LOCAL_EXPECTED UINT64_C(0x1e3c1e781e3c1ef0)
 
 volatile uint64_t parameter_seed = UINT64_C(0x1122334455667788);
@@ -13,6 +16,23 @@ __attribute__((noinline)) uint64_t inspect_parameter_value(uint64_t parameter) {
                    :
                    : "memory");
   return parameter;
+}
+
+__attribute__((noinline)) uint64_t clobber_argument_registers(
+    uint64_t first, uint64_t second, uint64_t third,
+    uint64_t fourth, uint64_t fifth, uint64_t sixth) {
+  const uint64_t result = parameter_seed ^ first ^ (second << 8U) ^
+                          (third << 16U) ^ (fourth << 24U) ^
+                          (fifth << 32U) ^ (sixth << 40U);
+  __asm__ volatile("movabsq $0x777788889999aaaa, %%rdi\n" ::: "rdi", "memory");
+  return result;
+}
+
+__attribute__((noinline)) uint64_t inspect_entry_parameter(uint64_t entry_parameter) {
+  const uint64_t transformed = entry_parameter ^ ENTRY_PARAMETER_XOR;
+  const uint64_t side_effect = clobber_argument_registers(1, 2, 3, 4, 5, 6);
+  __asm__ volatile("nop\n" ::: "memory");
+  return transformed ^ side_effect;
 }
 
 __attribute__((noinline)) uint64_t inspect_optimized_local(void) {
@@ -30,5 +50,6 @@ __attribute__((noinline)) uint64_t inspect_optimized_local(void) {
 int main(void) {
   const uint64_t parameter = parameter_seed ^ UINT64_C(0x0102030405060708);
   if (inspect_parameter_value(parameter) != PARAMETER_EXPECTED) return 1;
-  return inspect_optimized_local() == OPTIMIZED_LOCAL_EXPECTED ? 0 : 2;
+  if (inspect_entry_parameter(parameter) != ENTRY_RESULT_EXPECTED) return 2;
+  return inspect_optimized_local() == OPTIMIZED_LOCAL_EXPECTED ? 0 : 3;
 }

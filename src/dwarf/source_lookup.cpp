@@ -74,6 +74,8 @@ constexpr std::uint8_t kDwOpReg0 = 0x50;
 constexpr std::uint8_t kDwOpReg5 = 0x55;
 constexpr std::uint8_t kDwOpReg6 = 0x56;
 constexpr std::uint8_t kDwOpFbreg = 0x91;
+constexpr std::uint8_t kDwOpStackValue = 0x9f;
+constexpr std::uint8_t kDwOpEntryValue = 0xa3;
 constexpr std::uint8_t kDwOpCallFrameCfa = 0x9c;
 constexpr std::uint64_t kDwAteSigned = 0x05;
 constexpr std::uint64_t kDwAteUnsigned = 0x07;
@@ -1034,6 +1036,48 @@ std::uint64_t truncate_integer(std::uint64_t value, std::size_t byte_size) {
   return value & ((std::uint64_t{1} << bits) - 1U);
 }
 
+std::uint64_t evaluate_entry_rdi(
+    const std::vector<std::byte>& expression, const Debugger& debugger,
+    const ElfFile& module, const Die& subprogram_die) {
+  std::size_t cursor = 1;
+  const auto nested_length =
+      read_uleb(expression, cursor, expression.size(), "DW_OP_entry_value length");
+  if (nested_length != 1 || cursor >= expression.size() ||
+      std::to_integer<std::uint8_t>(expression[cursor]) != kDwOpReg5) {
+    throw std::runtime_error(
+        "DW_OP_entry_value only supports the compiler-proven nested DW_OP_reg5 form");
+  }
+  ++cursor;
+  if (cursor >= expression.size() ||
+      std::to_integer<std::uint8_t>(expression[cursor]) != kDwOpStackValue) {
+    throw std::runtime_error(
+        "DW_OP_entry_value requires the compiler-proven trailing DW_OP_stack_value");
+  }
+  ++cursor;
+  if (cursor != expression.size()) {
+    throw std::runtime_error(
+        "unsupported trailing operations after DW_OP_entry_value");
+  }
+
+  const auto* low_pc = attribute(subprogram_die, kDwAtLowPc);
+  if (low_pc == nullptr || low_pc->form != kDwFormAddr) {
+    throw std::runtime_error(
+        "DW_OP_entry_value requires a subprogram with supported DW_AT_low_pc");
+  }
+  const auto bias = module.load_bias(debugger.pid());
+  if (low_pc->number > std::numeric_limits<std::uint64_t>::max() - bias) {
+    throw std::runtime_error("subprogram entry runtime address overflows");
+  }
+  const auto runtime_entry = static_cast<std::uintptr_t>(low_pc->number + bias);
+  const auto snapshot = debugger.breakpoint_register_snapshot(
+      debugger.active_tid(), runtime_entry);
+  if (!snapshot) {
+    throw std::runtime_error(
+        "DW_OP_entry_value requires an observed function-entry breakpoint snapshot");
+  }
+  return snapshot->rdi;
+}
+
 std::optional<LocalScalarValue> inspect_unit(const DebugSections& sections,
                                              const Debugger& debugger,
                                              const ElfFile& module,
@@ -1138,6 +1182,16 @@ std::optional<LocalScalarValue> inspect_unit(const DebugSections& sections,
                               value_type.byte_size, value_type.is_signed,
                               value_type.kind};
     }
+  }
+
+  if (value_type.kind != LocalValueKind::Structure && !location_expression.empty() &&
+      std::to_integer<std::uint8_t>(location_expression.front()) == kDwOpEntryValue) {
+    const auto raw = truncate_integer(
+        evaluate_entry_rdi(location_expression, debugger, module, subprogram_die),
+        value_type.byte_size);
+    return LocalScalarValue{module.path(), std::string(name), raw,
+                            value_type.byte_size, value_type.is_signed,
+                            value_type.kind};
   }
 
   if (location_expression.empty() ||

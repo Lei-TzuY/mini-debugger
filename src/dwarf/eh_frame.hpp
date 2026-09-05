@@ -22,8 +22,6 @@ class EhFrame {
   explicit EhFrame(std::string path);
 
   [[nodiscard]] bool available() const noexcept { return available_; }
-  [[nodiscard]] std::optional<std::uintptr_t> current_cfa(
-      const Debugger& debugger, const ElfFile& elf) const;
   [[nodiscard]] std::optional<std::uintptr_t> caller_return_address(
       const Debugger& debugger, const ElfFile& elf) const;
   [[nodiscard]] std::optional<EhFrameCursor> caller_frame(

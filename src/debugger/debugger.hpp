@@ -11,6 +11,7 @@
 #include <optional>
 #include <set>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace mdbg {
@@ -80,6 +81,7 @@ class Debugger {
   void detach(SignalPolicy policy = SignalPolicy::Suppress);
 
   user_regs_struct registers() const;
+  void set_register(std::string_view name, std::uint64_t value);
   std::vector<std::byte> read_memory(std::uintptr_t address, std::size_t length) const;
 
   std::size_t add_breakpoint(std::uintptr_t address);

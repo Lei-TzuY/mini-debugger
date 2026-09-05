@@ -313,6 +313,7 @@ InspectionFrameContext current_inspection_frame(const Debugger& debugger,
   return InspectionFrameContext{0,
                                 debugger.pid(),
                                 debugger.active_tid(),
+                                debugger.stop_info().sequence,
                                 runtime_pc,
                                 static_cast<std::uintptr_t>(regs.rsp),
                                 static_cast<std::uintptr_t>(regs.rbp),
@@ -352,10 +353,10 @@ std::vector<InspectionFrameContext> build_inspection_frames(
 
     result.push_back(InspectionFrameContext{
         result.size(), current_context.process_pid, current_context.tid,
-        current_context.origin_runtime_pc, current_context.origin_stack_pointer,
-        current_context.origin_frame_pointer, caller->instruction_pointer,
-        caller->stack_pointer, caller->frame_pointer, *module,
-        caller_register_state(*caller)});
+        current_context.origin_stop_sequence, current_context.origin_runtime_pc,
+        current_context.origin_stack_pointer, current_context.origin_frame_pointer,
+        caller->instruction_pointer, caller->stack_pointer, caller->frame_pointer,
+        *module, caller_register_state(*caller)});
     current = *caller;
   }
   return result;

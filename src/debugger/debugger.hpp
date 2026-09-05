@@ -35,6 +35,7 @@ enum class StopReason {
 };
 enum class SignalPolicy { Suppress, Forward };
 enum class ProcessEventKind { None, Fork, Vfork };
+enum class ForkFollowPolicy { Parent, Child };
 
 struct StopInfo {
   StopReason reason;
@@ -46,6 +47,7 @@ struct StopInfo {
   std::optional<pid_t> new_tid{};
   std::optional<pid_t> former_tid{};
   ProcessEventKind process_event{ProcessEventKind::None};
+  std::optional<pid_t> parent_pid{};
   std::optional<pid_t> child_pid{};
 };
 
@@ -79,6 +81,12 @@ class Debugger {
   [[nodiscard]] ProcessOrigin origin() const noexcept { return process_.origin(); }
   [[nodiscard]] const StopInfo& stop_info() const noexcept { return stop_info_; }
   [[nodiscard]] const std::string& executable_path() const noexcept { return executable_path_; }
+  [[nodiscard]] ForkFollowPolicy fork_follow_policy() const noexcept {
+    return fork_follow_policy_;
+  }
+  void set_fork_follow_policy(ForkFollowPolicy policy) noexcept {
+    fork_follow_policy_ = policy;
+  }
   [[nodiscard]] std::vector<ThreadInfo> threads() const;
   void select_thread(pid_t tid);
 
@@ -131,6 +139,7 @@ class Debugger {
   Process process_;
   StopInfo stop_info_;
   std::string executable_path_;
+  ForkFollowPolicy fork_follow_policy_{ForkFollowPolicy::Parent};
   std::map<std::uintptr_t, Breakpoint> breakpoints_by_address_;
   std::map<std::size_t, std::uintptr_t> breakpoint_ids_;
   std::size_t next_breakpoint_id_{1};

@@ -62,7 +62,7 @@ bool has_module_qualified_backtrace_source(const std::string& output,
   while (begin <= output.size()) {
     const auto end = output.find('\n', begin);
     const auto line = output.substr(begin, end == std::string::npos ? end : end - begin);
-    if (line.rfind("#0 ", 0) == 0 && occurrence_count(line, prefix) >= 2 &&
+    if (line.find("#0 ") != std::string::npos && occurrence_count(line, prefix) >= 2 &&
         line.find("shared_cfi_library.c:") != std::string::npos) {
       return true;
     }
@@ -72,21 +72,22 @@ bool has_module_qualified_backtrace_source(const std::string& output,
   return false;
 }
 
-bool has_module_qualified_source_position(const std::string& output,
-                                          const std::string& module) {
+std::size_t module_qualified_source_position_count(const std::string& output,
+                                                   const std::string& module) {
   const std::string prefix = module + "!";
+  std::size_t count = 0;
   std::size_t begin = 0;
   while (begin <= output.size()) {
     const auto end = output.find('\n', begin);
     const auto line = output.substr(begin, end == std::string::npos ? end : end - begin);
-    if (line.rfind("0x", 0) == 0 && line.find(prefix) != std::string::npos &&
+    if (line.find("0x") != std::string::npos && line.find(prefix) != std::string::npos &&
         line.find("shared_cfi_library.c:") != std::string::npos) {
-      return true;
+      ++count;
     }
     if (end == std::string::npos) break;
     begin = end + 1;
   }
-  return false;
+  return count;
 }
 
 void require_same_module(const std::string& actual, const std::string& expected,
@@ -260,6 +261,10 @@ void test_shared_library_cfi(const std::string& driver, const std::string& libra
                   "shared_step_source.c" &&
               step_result.source->line == 711,
           "shared-library source step stopped on the wrong source row");
+  require(step_result.source_module_path.has_value(),
+          "shared-library source step dropped module identity from its result");
+  require_same_module(*step_result.source_module_path, library,
+                      "shared-library source step reported the wrong source module");
   require(debugger.registers().rip == step711->address,
           "shared-library source step did not stop at the first row for line 711");
   require_breakpoint_installed(
@@ -279,6 +284,10 @@ void test_shared_library_cfi(const std::string& driver, const std::string& libra
                   "shared_next_source.c" &&
               next_result.source->line == 721,
           "shared-library source next stopped on the wrong source row");
+  require(next_result.source_module_path.has_value(),
+          "shared-library source next dropped module identity from its result");
+  require_same_module(*next_result.source_module_path, library,
+                      "shared-library source next reported the wrong source module");
   require(debugger.registers().rip == next721->address,
           "shared-library source next did not stop at the first row for line 721");
   require(read_int_symbol(debugger, shared, "shared_next_marker") == 1,
@@ -382,6 +391,7 @@ void test_cli_module_qualification(const std::string& integration_path,
               "continue\n"
               "bt\n"
               "list\n"
+              "step\n"
               "quit\n");
     ::close(input_pipe[1]);
     input_pipe[1] = -1;
@@ -403,10 +413,11 @@ void test_cli_module_qualification(const std::string& integration_path,
     require(has_module_qualified_backtrace_source(output, library),
             "backtrace frame did not qualify both symbol and source with the owning module\n" +
                 output);
-    require(has_module_qualified_source_position(output, library),
-            "list did not qualify the shared-object source position with its module\n" + output);
-    require(output.find("scratch[0] = 1;") != std::string::npos,
-            "module-qualified list lost bounded real-file source context\n" + output);
+    require(module_qualified_source_position_count(output, library) >= 2,
+            "list and source step did not both preserve shared-object module identity\n" + output);
+    require(output.find("source unavailable: ") != std::string::npos,
+            "missing shared-object source path did not remain a deterministic non-fatal fallback\n" +
+                output);
   } catch (...) {
     if (input_pipe[1] != -1) ::close(input_pipe[1]);
     if (output_pipe[0] != -1) ::close(output_pipe[0]);

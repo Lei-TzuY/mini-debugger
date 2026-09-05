@@ -48,7 +48,7 @@ Priority 2 still does not create a general DWARF expression stack machine. The l
 
 ## Priority 3: compiler-composed multi-register stack values — complete
 
-The fourth Phase 5 slice promotes exactly such a larger expression only after it becomes the active location of an existing executable workflow. The optimized arithmetic fixture now computes the same expected `arithmetic_local == 0x10203040506070a5` from six live arguments. At the exported `arithmetic_local_probe`, GCC 13.3 selects a current-PC expression that combines R8, R9, RCX, RDX, RSI, and RDI through zero-offset `DW_OP_bregN`, shift constants (`DW_OP_const1u`, `DW_OP_lit8`, `DW_OP_lit16`, `DW_OP_lit24`), repeated `DW_OP_shl`/`DW_OP_xor`, and a final `DW_OP_stack_value`. Clang 18.1.3 materializes the same source value in `DW_OP_reg0 (rax)` and remains covered by the existing register path.
+The fourth Phase 5 slice promotes exactly such a larger expression only after it becomes the active location of an existing executable workflow. The optimized arithmetic fixture now computes the same expected `arithmetic_local == 0x10203040506070a5` from six live arguments. At the exported `arithmetic_local_probe`, GCC 13.3 selects a current-PC expression that combines R8, R9, RCX, RDX, RSI, and RDI through zero-offset `DW_OP_bregN`, shift constants (`DW_OP_const1u`, exactly the emitted `DW_OP_lit8/16/24`), repeated `DW_OP_shl`/`DW_OP_xor`, and a final `DW_OP_stack_value`. Clang 18.1.3 materializes the same source value in `DW_OP_reg0 (rax)` and remains covered by the existing register path.
 
 Completed Priority 3 contract:
 
@@ -76,6 +76,21 @@ Completed Priority 4 contract:
 - arbitrary piece counts, alternate registers, non-8-byte pieces, `DW_OP_bit_piece`, mixed memory/register pieces, malformed ULEB sizes, and trailing operations remain fail-closed.
 
 Priority 4 does not create a general piece assembler. It extends the existing typed aggregate ownership model only for the exact System V x86-64 register-pair shape independently emitted by both permanent compilers at the selected current PC.
+
+## Priority 5: compiler register-relative memory local ownership — complete
+
+The sixth Phase 5 slice is selected from a real optimized scalar local whose storage ownership crosses from the selected TID register file into inferior memory. The existing `-O1 -g -gdwarf-5` formal-parameter fixture now adds `indirect_local = *ptr` and stops at an exported probe before GCC materializes the load. GCC 13.3 selects the active current-PC location expression `DW_OP_breg5 (rdi): 0` with no `DW_OP_stack_value`, meaning the local resides in memory at the selected TID's RDI-relative address. Clang 18.1.3 has already materialized the same source value in `DW_OP_reg0 (rax)` and therefore remains covered by the existing direct-register path.
+
+Completed Priority 5 contract:
+
+- test-first GCC PIE and non-PIE sessions reach the real `indirect_local_probe` through the pre-existing source-value API and CLI workflow and fail specifically because the prior evaluator interprets every `DW_OP_breg5` expression as a stack value requiring a trailing `DW_OP_stack_value`; the same fixture remains fully green under Clang-large;
+- the evaluator now distinguishes the two compiler-proven meanings without generalizing the expression machine: `DW_OP_breg5 + signed offset + DW_OP_stack_value` keeps the existing Priority 1 value semantics, while a bare `DW_OP_breg5 + signed offset` is treated as an inferior-memory location;
+- the bare memory form accepts exactly one signed LEB128 offset and no trailing operations, reads RDI from the currently selected stopped TID, computes the runtime address with checked signed arithmetic, then reads exactly the already-resolved scalar type width through `Debugger::read_memory`;
+- the recovered bytes reuse the existing integer decoder and preserve module, current-PC, lexical-scope, process/TID, and signed/unsigned type ownership rather than introducing a raw dereference or parallel memory reader;
+- direct API and real CLI coverage prove `indirect_local == 0x8877665544332211` for PIE and non-PIE, while all pre-existing GCC tests and the complete Clang-large lane remain green;
+- malformed signed offsets, trailing operations, unsupported register-relative memory registers, arbitrary dereference chains, and other expression forms remain fail-closed.
+
+Priority 5 does not add `DW_OP_deref` or a general location-expression VM. It adds only the compiler-proven distinction between a register-relative value expression terminated by `DW_OP_stack_value` and the same bounded register-relative address used as owned memory storage.
 
 ## Current frontier: next compiler-produced expression failure
 

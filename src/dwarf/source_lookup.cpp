@@ -70,13 +70,23 @@ constexpr std::uint8_t kDwUtCompile = 0x01;
 constexpr std::uint8_t kDwLleEndOfList = 0x00;
 constexpr std::uint8_t kDwLleOffsetPair = 0x04;
 constexpr std::uint8_t kDwLleBaseAddress = 0x06;
+constexpr std::uint8_t kDwOpConst1u = 0x08;
 constexpr std::uint8_t kDwOpConstu = 0x10;
+constexpr std::uint8_t kDwOpShl = 0x24;
 constexpr std::uint8_t kDwOpXor = 0x27;
+constexpr std::uint8_t kDwOpLit8 = 0x38;
+constexpr std::uint8_t kDwOpLit16 = 0x40;
+constexpr std::uint8_t kDwOpLit24 = 0x48;
 constexpr std::uint8_t kDwOpReg0 = 0x50;
 constexpr std::uint8_t kDwOpReg5 = 0x55;
 constexpr std::uint8_t kDwOpReg6 = 0x56;
+constexpr std::uint8_t kDwOpBreg1 = 0x71;
+constexpr std::uint8_t kDwOpBreg2 = 0x72;
 constexpr std::uint8_t kDwOpBreg3 = 0x73;
+constexpr std::uint8_t kDwOpBreg4 = 0x74;
 constexpr std::uint8_t kDwOpBreg5 = 0x75;
+constexpr std::uint8_t kDwOpBreg8 = 0x78;
+constexpr std::uint8_t kDwOpBreg9 = 0x79;
 constexpr std::uint8_t kDwOpFbreg = 0x91;
 constexpr std::uint8_t kDwOpStackValue = 0x9f;
 constexpr std::uint8_t kDwOpEntryValue = 0xa3;
@@ -1040,6 +1050,90 @@ std::uint64_t truncate_integer(std::uint64_t value, std::size_t byte_size) {
   return value & ((std::uint64_t{1} << bits) - 1U);
 }
 
+std::uint64_t evaluate_composite_stack_value(const std::vector<std::byte>& expression,
+                                             const Debugger& debugger) {
+  if (expression.empty() ||
+      std::to_integer<std::uint8_t>(expression.front()) != kDwOpBreg8) {
+    throw std::runtime_error(
+        "local value location is not the compiler-proven composite stack form");
+  }
+
+  const auto regs = debugger.registers();
+  const auto register_value = [&](std::uint8_t op) -> std::uint64_t {
+    switch (op) {
+      case kDwOpBreg1:
+        return regs.rdx;
+      case kDwOpBreg2:
+        return regs.rcx;
+      case kDwOpBreg4:
+        return regs.rsi;
+      case kDwOpBreg5:
+        return regs.rdi;
+      case kDwOpBreg8:
+        return regs.r8;
+      case kDwOpBreg9:
+        return regs.r9;
+      default:
+        throw std::runtime_error("unsupported register in composite local-value expression");
+    }
+  };
+
+  std::vector<std::uint64_t> stack;
+  std::size_t cursor = 0;
+  while (cursor < expression.size()) {
+    const auto op = std::to_integer<std::uint8_t>(expression[cursor++]);
+    if (op == kDwOpBreg1 || op == kDwOpBreg2 || op == kDwOpBreg4 ||
+        op == kDwOpBreg5 || op == kDwOpBreg8 || op == kDwOpBreg9) {
+      const auto offset = read_sleb(expression, cursor, expression.size(),
+                                    "composite DW_OP_breg offset");
+      if (offset != 0) {
+        throw std::runtime_error(
+            "composite local-value expression only supports compiler-proven zero breg offsets");
+      }
+      stack.push_back(register_value(op));
+      continue;
+    }
+    if (op == kDwOpConst1u) {
+      if (cursor >= expression.size()) {
+        throw std::runtime_error("truncated DW_OP_const1u in composite local-value expression");
+      }
+      stack.push_back(std::to_integer<std::uint8_t>(expression[cursor++]));
+      continue;
+    }
+    if (op == kDwOpLit8 || op == kDwOpLit16 || op == kDwOpLit24) {
+      stack.push_back(op - 0x30U);
+      continue;
+    }
+    if (op == kDwOpShl || op == kDwOpXor) {
+      if (stack.size() < 2) {
+        throw std::runtime_error("composite local-value binary operation underflows stack");
+      }
+      const auto rhs = stack.back();
+      stack.pop_back();
+      const auto lhs = stack.back();
+      stack.pop_back();
+      if (op == kDwOpShl) {
+        if (rhs >= 64) {
+          throw std::runtime_error("composite local-value shift count is out of range");
+        }
+        stack.push_back(lhs << static_cast<unsigned>(rhs));
+      } else {
+        stack.push_back(lhs ^ rhs);
+      }
+      continue;
+    }
+    if (op == kDwOpStackValue) {
+      if (cursor != expression.size() || stack.size() != 1) {
+        throw std::runtime_error(
+            "composite local-value stack_value requires one final stack result");
+      }
+      return stack.back();
+    }
+    throw std::runtime_error("unsupported operation in compiler-proven composite local value");
+  }
+  throw std::runtime_error("composite local-value expression is missing DW_OP_stack_value");
+}
+
 std::uint64_t evaluate_breg3_xor_stack_value(
     const std::vector<std::byte>& expression, const Debugger& debugger) {
   if (expression.empty() ||
@@ -1260,6 +1354,16 @@ std::optional<LocalScalarValue> inspect_unit(const DebugSections& sections,
   }
 
   if (value_type.kind != LocalValueKind::Structure && !location_expression.empty() &&
+      std::to_integer<std::uint8_t>(location_expression.front()) == kDwOpBreg8) {
+    const auto raw = truncate_integer(
+        evaluate_composite_stack_value(location_expression, debugger),
+        value_type.byte_size);
+    return LocalScalarValue{module.path(), std::string(name), raw,
+                            value_type.byte_size, value_type.is_signed,
+                            value_type.kind};
+  }
+
+  if (value_type.kind != LocalValueKind::Structure && !location_expression.empty() &&
       std::to_integer<std::uint8_t>(location_expression.front()) == kDwOpBreg3) {
     const auto raw = truncate_integer(
         evaluate_breg3_xor_stack_value(location_expression, debugger),
@@ -1285,7 +1389,7 @@ std::optional<LocalScalarValue> inspect_unit(const DebugSections& sections,
       throw std::runtime_error("local struct is not in the supported DW_OP_fbreg storage form");
     }
     throw std::runtime_error(
-        "local value location is not a supported DW_OP_reg0/DW_OP_reg5/DW_OP_breg3-xor/DW_OP_breg5/DW_OP_fbreg form");
+        "local value location is not a supported compiler-proven register/stack/fbreg form");
   }
   const auto* base_expression = attribute(subprogram_die, kDwAtFrameBase);
   if (base_expression == nullptr || base_expression->form != kDwFormExprloc) {

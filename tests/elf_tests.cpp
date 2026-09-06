@@ -1,12 +1,32 @@
 #include "elf/elf.hpp"
 
 #include <elf.h>
+#include <signal.h>
+#include <sys/resource.h>
+#include <sys/syscall.h>
+#include <sys/wait.h>
+#include <unistd.h>
 
+#include <algorithm>
+#include <cerrno>
+#include <chrono>
+#include <cstddef>
+#include <cstdint>
+#include <cstdio>
+#include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
+#include <limits>
 #include <stdexcept>
 #include <string>
+#include <thread>
+#include <vector>
 
 namespace {
+
+constexpr std::uint64_t kCoreRegisterMarker = 0x13579bdf2468ace0ULL;
+
 void require(bool condition, const std::string& message) {
   if (!condition) throw std::runtime_error(message);
 }
@@ -22,6 +42,201 @@ void test_symbols(const std::string& path, bool expect_pie) {
   require(resolved && resolved->symbol.name == "breakpoint_one" && resolved->offset == 0,
           "address-to-symbol lookup failed");
 }
+
+std::string temp_path() {
+  char pattern[] = "/tmp/mdbg-core-ready-XXXXXX";
+  const int fd = ::mkstemp(pattern);
+  if (fd == -1) throw std::runtime_error("mkstemp failed");
+  ::close(fd);
+  ::unlink(pattern);
+  return pattern;
+}
+
+std::vector<pid_t> task_ids(pid_t leader) {
+  std::vector<pid_t> result;
+  const auto path = std::filesystem::path("/proc") / std::to_string(leader) / "task";
+  for (const auto& entry : std::filesystem::directory_iterator(path)) {
+    result.push_back(static_cast<pid_t>(std::stol(entry.path().filename().string())));
+  }
+  std::sort(result.begin(), result.end());
+  return result;
+}
+
+pid_t wait_for_worker(pid_t leader, const std::string& ready_path) {
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  while (std::chrono::steady_clock::now() < deadline) {
+    if (std::filesystem::exists(ready_path)) {
+      const auto tids = task_ids(leader);
+      for (const auto tid : tids) {
+        if (tid != leader) return tid;
+      }
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+  throw std::runtime_error("core fixture worker did not become ready");
+}
+
+std::vector<std::byte> read_file_bytes(const std::string& path) {
+  std::ifstream input(path, std::ios::binary);
+  if (!input) throw std::runtime_error("failed to open core file: " + path);
+  input.seekg(0, std::ios::end);
+  const auto length = input.tellg();
+  if (length < 0) throw std::runtime_error("failed to determine core file size");
+  input.seekg(0, std::ios::beg);
+  std::vector<std::byte> bytes(static_cast<std::size_t>(length));
+  if (!bytes.empty()) {
+    input.read(reinterpret_cast<char*>(bytes.data()), length);
+    if (!input) throw std::runtime_error("failed to read core file");
+  }
+  return bytes;
+}
+
+std::string write_variant(const std::vector<std::byte>& bytes) {
+  char pattern[] = "/tmp/mdbg-core-variant-XXXXXX";
+  const int fd = ::mkstemp(pattern);
+  if (fd == -1) throw std::runtime_error("mkstemp failed for core variant");
+  ::close(fd);
+  std::ofstream output(pattern, std::ios::binary | std::ios::trunc);
+  output.write(reinterpret_cast<const char*>(bytes.data()),
+               static_cast<std::streamsize>(bytes.size()));
+  if (!output) throw std::runtime_error("failed to write core variant");
+  return pattern;
+}
+
+void expect_core_failure(const std::vector<std::byte>& bytes, const std::string& context) {
+  const auto path = write_variant(bytes);
+  bool failed = false;
+  try {
+    const mdbg::CoreSnapshot snapshot(path);
+    (void)snapshot;
+  } catch (const std::exception&) {
+    failed = true;
+  }
+  std::remove(path.c_str());
+  require(failed, context + " was accepted");
+}
+
+void test_malformed_core_boundaries(const std::vector<std::byte>& original) {
+  require(original.size() >= sizeof(Elf64_Ehdr), "real core is smaller than ELF header");
+
+  std::vector<std::byte> truncated(original.begin(),
+                                   original.begin() + sizeof(Elf64_Ehdr) - 1);
+  expect_core_failure(truncated, "truncated ELF core header");
+
+  auto wrong_type = original;
+  Elf64_Ehdr header{};
+  std::memcpy(&header, wrong_type.data(), sizeof(header));
+  header.e_type = ET_EXEC;
+  std::memcpy(wrong_type.data(), &header, sizeof(header));
+  expect_core_failure(wrong_type, "non-ET_CORE file");
+
+  auto bad_phdr_table = original;
+  std::memcpy(&header, bad_phdr_table.data(), sizeof(header));
+  header.e_phoff = std::numeric_limits<Elf64_Off>::max() - 8;
+  std::memcpy(bad_phdr_table.data(), &header, sizeof(header));
+  expect_core_failure(bad_phdr_table, "out-of-range program-header table");
+
+  std::memcpy(&header, original.data(), sizeof(header));
+  bool mutated_note = false;
+  auto bad_note = original;
+  for (std::size_t index = 0; index < header.e_phnum; ++index) {
+    const auto offset = static_cast<std::size_t>(header.e_phoff) + index * sizeof(Elf64_Phdr);
+    if (offset > bad_note.size() || sizeof(Elf64_Phdr) > bad_note.size() - offset) break;
+    Elf64_Phdr phdr{};
+    std::memcpy(&phdr, bad_note.data() + offset, sizeof(phdr));
+    if (phdr.p_type != PT_NOTE) continue;
+    phdr.p_offset = static_cast<Elf64_Off>(bad_note.size() + 1);
+    std::memcpy(bad_note.data() + offset, &phdr, sizeof(phdr));
+    mutated_note = true;
+    break;
+  }
+  require(mutated_note, "real core did not contain PT_NOTE");
+  expect_core_failure(bad_note, "out-of-range PT_NOTE");
+}
+
+void test_core_snapshot(const std::string& fixture, bool exercise_malformed) {
+  const auto ready_path = temp_path();
+  const pid_t child = ::fork();
+  if (child == -1) throw std::runtime_error("fork failed");
+  if (child == 0) {
+    rlimit core_limit{};
+    if (::getrlimit(RLIMIT_CORE, &core_limit) != 0) _exit(120);
+    core_limit.rlim_cur = core_limit.rlim_max;
+    if (::setrlimit(RLIMIT_CORE, &core_limit) != 0) _exit(121);
+    ::execl(fixture.c_str(), fixture.c_str(), ready_path.c_str(),
+            "attach-register-mutation", nullptr);
+    _exit(127);
+  }
+
+  const auto core_path = "/tmp/mdbg-core-" + std::to_string(child);
+  std::remove(core_path.c_str());
+  pid_t worker = -1;
+  try {
+    worker = wait_for_worker(child, ready_path);
+    require(::syscall(SYS_tgkill, child, worker, SIGSEGV) == 0,
+            "failed to crash the deterministic worker thread");
+  } catch (...) {
+    ::kill(child, SIGKILL);
+    int status = 0;
+    while (::waitpid(child, &status, 0) == -1 && errno == EINTR) {
+    }
+    std::remove(ready_path.c_str());
+    std::remove(core_path.c_str());
+    throw;
+  }
+
+  int status = 0;
+  pid_t waited;
+  do {
+    waited = ::waitpid(child, &status, 0);
+  } while (waited == -1 && errno == EINTR);
+  require(waited == child && WIFSIGNALED(status) && WTERMSIG(status) == SIGSEGV,
+          "core fixture did not terminate from SIGSEGV");
+
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  while (!std::filesystem::exists(core_path) && std::chrono::steady_clock::now() < deadline) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  require(std::filesystem::exists(core_path),
+          "kernel did not produce the expected deterministic core file");
+
+  const mdbg::CoreSnapshot snapshot(core_path);
+  require(snapshot.crashed_tid() == worker,
+          "NT_PRSTATUS did not identify the crashing worker TID");
+  require(snapshot.signal_number() == SIGSEGV,
+          "core snapshot did not retain the fatal signal");
+  const auto& regs = snapshot.registers();
+  require(regs.rip != 0 && regs.rsp != 0 && regs.rbp != 0,
+          "core snapshot did not recover crash control registers");
+  require(regs.r12 == kCoreRegisterMarker,
+          "core snapshot did not recover deterministic worker r12");
+
+  const auto stack = snapshot.read_memory(static_cast<std::uintptr_t>(regs.rsp), 16);
+  require(stack.size() == 16, "core snapshot could not read captured stack bytes");
+
+  const auto mapping = snapshot.mapping_for_address(static_cast<std::uintptr_t>(regs.rip));
+  require(mapping.has_value(), "core snapshot could not map the crash RIP to a file");
+  std::error_code left_error;
+  std::error_code right_error;
+  const auto mapped = std::filesystem::weakly_canonical(mapping->path, left_error);
+  const auto expected = std::filesystem::weakly_canonical(fixture, right_error);
+  require(!left_error && !right_error && mapped == expected,
+          "core NT_FILE mapping did not identify the crashing executable");
+
+  bool unmapped_failed = false;
+  try {
+    (void)snapshot.read_memory(1, 8);
+  } catch (const std::exception&) {
+    unmapped_failed = true;
+  }
+  require(unmapped_failed, "unmapped core-memory read was accepted");
+
+  if (exercise_malformed) test_malformed_core_boundaries(read_file_bytes(core_path));
+
+  std::remove(ready_path.c_str());
+  std::remove(core_path.c_str());
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -32,6 +247,8 @@ int main(int argc, char** argv) {
     const mdbg::ElfFile stripped(argv[3]);
     require(!stripped.find_symbol("breakpoint_one"),
             "fully stripped fixture should not claim local function symbols");
+    test_core_snapshot(argv[1], true);
+    test_core_snapshot(argv[2], false);
     std::cout << "all ELF tests passed\n";
   } catch (const std::exception& error) {
     std::cerr << "ELF test failure: " << error.what() << '\n';

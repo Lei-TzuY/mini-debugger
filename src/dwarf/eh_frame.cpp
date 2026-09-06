@@ -25,6 +25,7 @@ constexpr std::uint8_t kPcrelSdata4 = 0x1b;
 constexpr std::uint8_t kPcrelSdata8 = 0x1c;
 constexpr std::uint8_t kPcrelIndirectSdata4 = 0x9b;
 constexpr std::uint8_t kPcrelIndirectSdata8 = 0x9c;
+constexpr std::uint64_t kDwarfRbx = 3;
 constexpr std::uint64_t kDwarfRbp = 6;
 constexpr std::uint64_t kDwarfRsp = 7;
 constexpr std::uint64_t kDwarfRip = 16;
@@ -438,6 +439,11 @@ std::uint64_t dwarf_register(const user_regs_struct& regs, std::uint64_t reg) {
 
 std::uint64_t cursor_register(const EhFrameCursor& cursor, std::uint64_t reg) {
   switch (reg) {
+    case kDwarfRbx:
+      if (!cursor.rbx) {
+        throw std::runtime_error("CFI backtrace requires an unavailable caller RBX");
+      }
+      return *cursor.rbx;
     case kDwarfRbp:
       if (!cursor.frame_pointer) {
         throw std::runtime_error("CFI backtrace requires an unavailable caller RBP");
@@ -546,22 +552,44 @@ std::optional<EvaluatedFrame> evaluate_frame(const std::vector<std::byte>& secti
   return std::nullopt;
 }
 
-std::optional<std::uintptr_t> recover_frame_pointer(const Debugger& debugger,
-                                                    const EhFrameCursor& current,
-                                                    const EvaluatedFrame& evaluated) {
-  const auto rule = evaluated.state.rules.find(kDwarfRbp);
+std::optional<std::uint64_t> recover_register(
+    const Debugger& debugger, const EhFrameCursor& current,
+    const EvaluatedFrame& evaluated, std::uint64_t reg,
+    std::optional<std::uint64_t> current_value, const char* what) {
+  const auto rule = evaluated.state.rules.find(reg);
   if (rule == evaluated.state.rules.end()) return std::nullopt;
   switch (rule->second.kind) {
     case RuleKind::Undefined:
       return std::nullopt;
     case RuleKind::SameValue:
-      return current.frame_pointer;
+      return current_value;
     case RuleKind::Offset: {
-      const auto slot = add_signed(evaluated.cfa, rule->second.offset, "CFI RBP slot");
-      return static_cast<std::uintptr_t>(read_cfi_slot(debugger, slot, "CFI RBP slot"));
+      const auto slot = add_signed(evaluated.cfa, rule->second.offset, what);
+      return read_cfi_slot(debugger, slot, what);
     }
   }
+  (void)current;
   throw std::runtime_error("unknown CFI register rule");
+}
+
+std::optional<std::uintptr_t> recover_frame_pointer(const Debugger& debugger,
+                                                    const EhFrameCursor& current,
+                                                    const EvaluatedFrame& evaluated) {
+  const auto value = recover_register(
+      debugger, current, evaluated, kDwarfRbp,
+      current.frame_pointer
+          ? std::optional<std::uint64_t>{static_cast<std::uint64_t>(*current.frame_pointer)}
+          : std::nullopt,
+      "CFI RBP slot");
+  if (!value) return std::nullopt;
+  return static_cast<std::uintptr_t>(*value);
+}
+
+std::optional<std::uint64_t> recover_rbx(const Debugger& debugger,
+                                         const EhFrameCursor& current,
+                                         const EvaluatedFrame& evaluated) {
+  return recover_register(debugger, current, evaluated, kDwarfRbx, current.rbx,
+                          "CFI RBX slot");
 }
 
 }  // namespace
@@ -611,7 +639,8 @@ std::optional<EhFrameCursor> EhFrame::caller_frame(
 
   return EhFrameCursor{static_cast<std::uintptr_t>(evaluated->return_address),
                        static_cast<std::uintptr_t>(evaluated->cfa),
-                       recover_frame_pointer(debugger, current, *evaluated)};
+                       recover_frame_pointer(debugger, current, *evaluated),
+                       recover_rbx(debugger, current, *evaluated)};
 }
 
 }  // namespace mdbg

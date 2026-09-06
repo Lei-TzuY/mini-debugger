@@ -1,4 +1,5 @@
 #include "elf/elf.hpp"
+#include "snapshot/inspection.hpp"
 
 #include <elf.h>
 #include <signal.h>
@@ -116,6 +117,45 @@ void expect_core_failure(const std::vector<std::byte>& bytes, const std::string&
   require(failed, context + " was accepted");
 }
 
+std::vector<std::byte> replace_all_ascii(std::vector<std::byte> bytes,
+                                         const std::string& from,
+                                         const std::string& to) {
+  require(!from.empty() && from.size() == to.size(),
+          "core path replacement must preserve non-empty width");
+  std::size_t replacements = 0;
+  for (std::size_t offset = 0; offset + from.size() <= bytes.size(); ++offset) {
+    bool match = true;
+    for (std::size_t index = 0; index < from.size(); ++index) {
+      if (std::to_integer<unsigned char>(bytes[offset + index]) !=
+          static_cast<unsigned char>(from[index])) {
+        match = false;
+        break;
+      }
+    }
+    if (!match) continue;
+    for (std::size_t index = 0; index < to.size(); ++index) {
+      bytes[offset + index] = static_cast<std::byte>(static_cast<unsigned char>(to[index]));
+    }
+    ++replacements;
+    offset += from.size() - 1;
+  }
+  require(replacements != 0, "real core did not contain the mapped fixture path");
+  return bytes;
+}
+
+std::string unavailable_peer_path(const std::string& path) {
+  auto candidate = path;
+  for (std::size_t offset = candidate.size(); offset > 0; --offset) {
+    const auto index = offset - 1;
+    if (candidate[index] == '/') continue;
+    const char original = candidate[index];
+    candidate[index] = original == 'x' ? 'y' : 'x';
+    if (!std::filesystem::exists(candidate)) return candidate;
+    candidate[index] = original;
+  }
+  throw std::runtime_error("could not derive unavailable same-width module path");
+}
+
 void test_malformed_core_boundaries(const std::vector<std::byte>& original) {
   require(original.size() >= sizeof(Elf64_Ehdr), "real core is smaller than ELF header");
 
@@ -152,6 +192,61 @@ void test_malformed_core_boundaries(const std::vector<std::byte>& original) {
   }
   require(mutated_note, "real core did not contain PT_NOTE");
   expect_core_failure(bad_note, "out-of-range PT_NOTE");
+}
+
+void test_snapshot_inspection(const mdbg::CoreSnapshot& snapshot,
+                              const std::string& fixture) {
+  const auto rip = static_cast<std::uintptr_t>(snapshot.registers().rip);
+  const auto module = mdbg::resolve_snapshot_module_address(snapshot, rip);
+
+  std::error_code left_error;
+  std::error_code right_error;
+  const auto mapped = std::filesystem::weakly_canonical(module.module_path, left_error);
+  const auto expected = std::filesystem::weakly_canonical(fixture, right_error);
+  require(!left_error && !right_error && mapped == expected,
+          "snapshot module inspection selected the wrong executable");
+
+  const mdbg::ElfFile elf(fixture);
+  const auto worker = elf.find_symbol("register_mutation_worker");
+  require(worker.has_value(), "fixture lacks register_mutation_worker symbol");
+  require(module.virtual_address >= worker->value &&
+              (worker->size == 0 || module.virtual_address < worker->value + worker->size),
+          "snapshot PIE/non-PIE module virtual address missed the crashing function");
+
+  const auto symbol = mdbg::find_snapshot_symbol_by_runtime_address(snapshot, rip);
+  require(symbol && symbol->name == "register_mutation_worker" &&
+              symbol->module_path == module.module_path,
+          "snapshot crash symbol was not module-qualified correctly");
+
+  const auto source = mdbg::find_snapshot_source_by_runtime_address(snapshot, rip);
+  require(source && source->module_path == module.module_path && source->line != 0 &&
+              source->file.find("debugger_fixture.c") != std::string::npos,
+          "snapshot crash source was not resolved from compiler DWARF");
+
+  bool outside_failed = false;
+  try {
+    (void)mdbg::resolve_snapshot_module_address(snapshot, 1);
+  } catch (const std::exception&) {
+    outside_failed = true;
+  }
+  require(outside_failed, "snapshot inspection accepted an address outside NT_FILE mappings");
+}
+
+void test_missing_snapshot_module(const std::vector<std::byte>& original,
+                                  const std::string& fixture,
+                                  std::uintptr_t rip) {
+  const auto missing = unavailable_peer_path(fixture);
+  const auto bytes = replace_all_ascii(original, fixture, missing);
+  const auto path = write_variant(bytes);
+  bool failed = false;
+  try {
+    const mdbg::CoreSnapshot snapshot(path);
+    (void)mdbg::find_snapshot_symbol_by_runtime_address(snapshot, rip);
+  } catch (const std::exception&) {
+    failed = true;
+  }
+  std::remove(path.c_str());
+  require(failed, "snapshot inspection guessed through an unavailable NT_FILE module path");
 }
 
 void test_core_snapshot(const std::string& fixture, bool exercise_malformed) {
@@ -223,6 +318,8 @@ void test_core_snapshot(const std::string& fixture, bool exercise_malformed) {
   require(!left_error && !right_error && mapped == expected,
           "core NT_FILE mapping did not identify the crashing executable");
 
+  test_snapshot_inspection(snapshot, fixture);
+
   bool unmapped_failed = false;
   try {
     (void)snapshot.read_memory(1, 8);
@@ -231,7 +328,11 @@ void test_core_snapshot(const std::string& fixture, bool exercise_malformed) {
   }
   require(unmapped_failed, "unmapped core-memory read was accepted");
 
-  if (exercise_malformed) test_malformed_core_boundaries(read_file_bytes(core_path));
+  if (exercise_malformed) {
+    const auto original = read_file_bytes(core_path);
+    test_malformed_core_boundaries(original);
+    test_missing_snapshot_module(original, fixture, static_cast<std::uintptr_t>(regs.rip));
+  }
 
   std::remove(ready_path.c_str());
   std::remove(core_path.c_str());

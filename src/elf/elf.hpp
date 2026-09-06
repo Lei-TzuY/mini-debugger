@@ -31,6 +31,9 @@ class ElfFile {
 
   [[nodiscard]] const std::string& path() const noexcept { return path_; }
   [[nodiscard]] bool is_pie() const noexcept;
+  [[nodiscard]] std::uint64_t load_virtual_base() const noexcept {
+    return zero_offset_load_vaddr_;
+  }
   [[nodiscard]] const std::vector<ElfSymbol>& symbols() const noexcept { return symbols_; }
   [[nodiscard]] std::optional<ElfSymbol> find_symbol(std::string_view name) const;
   [[nodiscard]] std::optional<ResolvedSymbol> find_symbol_by_virtual_address(
@@ -66,6 +69,9 @@ class CoreSnapshot {
   [[nodiscard]] pid_t crashed_tid() const noexcept { return crashed_tid_; }
   [[nodiscard]] int signal_number() const noexcept { return signal_number_; }
   [[nodiscard]] const user_regs_struct& registers() const noexcept { return registers_; }
+  [[nodiscard]] const std::vector<CoreFileMapping>& file_mappings() const noexcept {
+    return file_mappings_;
+  }
   [[nodiscard]] std::vector<std::byte> read_memory(std::uintptr_t address,
                                                    std::size_t length) const;
   [[nodiscard]] std::optional<CoreFileMapping> mapping_for_address(

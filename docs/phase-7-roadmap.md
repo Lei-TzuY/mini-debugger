@@ -35,20 +35,36 @@ Completed bounded capability:
 
 Priority 1 remains deliberately crash-frame-only. It does not claim stack unwinding, historical caller-register recovery, local-value evaluation, or an interactive core-file debugger facade.
 
-## Priority 2: snapshot-backed CFI unwind — current frontier
+## Priority 2: snapshot-backed CFI unwind — complete
 
-The next slice should adapt the existing `.eh_frame` recovery machinery to immutable snapshot evidence without teaching `CoreSnapshot` any live execution behavior.
+The third slice reuses the bounded `.eh_frame` state machine against immutable snapshot evidence without teaching `CoreSnapshot` any live execution behavior.
+
+Completed bounded capability:
+
+- `EhFrame` now exposes the smallest read-only evaluation boundary needed by both domains: an already-resolved module virtual PC, an unwind cursor carrying only known register state, and a memory-reader callback; live `Debugger` wrappers preserve their stopped-tracee/load-bias contract while snapshots supply only captured `PT_LOAD` bytes;
+- the snapshot unwind cursor is seeded directly from kernel-owned crash RIP/RSP/RBP/RBX evidence and recovers a real compiler caller through the same CIE/FDE parser, CFI rule evaluator, register recovery, and stack-slot decoding used by live unwind;
+- every snapshot frame resolves its runtime PC through `NT_FILE` ownership and `resolve_snapshot_module_address`, then opens the owning module's `EhFrame`; PIE and non-PIE module virtual-address conversion therefore uses snapshot mappings rather than `/proc` or a manufactured PID;
+- recovered caller state must advance the stack monotonically, change PC, and remain covered by recorded snapshot module evidence; unavailable module files, unmapped return addresses, missing CFI, unreadable captured stack slots, or unsupported rules converge to the existing bounded unwind stop reasons rather than falling back to host-process state;
+- the existing kernel-generated PIE and non-PIE core workflow now proves frame 0 preserves exact crash RIP/RSP/RBP and at least one caller is recovered with deterministic PC/SP ownership under both permanent GCC and Clang-large CI lanes while Priority 1 symbol/source resolution remains intact;
+- the real same-width missing-module core variant also exercises unwind fail-closed behavior: the crash frame remains immutable evidence, but caller recovery stops as invalid rather than guessing a module or reading live memory;
+- no CFI opcode or encoding support was broadened for this milestone, and no snapshot API can resume, signal, mutate, install breakpoints, or program watchpoints.
+
+Priority 2 deliberately stops at immutable frame recovery. It does not yet claim caller-local source-value inspection or transplant live stop-generation/TID freshness semantics onto a core snapshot.
+
+## Priority 3: snapshot caller inspection ownership — current frontier
+
+The next slice should decide how the completed Phase 6 caller-inspection model consumes immutable snapshot-backed caller contexts without pretending those frames belong to a live execution domain.
 
 Acceptance criteria:
 
-- introduce the smallest read-only register/memory provider boundary needed by CFI so live `Debugger` and immutable `CoreSnapshot` can supply equivalent evidence without sharing resume, signal, breakpoint, watchpoint, or mutation ownership;
-- seed the unwind cursor from the snapshot's crashed-thread registers and recover at least one real caller frame from compiler-produced `.eh_frame` using captured `PT_LOAD` stack bytes;
-- resolve each unwind cursor against snapshot `NT_FILE` module ownership and the owning module's `EhFrame`, including PIE/non-PIE load-bias conversion without `/proc`;
-- preserve current bounded CFI rule semantics and fail closed when a required caller register, stack word, mapped module file, CFI record, or captured memory range is unavailable; do not broaden opcode support without compiler-produced evidence;
-- kernel-generated PIE and non-PIE core integration must prove the crash frame plus at least one recovered caller has deterministic runtime PC/SP ownership and that the crash frame remains module/symbol/source resolvable through Priority 1;
-- no API introduced by this slice may resume or mutate a snapshot, and no snapshot adapter may manufacture a PID solely to reuse live paths.
+- introduce an immutable inspection-frame identity whose freshness is tied to one owned `CoreSnapshot` instance/crash state rather than a live debugger stop sequence or process-domain selection generation;
+- construct frame 0 and at least one CFI-recovered caller context from Priority 2 while preserving runtime PC, stack/frame cursor, module ownership, and only those historical registers that CFI actually recovered;
+- reuse one existing compiler-proven caller source-value path from Phase 6 against snapshot memory/register evidence; do not broaden DWARF expression support merely to manufacture a post-mortem example;
+- stack/local memory reads must come only from captured snapshot `PT_LOAD` bytes, and required bytes/registers absent from the core or unwind cursor must fail explicitly rather than substituting live process state;
+- kernel-generated PIE and non-PIE core integration must prove the caller value is owned by the snapshot frame and remains module/type/lexical-scope qualified under GCC and Clang-large;
+- no snapshot inspection context may become an execution selector or gain resume, signal, register/memory mutation, breakpoint, watchpoint, or fake PID/TID behavior.
 
-Priority 2 is not yet caller-local inspection. Once immutable CFI recovery is proven, a later slice may decide whether Phase 6 inspection-frame/source-value ownership can consume snapshot-backed caller contexts without violating freshness or process-domain invariants.
+Do not start generic frame UI, arbitrary historical-register reconstruction, or additional DWARF-expression families unless a compiler-produced snapshot caller value demonstrates a concrete missing requirement.
 
 ## Selection rule
 

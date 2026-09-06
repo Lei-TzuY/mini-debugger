@@ -1,7 +1,9 @@
 #pragma once
 
+#include "dwarf/eh_frame.hpp"
 #include "dwarf/line_table.hpp"
 #include "elf/elf.hpp"
+#include "unwind/cfi.hpp"
 
 #include <algorithm>
 #include <cstdint>
@@ -83,6 +85,69 @@ inline std::optional<SnapshotResolvedSource> find_snapshot_source_by_runtime_add
   if (!source) return std::nullopt;
   return SnapshotResolvedSource{module_address.module_path, source->file, source->line,
                                 source->column};
+}
+
+inline CfiBacktrace unwind_eh_frame(const CoreSnapshot& snapshot,
+                                    std::size_t max_frames = 64) {
+  if (max_frames == 0) {
+    throw std::invalid_argument("snapshot CFI unwind requires a non-zero frame limit");
+  }
+
+  const auto& regs = snapshot.registers();
+  EhFrameCursor current{static_cast<std::uintptr_t>(regs.rip),
+                        static_cast<std::uintptr_t>(regs.rsp),
+                        static_cast<std::uintptr_t>(regs.rbp), regs.rbx};
+  CfiBacktrace result{{CfiStackFrame{current.instruction_pointer, current.stack_pointer,
+                                    current.frame_pointer}},
+                      CfiUnwindStopReason::EndOfChain};
+  if (max_frames == 1) {
+    result.stop_reason = CfiUnwindStopReason::FrameLimit;
+    return result;
+  }
+
+  const CfiMemoryReader read_memory =
+      [&snapshot](std::uintptr_t address, std::size_t length) {
+        return snapshot.read_memory(address, length);
+      };
+
+  while (result.frames.size() < max_frames) {
+    std::optional<EhFrameCursor> caller;
+    try {
+      const auto module =
+          resolve_snapshot_module_address(snapshot, current.instruction_pointer);
+      const EhFrame cfi(module.module_path);
+      if (!cfi.available()) {
+        result.stop_reason = result.frames.size() == 1
+                                 ? CfiUnwindStopReason::NoFrameInfo
+                                 : CfiUnwindStopReason::EndOfChain;
+        return result;
+      }
+      caller = cfi.caller_frame(read_memory, module.virtual_address, current);
+      if (!caller) {
+        result.stop_reason = result.frames.size() == 1
+                                 ? CfiUnwindStopReason::NoFrameInfo
+                                 : CfiUnwindStopReason::EndOfChain;
+        return result;
+      }
+      if (caller->instruction_pointer == current.instruction_pointer ||
+          caller->stack_pointer <= current.stack_pointer) {
+        result.stop_reason = CfiUnwindStopReason::InvalidFrameState;
+        return result;
+      }
+      static_cast<void>(
+          resolve_snapshot_module_address(snapshot, caller->instruction_pointer));
+    } catch (const std::exception&) {
+      result.stop_reason = CfiUnwindStopReason::InvalidFrameState;
+      return result;
+    }
+
+    result.frames.push_back(CfiStackFrame{caller->instruction_pointer, caller->stack_pointer,
+                                          caller->frame_pointer});
+    current = *caller;
+  }
+
+  result.stop_reason = CfiUnwindStopReason::FrameLimit;
+  return result;
 }
 
 }  // namespace mdbg

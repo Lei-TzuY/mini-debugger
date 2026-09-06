@@ -2,7 +2,6 @@
 
 #include "debugger/debugger.hpp"
 #include "elf/elf.hpp"
-#include "ptrace/ptrace.hpp"
 
 #include <elf.h>
 
@@ -469,12 +468,12 @@ std::uint64_t read_u64(const std::vector<std::byte>& bytes) {
   return value;
 }
 
-std::uint64_t read_cfi_slot(const Debugger& debugger, std::uint64_t address,
+std::uint64_t read_cfi_slot(const CfiMemoryReader& read_memory, std::uint64_t address,
                             const char* what) {
   try {
     return read_u64(
-        debugger.read_memory(static_cast<std::uintptr_t>(address), sizeof(std::uint64_t)));
-  } catch (const lowlevel::PtraceError&) {
+        read_memory(static_cast<std::uintptr_t>(address), sizeof(std::uint64_t)));
+  } catch (const std::exception&) {
     throw std::runtime_error(std::string(what) + " is unreadable");
   }
 }
@@ -483,7 +482,7 @@ template <typename ReadRegister>
 std::optional<EvaluatedFrame> evaluate_frame(const std::vector<std::byte>& section,
                                              std::uint64_t section_virtual_address,
                                              std::uint64_t target,
-                                             const Debugger& debugger,
+                                             const CfiMemoryReader& read_memory,
                                              ReadRegister&& read_register) {
   std::map<std::size_t, Cie> cies;
   std::size_t entry = 0;
@@ -542,7 +541,7 @@ std::optional<EvaluatedFrame> evaluate_frame(const std::vector<std::byte>& secti
         throw std::runtime_error("CFI return-address rule is not a supported memory offset");
       }
       const auto slot = add_signed(cfa, rule->second.offset, "CFI return slot");
-      const auto return_address = read_cfi_slot(debugger, slot, "CFI return-address slot");
+      const auto return_address = read_cfi_slot(read_memory, slot, "CFI return-address slot");
       if (return_address == 0) throw std::runtime_error("CFI resolved a zero return address");
       return EvaluatedFrame{state, cfa, return_address};
     }
@@ -553,7 +552,7 @@ std::optional<EvaluatedFrame> evaluate_frame(const std::vector<std::byte>& secti
 }
 
 std::optional<std::uint64_t> recover_register(
-    const Debugger& debugger, const EhFrameCursor& current,
+    const CfiMemoryReader& read_memory, const EhFrameCursor& current,
     const EvaluatedFrame& evaluated, std::uint64_t reg,
     std::optional<std::uint64_t> current_value, const char* what) {
   const auto rule = evaluated.state.rules.find(reg);
@@ -565,18 +564,18 @@ std::optional<std::uint64_t> recover_register(
       return current_value;
     case RuleKind::Offset: {
       const auto slot = add_signed(evaluated.cfa, rule->second.offset, what);
-      return read_cfi_slot(debugger, slot, what);
+      return read_cfi_slot(read_memory, slot, what);
     }
   }
   (void)current;
   throw std::runtime_error("unknown CFI register rule");
 }
 
-std::optional<std::uintptr_t> recover_frame_pointer(const Debugger& debugger,
-                                                    const EhFrameCursor& current,
-                                                    const EvaluatedFrame& evaluated) {
+std::optional<std::uintptr_t> recover_frame_pointer(
+    const CfiMemoryReader& read_memory, const EhFrameCursor& current,
+    const EvaluatedFrame& evaluated) {
   const auto value = recover_register(
-      debugger, current, evaluated, kDwarfRbp,
+      read_memory, current, evaluated, kDwarfRbp,
       current.frame_pointer
           ? std::optional<std::uint64_t>{static_cast<std::uint64_t>(*current.frame_pointer)}
           : std::nullopt,
@@ -585,10 +584,10 @@ std::optional<std::uintptr_t> recover_frame_pointer(const Debugger& debugger,
   return static_cast<std::uintptr_t>(*value);
 }
 
-std::optional<std::uint64_t> recover_rbx(const Debugger& debugger,
+std::optional<std::uint64_t> recover_rbx(const CfiMemoryReader& read_memory,
                                          const EhFrameCursor& current,
                                          const EvaluatedFrame& evaluated) {
-  return recover_register(debugger, current, evaluated, kDwarfRbx, current.rbx,
+  return recover_register(read_memory, current, evaluated, kDwarfRbx, current.rbx,
                           "CFI RBX slot");
 }
 
@@ -613,8 +612,12 @@ std::optional<std::uintptr_t> EhFrame::caller_return_address(
   const auto bias = elf.load_bias(debugger.pid());
   if (regs.rip < bias) throw std::runtime_error("runtime RIP is below executable load bias");
   const auto target = static_cast<std::uint64_t>(regs.rip - bias);
+  const CfiMemoryReader read_memory = [&debugger](std::uintptr_t address,
+                                                  std::size_t length) {
+    return debugger.read_memory(address, length);
+  };
   const auto evaluated = evaluate_frame(
-      section_, section_virtual_address_, target, debugger,
+      section_, section_virtual_address_, target, read_memory,
       [&regs](std::uint64_t reg) { return dwarf_register(regs, reg); });
   if (!evaluated) return std::nullopt;
   return static_cast<std::uintptr_t>(evaluated->return_address);
@@ -632,15 +635,26 @@ std::optional<EhFrameCursor> EhFrame::caller_frame(
     throw std::runtime_error("runtime frame RIP is below executable load bias");
   }
   const auto target = static_cast<std::uint64_t>(current.instruction_pointer - bias);
+  const CfiMemoryReader read_memory = [&debugger](std::uintptr_t address,
+                                                  std::size_t length) {
+    return debugger.read_memory(address, length);
+  };
+  return caller_frame(read_memory, target, current);
+}
+
+std::optional<EhFrameCursor> EhFrame::caller_frame(
+    const CfiMemoryReader& read_memory, std::uint64_t module_virtual_pc,
+    const EhFrameCursor& current) const {
+  if (!available_) return std::nullopt;
   const auto evaluated = evaluate_frame(
-      section_, section_virtual_address_, target, debugger,
+      section_, section_virtual_address_, module_virtual_pc, read_memory,
       [&current](std::uint64_t reg) { return cursor_register(current, reg); });
   if (!evaluated) return std::nullopt;
 
   return EhFrameCursor{static_cast<std::uintptr_t>(evaluated->return_address),
                        static_cast<std::uintptr_t>(evaluated->cfa),
-                       recover_frame_pointer(debugger, current, *evaluated),
-                       recover_rbx(debugger, current, *evaluated)};
+                       recover_frame_pointer(read_memory, current, *evaluated),
+                       recover_rbx(read_memory, current, *evaluated)};
 }
 
 }  // namespace mdbg

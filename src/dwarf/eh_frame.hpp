@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <string>
 #include <vector>
@@ -18,6 +19,9 @@ struct EhFrameCursor {
   std::optional<std::uint64_t> rbx{};
 };
 
+using CfiMemoryReader =
+    std::function<std::vector<std::byte>(std::uintptr_t, std::size_t)>;
+
 class EhFrame {
  public:
   explicit EhFrame(std::string path);
@@ -27,6 +31,9 @@ class EhFrame {
       const Debugger& debugger, const ElfFile& elf) const;
   [[nodiscard]] std::optional<EhFrameCursor> caller_frame(
       const Debugger& debugger, const ElfFile& elf, const EhFrameCursor& current) const;
+  [[nodiscard]] std::optional<EhFrameCursor> caller_frame(
+      const CfiMemoryReader& read_memory, std::uint64_t module_virtual_pc,
+      const EhFrameCursor& current) const;
 
  private:
   std::string path_;

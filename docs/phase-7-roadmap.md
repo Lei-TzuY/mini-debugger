@@ -20,20 +20,35 @@ Completed bounded capability:
 
 Priority 0 deliberately does not claim multi-thread note selection, shared-library reconstruction beyond the recorded `NT_FILE` mapping table, CFI/source-value reuse, or interactive core-file commands.
 
-## Priority 1: snapshot module, symbol, and source inspection — current frontier
+## Priority 1: snapshot module, symbol, and source inspection — complete
 
-The next slice should translate the immutable snapshot's recorded mappings into the existing executable/DWARF inspection layers without routing through live `/proc/<pid>/maps` or a fake `Debugger`.
+The second slice connects immutable snapshot mapping evidence to the existing executable and DWARF inspection layers without routing through live `/proc/<pid>/maps` or a fake `Debugger`.
+
+Completed bounded capability:
+
+- `CoreSnapshot` exposes its already-owned `NT_FILE` mapping table as an immutable view, while `ElfFile` exposes the same zero-file-offset load virtual base already used by live load-bias recovery; neither type gains execution semantics;
+- `resolve_snapshot_module_address` finds the owning `NT_FILE` mapping for a snapshot runtime address and, for ET_DYN/PIE images, derives load bias from the same module's offset-zero snapshot mapping plus the ELF load virtual base; ET_EXEC addresses remain their ELF virtual addresses;
+- snapshot symbol inspection reuses `ElfFile::find_symbol_by_virtual_address` and returns module-qualified ownership rather than creating a second symbol parser or calling `ElfFile::load_bias(pid)`;
+- snapshot source inspection reuses `DwarfLineTable::find_virtual_address`, preserving module path, file, line, and column without consulting a live process;
+- the existing kernel-generated PIE and non-PIE cores must resolve their real crash RIP into the actual fixture module, the compiler-emitted `register_mutation_worker` symbol range, and a real `debugger_fixture.c` line-table row under both permanent GCC and Clang-large CI lanes;
+- addresses outside `NT_FILE` mappings fail explicitly, and a real core variant whose recorded fixture module path is replaced by an unavailable same-width path must fail module inspection rather than guessing from the host filesystem or debugger process.
+
+Priority 1 remains deliberately crash-frame-only. It does not claim stack unwinding, historical caller-register recovery, local-value evaluation, or an interactive core-file debugger facade.
+
+## Priority 2: snapshot-backed CFI unwind — current frontier
+
+The next slice should adapt the existing `.eh_frame` recovery machinery to immutable snapshot evidence without teaching `CoreSnapshot` any live execution behavior.
 
 Acceptance criteria:
 
-- derive the owning `NT_FILE` mapping and module-relative virtual address for the crashed RIP, including correct PIE/non-PIE load-bias handling from snapshot mapping/file offsets rather than a host PID;
-- reuse `ElfFile` symbol tables to resolve the real crash PC to a module-qualified symbol, but do not add a second symbol parser or call the live `ElfFile::load_bias(pid)` path;
-- resolve a real compiler-produced source location for the crash PC from the owning executable/DWARF data while preserving module identity and explicit source-path failure semantics;
-- introduce the smallest read-only module-inspection boundary needed by both live and snapshot consumers, or a snapshot-specific adapter when sharing would conflate ownership; do not make `CoreSnapshot` impersonate `Process`/`Debugger`;
-- PIE and non-PIE integration must prove the same kernel-generated core can identify `module!symbol` and source for the crash site using only snapshot mappings plus on-disk module debug information;
-- missing/unavailable mapped module files, mismatched mapping arithmetic, and addresses outside recorded mappings must fail deterministically instead of guessing from the host filesystem/process.
+- introduce the smallest read-only register/memory provider boundary needed by CFI so live `Debugger` and immutable `CoreSnapshot` can supply equivalent evidence without sharing resume, signal, breakpoint, watchpoint, or mutation ownership;
+- seed the unwind cursor from the snapshot's crashed-thread registers and recover at least one real caller frame from compiler-produced `.eh_frame` using captured `PT_LOAD` stack bytes;
+- resolve each unwind cursor against snapshot `NT_FILE` module ownership and the owning module's `EhFrame`, including PIE/non-PIE load-bias conversion without `/proc`;
+- preserve current bounded CFI rule semantics and fail closed when a required caller register, stack word, mapped module file, CFI record, or captured memory range is unavailable; do not broaden opcode support without compiler-produced evidence;
+- kernel-generated PIE and non-PIE core integration must prove the crash frame plus at least one recovered caller has deterministic runtime PC/SP ownership and that the crash frame remains module/symbol/source resolvable through Priority 1;
+- no API introduced by this slice may resume or mutate a snapshot, and no snapshot adapter may manufacture a PID solely to reuse live paths.
 
-Priority 1 is intentionally not backtrace recovery. Once crash-frame module/symbol/source ownership is proven, the following slice should adapt CFI to a read-only register/memory provider so unwind can consume `CoreSnapshot` evidence without inheriting live execution semantics.
+Priority 2 is not yet caller-local inspection. Once immutable CFI recovery is proven, a later slice may decide whether Phase 6 inspection-frame/source-value ownership can consume snapshot-backed caller contexts without violating freshness or process-domain invariants.
 
 ## Selection rule
 

@@ -194,6 +194,9 @@ InspectionRegisterState live_register_state(const user_regs_struct& regs) {
 InspectionRegisterState caller_register_state(const EhFrameCursor& caller) {
   InspectionRegisterState result{};
   result.rsp = static_cast<std::uint64_t>(caller.stack_pointer);
+  if (caller.rbx) {
+    result.rbx = *caller.rbx;
+  }
   if (caller.frame_pointer) {
     result.rbp = static_cast<std::uint64_t>(*caller.frame_pointer);
   }
@@ -335,7 +338,7 @@ std::vector<InspectionFrameContext> build_inspection_frames(
   if (max_frames == 1) return result;
 
   EhFrameCursor current{current_context.runtime_pc, current_context.stack_pointer,
-                        current_context.frame_pointer};
+                        current_context.frame_pointer, current_context.registers.rbx};
   std::vector<ModuleCfi> modules;
   while (result.size() < max_frames) {
     std::optional<EhFrameCursor> caller;
@@ -374,7 +377,7 @@ CfiBacktrace unwind_eh_frame(const Debugger& debugger, const ElfFile& elf,
   const auto regs = debugger.registers();
   EhFrameCursor current{static_cast<std::uintptr_t>(regs.rip),
                         static_cast<std::uintptr_t>(regs.rsp),
-                        static_cast<std::uintptr_t>(regs.rbp)};
+                        static_cast<std::uintptr_t>(regs.rbp), regs.rbx};
   CfiBacktrace result{{CfiStackFrame{current.instruction_pointer, current.stack_pointer,
                                     current.frame_pointer}},
                       CfiUnwindStopReason::EndOfChain};

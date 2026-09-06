@@ -30,4 +30,7 @@ jobs:
       - name: Build
         run: cmake --build build --parallel 2
       - name: Test
-        run: ctest --test-dir build --output-on-failure --timeout 30
+        run: |
+          sudo sysctl -w kernel.core_pattern=/tmp/mdbg-core-%p
+          ulimit -c unlimited
+          ctest --test-dir build --output-on-failure --timeout 30

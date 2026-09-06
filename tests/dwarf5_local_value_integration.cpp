@@ -1,6 +1,8 @@
 #include "debugger/debugger.hpp"
+#include "dwarf/eh_frame.hpp"
 #include "dwarf/local_value.hpp"
 #include "elf/elf.hpp"
+#include "unwind/cfi.hpp"
 
 #include <poll.h>
 #include <sys/wait.h>
@@ -22,6 +24,7 @@ namespace {
 
 constexpr std::uint64_t kExpectedEntryParameter = UINT64_C(0x1020304050607080);
 constexpr std::uint64_t kExpectedEntryRdiSentinel = UINT64_C(0x777788889999aaaa);
+constexpr std::uint64_t kExpectedCallerRbxSentinel = UINT64_C(0x0badf00dfeedface);
 constexpr std::uint64_t kExpectedTransformedLocal = UINT64_C(0x458a30bf63ac1619);
 constexpr std::uint64_t kExpectedOptimizedLocal = UINT64_C(0x1e3c1e781e3c1ef0);
 constexpr std::uint64_t kExpectedArithmeticLocal = UINT64_C(0x10203040506070a5);
@@ -77,6 +80,47 @@ void test_missing_entry_snapshot(const std::string& fixture) {
   const auto exit = debugger.continue_execution();
   require(exit.reason == mdbg::StopReason::Exited && exit.value == 0,
           "missing-snapshot fixture did not exit cleanly");
+}
+
+void test_caller_register_recovery(const std::string& fixture) {
+  auto debugger = mdbg::Debugger::launch(fixture, {});
+  const mdbg::ElfFile elf(fixture);
+  const mdbg::EhFrame cfi(fixture);
+  require(cfi.available(), "caller-register fixture is missing .eh_frame");
+
+  const auto probe = elf.find_symbol("caller_register_probe");
+  require(probe.has_value(), "caller_register_probe symbol is missing");
+  const auto probe_address =
+      static_cast<std::uintptr_t>(elf.runtime_address(debugger.pid(), *probe));
+  debugger.add_breakpoint(probe_address);
+
+  const auto stop = debugger.continue_execution();
+  require(stop.reason == mdbg::StopReason::Breakpoint &&
+              stop.breakpoint_address == probe_address,
+          "caller-register probe breakpoint was not hit");
+  require(debugger.registers().rbx == kExpectedCallerRbxSentinel,
+          "callee probe did not clobber live RBX away from the caller value");
+
+  const auto frames = mdbg::build_inspection_frames(debugger, elf, cfi, 3);
+  require(frames.size() >= 2, "CFI did not recover the caller inspection frame");
+  const auto caller_symbol =
+      elf.find_symbol_by_runtime_address(debugger.pid(), frames[1].runtime_pc);
+  require(caller_symbol && caller_symbol->symbol.name == "inspect_entry_parameter",
+          "caller inspection frame is not inspect_entry_parameter");
+
+  const auto value =
+      mdbg::inspect_local_integer(debugger, elf, frames[1], "transformed");
+  require(value.raw_value == kExpectedTransformedLocal,
+          "caller-register recovery returned the wrong transformed value");
+  require(frames[1].registers.rbx.has_value() &&
+              *frames[1].registers.rbx == kExpectedEntryParameter,
+          "caller inspection frame did not recover the compiler-owned RBX value");
+  require(debugger.registers().rbx == kExpectedCallerRbxSentinel,
+          "caller inspection replaced the live callee RBX instead of recovering history");
+
+  const auto exit = debugger.continue_execution();
+  require(exit.reason == mdbg::StopReason::Exited && exit.value == 0,
+          "caller-register fixture did not exit cleanly");
 }
 
 void test_direct_api(const std::string& fixture) {
@@ -404,6 +448,7 @@ int main(int argc, char** argv) {
   }
   try {
     test_missing_entry_snapshot(argv[1]);
+    test_caller_register_recovery(argv[1]);
     test_direct_api(argv[1]);
     test_cli(argv[2], argv[1]);
     std::cout << "DWARF5 optimized local integration passed\n";

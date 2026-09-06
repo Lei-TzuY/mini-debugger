@@ -1051,7 +1051,7 @@ std::uint64_t frame_base(const Debugger& debugger, const ElfFile& module,
   if (!cfi.available()) throw std::runtime_error("DW_OP_call_frame_cfa requires .eh_frame");
   const EhFrameCursor current{static_cast<std::uintptr_t>(regs.rip),
                               static_cast<std::uintptr_t>(regs.rsp),
-                              static_cast<std::uintptr_t>(regs.rbp)};
+                              static_cast<std::uintptr_t>(regs.rbp), regs.rbx};
   const auto caller = cfi.caller_frame(debugger, module, current);
   if (!caller) throw std::runtime_error("CFI did not cover the current source frame");
   return caller->stack_pointer;
@@ -1227,7 +1227,7 @@ std::uint64_t evaluate_composite_stack_value(const std::vector<std::byte>& expre
 }
 
 std::uint64_t evaluate_breg3_xor_stack_value(
-    const std::vector<std::byte>& expression, const Debugger& debugger) {
+    const std::vector<std::byte>& expression, std::uint64_t rbx) {
   if (expression.empty() ||
       std::to_integer<std::uint8_t>(expression.front()) != kDwOpBreg3) {
     throw std::runtime_error(
@@ -1260,8 +1260,7 @@ std::uint64_t evaluate_breg3_xor_stack_value(
     throw std::runtime_error(
         "unsupported trailing operations after DW_OP_breg3 XOR value");
   }
-  const auto base = add_signed(debugger.registers().rbx, offset,
-                               "DW_OP_breg3 XOR base");
+  const auto base = add_signed(rbx, offset, "DW_OP_breg3 XOR base");
   return base ^ constant;
 }
 
@@ -1523,7 +1522,7 @@ std::optional<LocalScalarValue> inspect_unit(const DebugSections& sections,
   if (value_type.kind != LocalValueKind::Structure && !location_expression.empty() &&
       std::to_integer<std::uint8_t>(location_expression.front()) == kDwOpBreg3) {
     const auto raw = truncate_integer(
-        evaluate_breg3_xor_stack_value(location_expression, debugger),
+        evaluate_breg3_xor_stack_value(location_expression, debugger.registers().rbx),
         value_type.byte_size);
     return LocalScalarValue{module.path(), std::string(name), raw,
                             value_type.byte_size, value_type.is_signed,
@@ -1604,7 +1603,8 @@ std::uint64_t caller_frame_base(const Debugger& debugger, const ElfFile& module,
   if (!cfi.available()) {
     throw std::runtime_error("caller-frame DW_OP_call_frame_cfa requires .eh_frame");
   }
-  const EhFrameCursor current{frame.runtime_pc, frame.stack_pointer, frame.frame_pointer};
+  const EhFrameCursor current{frame.runtime_pc, frame.stack_pointer, frame.frame_pointer,
+                              frame.registers.rbx};
   const auto caller = cfi.caller_frame(debugger, module, current);
   if (!caller) {
     throw std::runtime_error("CFI did not recover caller-frame CFA");
@@ -1693,11 +1693,25 @@ std::optional<LocalScalarValue> inspect_caller_stack_unit(
     throw std::runtime_error("local value has no supported DW_AT_location form");
   }
 
+  if (value_type.kind != LocalValueKind::Structure && !location_expression.empty() &&
+      std::to_integer<std::uint8_t>(location_expression.front()) == kDwOpBreg3) {
+    if (!frame.registers.rbx) {
+      throw std::runtime_error(
+          "caller-frame DW_OP_breg3 requires CFI-recovered historical RBX");
+    }
+    const auto raw = truncate_integer(
+        evaluate_breg3_xor_stack_value(location_expression, *frame.registers.rbx),
+        value_type.byte_size);
+    return LocalScalarValue{module.path(), std::string(name), raw,
+                            value_type.byte_size, value_type.is_signed,
+                            value_type.kind};
+  }
+
   if (location_expression.empty() ||
       std::to_integer<std::uint8_t>(location_expression.front()) != kDwOpFbreg) {
     throw std::runtime_error(
-        "caller-frame local requires compiler-proven DW_OP_fbreg stack storage; "
-        "unrecovered historical registers are unavailable");
+        "caller-frame local requires compiler-proven DW_OP_fbreg stack storage or "
+        "CFI-recovered DW_OP_breg3 historical RBX");
   }
   const auto* base_expression = attribute(subprogram_die, kDwAtFrameBase);
   if (base_expression == nullptr || base_expression->form != kDwFormExprloc) {

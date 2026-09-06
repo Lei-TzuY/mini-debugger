@@ -22,21 +22,29 @@ Completed bounded capability:
 
 This milestone deliberately does not claim an arbitrary historical register file, generic frame UI, or post-mortem debugging.
 
-## Priority 1: compiler-proven caller register recovery — current frontier
+## Priority 1: compiler-proven caller register recovery — complete
 
-The next Phase 6 slice should extend caller inspection only when real compiler output demonstrates a caller local or parameter whose selected location needs historical register state that Priority 0 does not recover.
+The second Phase 6 slice extends caller inspection from stack-owned values to one real compiler-produced historical-register case without inventing a generic saved-register database.
 
-Acceptance criteria:
+Completed bounded capability:
 
-- first capture a deterministic GCC or Clang caller-frame source-value failure whose active location is register-resident or otherwise requires a specific historical GPR; do not choose a register or DWARF expression speculatively;
-- recover only the required caller register from the owning frame's actual `.eh_frame`/CFI rule and propagate it through `InspectionRegisterState`; never copy the currently active callee register as a substitute;
-- keep current-frame inspection and the proven `DW_OP_fbreg` caller path unchanged;
-- preserve stop-sequence, process-domain, TID, module, type, and lexical-scope ownership checks for the extended caller value;
-- unsupported CFI register rules or DWARF register expressions remain deterministic failures rather than guessed values;
-- prove the selected compiler-produced workflow in PIE and non-PIE and preserve both permanent compiler CI lanes, extending cross-compiler evidence only when the emitted location/rule is actually present.
+- the optimized formal-parameter fixture creates a deterministic caller value whose active caller-frame DWARF location is the already compiler-proven `DW_OP_breg3` + `DW_OP_constu` + `DW_OP_xor` + `DW_OP_stack_value` shape while the callee deliberately clobbers live RBX to a sentinel;
+- the owning callee's real `.eh_frame` rule recovers the caller RBX value from its CFI-defined saved state and carries it in `EhFrameCursor`; the live callee register file is never substituted for historical state;
+- recovered RBX is propagated through `InspectionRegisterState`, while initial unwind cursors retain the actually known live RBX so `same_value` semantics have an explicit source;
+- caller-frame source-value evaluation reuses the same strict compiler-proven `DW_OP_breg3` expression parser, but it is driven only by `frame.registers.rbx`; missing historical RBX remains an explicit failure;
+- the previous frame-0 evaluator and caller `DW_OP_fbreg` path remain intact, and unsupported caller register expressions still fail rather than being guessed;
+- PIE and non-PIE integration proves the recovered `transformed` value under both permanent GCC and Clang-large CI lanes while also proving the live callee RBX remains the sentinel throughout inspection.
 
-Do not broaden this milestone into a generic saved-register database or enumerate DW_CFA/DW_OP register forms without a failing compiler-produced caller-value scenario.
+Priority 1 deliberately does not generalize to arbitrary GPR recovery, arbitrary `DW_CFA_*` rules, or arbitrary `DW_OP_breg*` caller expressions. Any future historical-register extension must start from a new compiler-produced source-value failure.
+
+## Phase 6 status — complete for the compiler-proven caller-inspection milestone
+
+Phase 6 now has an explicit ownership model for live-frame values, caller stack values, and one compiler-proven caller register-resident value. Continuing by enumerating more GPRs or DWARF opcodes without a concrete compiler failure would be variant farming rather than an architectural advance.
+
+The next architectural frontier moves from live ptrace-owned inspection to an **immutable post-mortem inspection domain**. A core file has no resumable TID and no ptrace register file, so reusing live execution ownership would be incorrect. Phase 7 therefore begins with bounded ELF64 core-dump ownership: explicit snapshot registers, mapped-memory segments, and module identity that can feed existing symbol/source/unwind inspection without pretending the snapshot can execute.
+
+See `docs/phase-7-roadmap.md`.
 
 ## Selection rule
 
-Choose a real compiler-produced caller-frame value whose recovery advances inspection semantics and whose required state can be owned explicitly. Do not implement generic frame UI, register guessing, or unrelated DWARF expression opcodes.
+Reopen Phase 6 only for a new real compiler-produced caller-frame source value that demonstrably requires historical state not represented by the completed ownership model. Do not implement generic frame UI, register guessing, or unrelated DWARF expression opcodes.

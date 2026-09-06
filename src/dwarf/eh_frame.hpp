@@ -15,6 +15,7 @@ struct EhFrameCursor {
   std::uintptr_t instruction_pointer;
   std::uintptr_t stack_pointer;
   std::optional<std::uintptr_t> frame_pointer;
+  std::optional<std::uint64_t> rbx{};
 };
 
 class EhFrame {

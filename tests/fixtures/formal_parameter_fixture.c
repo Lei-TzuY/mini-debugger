@@ -3,6 +3,7 @@
 #define PARAMETER_EXPECTED UINT64_C(0x1020304050607080)
 #define ENTRY_PARAMETER_XOR UINT64_C(0x55aa00ff33cc6699)
 #define ENTRY_RDI_SENTINEL UINT64_C(0x777788889999aaaa)
+#define ENTRY_RBX_SENTINEL UINT64_C(0x0badf00dfeedface)
 #define ENTRY_RESULT_EXPECTED UINT64_C(0x54a805fe32c96390)
 #define OPTIMIZED_LOCAL_EXPECTED UINT64_C(0x1e3c1e781e3c1ef0)
 #define ARITHMETIC_LOCAL_EXPECTED UINT64_C(0x10203040506070a5)
@@ -31,7 +32,12 @@ __attribute__((noinline)) uint64_t clobber_argument_registers(
   const uint64_t result = parameter_seed ^ first ^ (second << 8U) ^
                           (third << 16U) ^ (fourth << 24U) ^
                           (fifth << 32U) ^ (sixth << 40U);
-  __asm__ volatile("movabsq $0x777788889999aaaa, %%rdi\n" ::: "rdi", "memory");
+  __asm__ volatile("movabsq $0x777788889999aaaa, %%rdi\n"
+                   "movabsq $0x0badf00dfeedface, %%rbx\n"
+                   ".globl caller_register_probe\n"
+                   "caller_register_probe:\n"
+                   "nop\n"
+                   ::: "rdi", "rbx", "memory");
   return result;
 }
 

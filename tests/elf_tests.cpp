@@ -1,5 +1,6 @@
 #include "elf/elf.hpp"
 #include "snapshot/inspection.hpp"
+#include "unwind/cfi.hpp"
 
 #include <elf.h>
 #include <signal.h>
@@ -232,21 +233,49 @@ void test_snapshot_inspection(const mdbg::CoreSnapshot& snapshot,
   require(outside_failed, "snapshot inspection accepted an address outside NT_FILE mappings");
 }
 
+void test_snapshot_cfi_unwind(const mdbg::CoreSnapshot& snapshot) {
+  const auto& regs = snapshot.registers();
+  const auto trace = mdbg::unwind_eh_frame(snapshot, 2);
+  require(trace.frames.size() == 2,
+          "snapshot CFI did not recover one compiler caller frame");
+  require(trace.stop_reason == mdbg::CfiUnwindStopReason::FrameLimit,
+          "bounded two-frame snapshot unwind did not stop at its frame limit");
+  require(trace.frames[0].instruction_pointer == static_cast<std::uintptr_t>(regs.rip) &&
+              trace.frames[0].stack_pointer == static_cast<std::uintptr_t>(regs.rsp),
+          "snapshot CFI top frame did not preserve crash RIP/RSP evidence");
+  require(trace.frames[0].frame_pointer == static_cast<std::uintptr_t>(regs.rbp),
+          "snapshot CFI top frame did not preserve crash RBP evidence");
+  require(trace.frames[1].instruction_pointer != 0 &&
+              trace.frames[1].instruction_pointer != trace.frames[0].instruction_pointer,
+          "snapshot CFI caller PC is invalid or unchanged");
+  require(trace.frames[1].stack_pointer > trace.frames[0].stack_pointer,
+          "snapshot CFI caller stack pointer did not move toward the caller");
+  const auto caller_mapping =
+      snapshot.mapping_for_address(trace.frames[1].instruction_pointer);
+  require(caller_mapping.has_value() && !caller_mapping->path.empty(),
+          "snapshot CFI caller is not owned by recorded NT_FILE evidence");
+}
+
 void test_missing_snapshot_module(const std::vector<std::byte>& original,
                                   const std::string& fixture,
                                   std::uintptr_t rip) {
   const auto missing = unavailable_peer_path(fixture);
   const auto bytes = replace_all_ascii(original, fixture, missing);
   const auto path = write_variant(bytes);
+  const mdbg::CoreSnapshot snapshot(path);
   bool failed = false;
   try {
-    const mdbg::CoreSnapshot snapshot(path);
     (void)mdbg::find_snapshot_symbol_by_runtime_address(snapshot, rip);
   } catch (const std::exception&) {
     failed = true;
   }
-  std::remove(path.c_str());
   require(failed, "snapshot inspection guessed through an unavailable NT_FILE module path");
+
+  const auto trace = mdbg::unwind_eh_frame(snapshot, 2);
+  require(trace.frames.size() == 1 &&
+              trace.stop_reason == mdbg::CfiUnwindStopReason::InvalidFrameState,
+          "snapshot CFI did not fail closed on unavailable owning module evidence");
+  std::remove(path.c_str());
 }
 
 void test_core_snapshot(const std::string& fixture, bool exercise_malformed) {
@@ -319,6 +348,7 @@ void test_core_snapshot(const std::string& fixture, bool exercise_malformed) {
           "core NT_FILE mapping did not identify the crashing executable");
 
   test_snapshot_inspection(snapshot, fixture);
+  test_snapshot_cfi_unwind(snapshot);
 
   bool unmapped_failed = false;
   try {

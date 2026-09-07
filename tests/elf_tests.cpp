@@ -28,6 +28,7 @@
 namespace {
 
 constexpr std::uint64_t kCoreRegisterMarker = 0x13579bdf2468ace0ULL;
+constexpr std::uint64_t kExpectedCallerRbx = 0x1020304050607080ULL;
 
 void require(bool condition, const std::string& message) {
   if (!condition) throw std::runtime_error(message);
@@ -256,6 +257,66 @@ void test_snapshot_cfi_unwind(const mdbg::CoreSnapshot& snapshot) {
           "snapshot CFI caller is not owned by recorded NT_FILE evidence");
 }
 
+void test_snapshot_caller_inspection(const std::string& fixture) {
+  const pid_t child = ::fork();
+  if (child == -1) throw std::runtime_error("fork failed for caller snapshot fixture");
+  if (child == 0) {
+    rlimit core_limit{};
+    if (::getrlimit(RLIMIT_CORE, &core_limit) != 0) _exit(120);
+    core_limit.rlim_cur = core_limit.rlim_max;
+    if (::setrlimit(RLIMIT_CORE, &core_limit) != 0) _exit(121);
+    ::execl(fixture.c_str(), fixture.c_str(), "--snapshot-crash", nullptr);
+    _exit(127);
+  }
+
+  const auto core_path = "/tmp/mdbg-core-" + std::to_string(child);
+  std::remove(core_path.c_str());
+  int status = 0;
+  pid_t waited;
+  do {
+    waited = ::waitpid(child, &status, 0);
+  } while (waited == -1 && errno == EINTR);
+  require(waited == child && WIFSIGNALED(status) && WTERMSIG(status) == SIGSEGV,
+          "caller snapshot fixture did not terminate from deterministic SIGSEGV");
+
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  while (!std::filesystem::exists(core_path) && std::chrono::steady_clock::now() < deadline) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  require(std::filesystem::exists(core_path),
+          "kernel did not produce the caller-inspection core file");
+
+  const mdbg::CoreSnapshot snapshot(core_path);
+  const auto trace = mdbg::build_snapshot_inspection_frames(snapshot, 2);
+  require(trace.frames.size() == 2 &&
+              trace.stop_reason == mdbg::CfiUnwindStopReason::FrameLimit,
+          "snapshot inspection did not recover exactly one bounded caller frame");
+  mdbg::validate_snapshot_inspection_frame(snapshot, trace.frames[0]);
+  mdbg::validate_snapshot_inspection_frame(snapshot, trace.frames[1]);
+  require(trace.frames[0].index == 0 && trace.frames[1].index == 1,
+          "snapshot inspection frame indices are not stable");
+  require(trace.frames[1].registers.rbx &&
+              *trace.frames[1].registers.rbx == kExpectedCallerRbx,
+          "snapshot caller frame did not preserve CFI-recovered historical RBX");
+  const auto caller = mdbg::find_snapshot_symbol_by_runtime_address(
+      snapshot, trace.frames[1].runtime_pc);
+  require(caller && caller->name == "inspect_entry_parameter" &&
+              caller->module_path == trace.frames[1].module_path,
+          "snapshot caller frame lost module-qualified caller identity");
+
+  const mdbg::CoreSnapshot reopened(core_path);
+  bool wrong_owner_failed = false;
+  try {
+    mdbg::validate_snapshot_inspection_frame(reopened, trace.frames[1]);
+  } catch (const std::logic_error&) {
+    wrong_owner_failed = true;
+  }
+  require(wrong_owner_failed,
+          "snapshot inspection frame was accepted by a different CoreSnapshot owner");
+
+  std::remove(core_path.c_str());
+}
+
 void test_missing_snapshot_module(const std::vector<std::byte>& original,
                                   const std::string& fixture,
                                   std::uintptr_t rip) {
@@ -380,6 +441,15 @@ int main(int argc, char** argv) {
             "fully stripped fixture should not claim local function symbols");
     test_core_snapshot(argv[1], true);
     test_core_snapshot(argv[2], false);
+
+    const auto build_dir = std::filesystem::path(argv[1]).parent_path();
+    const auto formal_pie = (build_dir / "formal_parameter_fixture_pie").string();
+    const auto formal_nopie = (build_dir / "formal_parameter_fixture_nopie").string();
+    require(std::filesystem::exists(formal_pie) && std::filesystem::exists(formal_nopie),
+            "compiler-proven formal-parameter fixtures are unavailable for snapshot testing");
+    test_snapshot_caller_inspection(formal_pie);
+    test_snapshot_caller_inspection(formal_nopie);
+
     std::cout << "all ELF tests passed\n";
   } catch (const std::exception& error) {
     std::cerr << "ELF test failure: " << error.what() << '\n';

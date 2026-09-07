@@ -130,10 +130,20 @@ inline void validate_snapshot_inspection_frame(
   }
 }
 
+inline std::string snapshot_frame_module_path(const CoreSnapshot& snapshot,
+                                              std::uintptr_t address) {
+  const auto mapping = snapshot.mapping_for_address(address);
+  if (!mapping) {
+    throw std::runtime_error("snapshot frame address is not covered by NT_FILE mapping");
+  }
+  if (mapping->path.empty() || mapping->path.front() != '/') {
+    throw std::runtime_error("snapshot frame NT_FILE mapping lacks an absolute module path");
+  }
+  return mapping->path;
+}
+
 inline SnapshotInspectionFrameContext make_snapshot_inspection_frame(
     const CoreSnapshot& snapshot, std::size_t index, const EhFrameCursor& cursor) {
-  const auto module =
-      resolve_snapshot_module_address(snapshot, cursor.instruction_pointer);
   const auto& origin = snapshot.registers();
   InspectionRegisterState recovered{};
   recovered.rbx = cursor.rbx;
@@ -150,7 +160,7 @@ inline SnapshotInspectionFrameContext make_snapshot_inspection_frame(
       cursor.instruction_pointer,
       cursor.stack_pointer,
       cursor.frame_pointer,
-      module.module_path,
+      snapshot_frame_module_path(snapshot, cursor.instruction_pointer),
       recovered};
 }
 

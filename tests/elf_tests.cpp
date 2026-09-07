@@ -1,3 +1,4 @@
+#include "dwarf/local_value.hpp"
 #include "elf/elf.hpp"
 #include "snapshot/inspection.hpp"
 #include "unwind/cfi.hpp"
@@ -29,6 +30,8 @@ namespace {
 
 constexpr std::uint64_t kCoreRegisterMarker = 0x13579bdf2468ace0ULL;
 constexpr std::uint64_t kExpectedCallerRbx = 0x1020304050607080ULL;
+constexpr std::uint64_t kCrashRbxSentinel = 0x0badf00dfeedfaceULL;
+constexpr std::uint64_t kExpectedTransformed = 0x458a30bf63ac1619ULL;
 
 void require(bool condition, const std::string& message) {
   if (!condition) throw std::runtime_error(message);
@@ -287,6 +290,8 @@ void test_snapshot_caller_inspection(const std::string& fixture) {
           "kernel did not produce the caller-inspection core file");
 
   const mdbg::CoreSnapshot snapshot(core_path);
+  require(snapshot.registers().rbx == kCrashRbxSentinel,
+          "caller snapshot crash frame did not preserve the clobbered RBX sentinel");
   const auto trace = mdbg::build_snapshot_inspection_frames(snapshot, 2);
   require(trace.frames.size() == 2 &&
               trace.stop_reason == mdbg::CfiUnwindStopReason::FrameLimit,
@@ -304,15 +309,35 @@ void test_snapshot_caller_inspection(const std::string& fixture) {
               caller->module_path == trace.frames[1].module_path,
           "snapshot caller frame lost module-qualified caller identity");
 
+  const auto transformed = mdbg::inspect_local_value(snapshot, trace.frames[1], "transformed");
+  require(transformed.name == "transformed" && transformed.module_path == caller->module_path,
+          "snapshot caller local lost variable/module ownership");
+  require(transformed.kind == mdbg::LocalValueKind::Integer &&
+              transformed.byte_size == sizeof(std::uint64_t) && !transformed.is_signed,
+          "snapshot caller local lost compiler-proven integer type ownership");
+  require(transformed.raw_value == kExpectedTransformed,
+          "snapshot caller local did not use CFI-recovered historical RBX");
+
+  auto missing_rbx = trace.frames[1];
+  missing_rbx.registers.rbx.reset();
+  bool missing_rbx_failed = false;
+  try {
+    (void)mdbg::inspect_local_value(snapshot, missing_rbx, "transformed");
+  } catch (const std::exception&) {
+    missing_rbx_failed = true;
+  }
+  require(missing_rbx_failed,
+          "snapshot caller local substituted crash/live state for missing historical RBX");
+
   const mdbg::CoreSnapshot reopened(core_path);
   bool wrong_owner_failed = false;
   try {
-    mdbg::validate_snapshot_inspection_frame(reopened, trace.frames[1]);
+    (void)mdbg::inspect_local_value(reopened, trace.frames[1], "transformed");
   } catch (const std::logic_error&) {
     wrong_owner_failed = true;
   }
   require(wrong_owner_failed,
-          "snapshot inspection frame was accepted by a different CoreSnapshot owner");
+          "snapshot caller value frame was accepted by a different CoreSnapshot owner");
 
   std::remove(core_path.c_str());
 }

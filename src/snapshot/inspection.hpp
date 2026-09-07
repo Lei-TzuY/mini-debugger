@@ -6,10 +6,12 @@
 #include "unwind/cfi.hpp"
 
 #include <algorithm>
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 namespace mdbg {
 
@@ -29,6 +31,26 @@ struct SnapshotResolvedSource {
   std::string file;
   std::uint64_t line;
   std::uint64_t column;
+};
+
+struct SnapshotInspectionFrameContext {
+  std::size_t index;
+  const CoreSnapshot* owner_snapshot;
+  pid_t crashed_tid;
+  int signal_number;
+  std::uintptr_t origin_runtime_pc;
+  std::uintptr_t origin_stack_pointer;
+  std::optional<std::uintptr_t> origin_frame_pointer;
+  std::uintptr_t runtime_pc;
+  std::uintptr_t stack_pointer;
+  std::optional<std::uintptr_t> frame_pointer;
+  std::string module_path;
+  InspectionRegisterState registers;
+};
+
+struct SnapshotInspectionTrace {
+  std::vector<SnapshotInspectionFrameContext> frames;
+  CfiUnwindStopReason stop_reason;
 };
 
 inline SnapshotModuleAddress resolve_snapshot_module_address(
@@ -87,19 +109,74 @@ inline std::optional<SnapshotResolvedSource> find_snapshot_source_by_runtime_add
                                 source->column};
 }
 
-inline CfiBacktrace unwind_eh_frame(const CoreSnapshot& snapshot,
-                                    std::size_t max_frames = 64) {
+inline void validate_snapshot_inspection_frame(
+    const CoreSnapshot& snapshot, const SnapshotInspectionFrameContext& frame) {
+  if (frame.owner_snapshot != &snapshot) {
+    throw std::logic_error(
+        "snapshot inspection frame belongs to a different CoreSnapshot owner");
+  }
+  const auto& regs = snapshot.registers();
+  if (frame.crashed_tid != snapshot.crashed_tid() ||
+      frame.signal_number != snapshot.signal_number() ||
+      frame.origin_runtime_pc != static_cast<std::uintptr_t>(regs.rip) ||
+      frame.origin_stack_pointer != static_cast<std::uintptr_t>(regs.rsp) ||
+      frame.origin_frame_pointer !=
+          std::optional<std::uintptr_t>{static_cast<std::uintptr_t>(regs.rbp)}) {
+    throw std::logic_error(
+        "snapshot inspection frame crash identity does not match its owner");
+  }
+  if (frame.runtime_pc == 0 || frame.stack_pointer == 0 || frame.module_path.empty()) {
+    throw std::invalid_argument("snapshot inspection frame is incomplete");
+  }
+}
+
+inline std::string snapshot_frame_module_path(const CoreSnapshot& snapshot,
+                                              std::uintptr_t address) {
+  const auto mapping = snapshot.mapping_for_address(address);
+  if (!mapping) {
+    throw std::runtime_error("snapshot frame address is not covered by NT_FILE mapping");
+  }
+  if (mapping->path.empty() || mapping->path.front() != '/') {
+    throw std::runtime_error("snapshot frame NT_FILE mapping lacks an absolute module path");
+  }
+  return mapping->path;
+}
+
+inline SnapshotInspectionFrameContext make_snapshot_inspection_frame(
+    const CoreSnapshot& snapshot, std::size_t index, const EhFrameCursor& cursor) {
+  const auto& origin = snapshot.registers();
+  InspectionRegisterState recovered{};
+  recovered.rbx = cursor.rbx;
+  recovered.rbp = cursor.frame_pointer;
+  recovered.rsp = static_cast<std::uint64_t>(cursor.stack_pointer);
+  return SnapshotInspectionFrameContext{
+      index,
+      &snapshot,
+      snapshot.crashed_tid(),
+      snapshot.signal_number(),
+      static_cast<std::uintptr_t>(origin.rip),
+      static_cast<std::uintptr_t>(origin.rsp),
+      std::optional<std::uintptr_t>{static_cast<std::uintptr_t>(origin.rbp)},
+      cursor.instruction_pointer,
+      cursor.stack_pointer,
+      cursor.frame_pointer,
+      snapshot_frame_module_path(snapshot, cursor.instruction_pointer),
+      recovered};
+}
+
+inline SnapshotInspectionTrace build_snapshot_inspection_frames(
+    const CoreSnapshot& snapshot, std::size_t max_frames = 64) {
   if (max_frames == 0) {
-    throw std::invalid_argument("snapshot CFI unwind requires a non-zero frame limit");
+    throw std::invalid_argument(
+        "snapshot inspection requires a non-zero frame limit");
   }
 
   const auto& regs = snapshot.registers();
   EhFrameCursor current{static_cast<std::uintptr_t>(regs.rip),
                         static_cast<std::uintptr_t>(regs.rsp),
                         static_cast<std::uintptr_t>(regs.rbp), regs.rbx};
-  CfiBacktrace result{{CfiStackFrame{current.instruction_pointer, current.stack_pointer,
-                                    current.frame_pointer}},
-                      CfiUnwindStopReason::EndOfChain};
+  SnapshotInspectionTrace result{{make_snapshot_inspection_frame(snapshot, 0, current)},
+                                 CfiUnwindStopReason::EndOfChain};
   if (max_frames == 1) {
     result.stop_reason = CfiUnwindStopReason::FrameLimit;
     return result;
@@ -141,12 +218,24 @@ inline CfiBacktrace unwind_eh_frame(const CoreSnapshot& snapshot,
       return result;
     }
 
-    result.frames.push_back(CfiStackFrame{caller->instruction_pointer, caller->stack_pointer,
-                                          caller->frame_pointer});
+    result.frames.push_back(
+        make_snapshot_inspection_frame(snapshot, result.frames.size(), *caller));
     current = *caller;
   }
 
   result.stop_reason = CfiUnwindStopReason::FrameLimit;
+  return result;
+}
+
+inline CfiBacktrace unwind_eh_frame(const CoreSnapshot& snapshot,
+                                    std::size_t max_frames = 64) {
+  const auto inspection = build_snapshot_inspection_frames(snapshot, max_frames);
+  CfiBacktrace result{{}, inspection.stop_reason};
+  result.frames.reserve(inspection.frames.size());
+  for (const auto& frame : inspection.frames) {
+    result.frames.push_back(
+        CfiStackFrame{frame.runtime_pc, frame.stack_pointer, frame.frame_pointer});
+  }
   return result;
 }
 

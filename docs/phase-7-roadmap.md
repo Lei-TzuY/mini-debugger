@@ -53,16 +53,31 @@ Priority 2 deliberately stops at immutable frame recovery. It does not yet claim
 
 ## Priority 3: snapshot caller inspection ownership — current frontier
 
-The next slice should decide how the completed Phase 6 caller-inspection model consumes immutable snapshot-backed caller contexts without pretending those frames belong to a live execution domain.
+Priority 3 connects the completed Phase 6 caller-inspection model to immutable snapshot-backed caller contexts without pretending those frames belong to a live execution domain.
+
+### P3-A: immutable inspection-frame ownership substrate — complete
+
+Completed bounded capability:
+
+- `SnapshotInspectionFrameContext` is owned by one concrete `CoreSnapshot` instance and records the crash TID/signal plus the originating crash RIP/RSP/RBP fingerprint; validation rejects the same frame when presented to a separately opened `CoreSnapshot`, even when both instances parse identical core bytes;
+- frame identity retains the snapshot-owned `NT_FILE` pathname without requiring the module file to remain available on the host, preserving the Priority 2 rule that an unavailable module keeps frame 0 as immutable crash evidence and stops further unwind as invalid;
+- `build_snapshot_inspection_frames` is now the single snapshot CFI walk: it preserves runtime PC, stack/frame cursor, module ownership, and only the historical register state carried by the bounded unwind cursor (`RBX`, `RBP`, and `RSP`); the older `unwind_eh_frame` surface projects its `CfiStackFrame` view from this richer trace rather than maintaining a second unwind loop;
+- a real kernel-generated core is produced from the existing compiler-proven Phase 6 formal-parameter fixture at the `clobber_argument_registers` callee; PIE and non-PIE tests recover the caller `inspect_entry_parameter` frame and require its historical `RBX=0x1020304050607080`, while exact-owner validation remains fail-closed under both permanent GCC and Clang-large lanes;
+- the fixture crash path is opt-in (`--snapshot-crash`), so all existing live Phase 6 compiler-value coverage remains unchanged.
+
+P3-A deliberately does not claim source-value inspection yet. It establishes the immutable frame/register/module ownership required to reuse that existing evaluator without a fake live debugger domain.
+
+### P3-B: snapshot caller source-value evaluation — next slice
 
 Acceptance criteria:
 
-- introduce an immutable inspection-frame identity whose freshness is tied to one owned `CoreSnapshot` instance/crash state rather than a live debugger stop sequence or process-domain selection generation;
-- construct frame 0 and at least one CFI-recovered caller context from Priority 2 while preserving runtime PC, stack/frame cursor, module ownership, and only those historical registers that CFI actually recovered;
-- reuse one existing compiler-proven caller source-value path from Phase 6 against snapshot memory/register evidence; do not broaden DWARF expression support merely to manufacture a post-mortem example;
+- reuse one existing compiler-proven caller source-value path from Phase 6 against `SnapshotInspectionFrameContext` memory/register evidence; the preferred first path is the existing `transformed` local whose `DW_OP_breg3` expression already consumes CFI-recovered historical `RBX`;
 - stack/local memory reads must come only from captured snapshot `PT_LOAD` bytes, and required bytes/registers absent from the core or unwind cursor must fail explicitly rather than substituting live process state;
+- module virtual-PC calculation must derive only from snapshot `NT_FILE` ownership rather than `ElfFile::load_bias(pid)` or `/proc`;
 - kernel-generated PIE and non-PIE core integration must prove the caller value is owned by the snapshot frame and remains module/type/lexical-scope qualified under GCC and Clang-large;
-- no snapshot inspection context may become an execution selector or gain resume, signal, register/memory mutation, breakpoint, watchpoint, or fake PID/TID behavior.
+- do not broaden DWARF expression support merely to manufacture a post-mortem example.
+
+No snapshot inspection context may become an execution selector or gain resume, signal, register/memory mutation, breakpoint, watchpoint, or fake PID/TID behavior.
 
 Do not start generic frame UI, arbitrary historical-register reconstruction, or additional DWARF-expression families unless a compiler-produced snapshot caller value demonstrates a concrete missing requirement.
 

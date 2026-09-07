@@ -1,4 +1,5 @@
 #include <stdint.h>
+#include <string.h>
 
 #define PARAMETER_EXPECTED UINT64_C(0x1020304050607080)
 #define ENTRY_PARAMETER_XOR UINT64_C(0x55aa00ff33cc6699)
@@ -15,6 +16,7 @@ volatile uint64_t parameter_seed = UINT64_C(0x1122334455667788);
 volatile uint64_t inline_seed = INLINE_LOCAL_EXPECTED;
 uint64_t indirect_seed = INDIRECT_LOCAL_EXPECTED ^ INDIRECT_LOCAL_XOR;
 uint64_t* indirect_ptr = &indirect_seed;
+static volatile int snapshot_crash_enabled = 0;
 
 __attribute__((noinline)) uint64_t inspect_parameter_value(uint64_t parameter) {
   __asm__ volatile(".globl formal_parameter_probe\n"
@@ -38,6 +40,11 @@ __attribute__((noinline)) uint64_t clobber_argument_registers(
                    "caller_register_probe:\n"
                    "nop\n"
                    ::: "rdi", "rbx", "memory");
+  if (snapshot_crash_enabled) {
+    __asm__ volatile("xorq %%rax, %%rax\n"
+                     "movq %%rax, (%%rax)\n"
+                     ::: "rax", "memory");
+  }
   return result;
 }
 
@@ -99,7 +106,9 @@ static __attribute__((always_inline)) inline uint64_t inspect_inlined_local(
   return inline_local;
 }
 
-int main(void) {
+int main(int argc, char** argv) {
+  snapshot_crash_enabled =
+      argc == 2 && strcmp(argv[1], "--snapshot-crash") == 0;
   const uint64_t parameter = parameter_seed ^ UINT64_C(0x0102030405060708);
   if (inspect_parameter_value(parameter) != PARAMETER_EXPECTED) return 1;
   if (inspect_entry_parameter(parameter) != ENTRY_RESULT_EXPECTED) return 2;

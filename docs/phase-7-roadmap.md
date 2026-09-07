@@ -2,7 +2,7 @@
 
 Phase 7 begins after Phase 6 separates live execution ownership from caller-frame inspection ownership. Its architectural hypothesis is **immutable post-mortem inspection**: source/symbol/unwind/value inspection should be able to operate on an owned ELF64 core snapshot without pretending that snapshot has a resumable ptrace task.
 
-A core snapshot is not a `Process`. It cannot continue, single-step, receive a signal, mutate registers/memory, own software-breakpoint displacement, or program hardware debug registers. Its registers and memory are immutable evidence captured at one crash state. Phase 7 must preserve that distinction rather than adding a fake PID/TID behind the existing live debugger API.
+A core snapshot is not a `Process`. It cannot continue, single-step, receive a signal, mutate registers/memory, own software-breakpoint displacement, or program hardware debug registers. Its registers and memory are immutable evidence captured at one crash state. Phase 7 preserves that distinction rather than adding a fake PID/TID behind the existing live debugger API.
 
 ## Priority 0: bounded ELF64 core snapshot ownership — complete
 
@@ -41,17 +41,17 @@ The third slice reuses the bounded `.eh_frame` state machine against immutable s
 
 Completed bounded capability:
 
-- `EhFrame` now exposes the smallest read-only evaluation boundary needed by both domains: an already-resolved module virtual PC, an unwind cursor carrying only known register state, and a memory-reader callback; live `Debugger` wrappers preserve their stopped-tracee/load-bias contract while snapshots supply only captured `PT_LOAD` bytes;
+- `EhFrame` exposes the smallest read-only evaluation boundary needed by both domains: an already-resolved module virtual PC, an unwind cursor carrying only known register state, and a memory-reader callback; live `Debugger` wrappers preserve their stopped-tracee/load-bias contract while snapshots supply only captured `PT_LOAD` bytes;
 - the snapshot unwind cursor is seeded directly from kernel-owned crash RIP/RSP/RBP/RBX evidence and recovers a real compiler caller through the same CIE/FDE parser, CFI rule evaluator, register recovery, and stack-slot decoding used by live unwind;
 - every snapshot frame resolves its runtime PC through `NT_FILE` ownership and `resolve_snapshot_module_address`, then opens the owning module's `EhFrame`; PIE and non-PIE module virtual-address conversion therefore uses snapshot mappings rather than `/proc` or a manufactured PID;
 - recovered caller state must advance the stack monotonically, change PC, and remain covered by recorded snapshot module evidence; unavailable module files, unmapped return addresses, missing CFI, unreadable captured stack slots, or unsupported rules converge to the existing bounded unwind stop reasons rather than falling back to host-process state;
-- the existing kernel-generated PIE and non-PIE core workflow now proves frame 0 preserves exact crash RIP/RSP/RBP and at least one caller is recovered with deterministic PC/SP ownership under both permanent GCC and Clang-large CI lanes while Priority 1 symbol/source resolution remains intact;
+- the existing kernel-generated PIE and non-PIE core workflow proves frame 0 preserves exact crash RIP/RSP/RBP and at least one caller is recovered with deterministic PC/SP ownership under both permanent GCC and Clang-large CI lanes while Priority 1 symbol/source resolution remains intact;
 - the real same-width missing-module core variant also exercises unwind fail-closed behavior: the crash frame remains immutable evidence, but caller recovery stops as invalid rather than guessing a module or reading live memory;
 - no CFI opcode or encoding support was broadened for this milestone, and no snapshot API can resume, signal, mutate, install breakpoints, or program watchpoints.
 
-Priority 2 deliberately stops at immutable frame recovery. It does not yet claim caller-local source-value inspection or transplant live stop-generation/TID freshness semantics onto a core snapshot.
+Priority 2 deliberately stops at immutable frame recovery. It does not transplant live stop-generation/TID freshness semantics onto a core snapshot.
 
-## Priority 3: snapshot caller inspection ownership — current frontier
+## Priority 3: snapshot caller inspection ownership — complete
 
 Priority 3 connects the completed Phase 6 caller-inspection model to immutable snapshot-backed caller contexts without pretending those frames belong to a live execution domain.
 
@@ -61,25 +61,44 @@ Completed bounded capability:
 
 - `SnapshotInspectionFrameContext` is owned by one concrete `CoreSnapshot` instance and records the crash TID/signal plus the originating crash RIP/RSP/RBP fingerprint; validation rejects the same frame when presented to a separately opened `CoreSnapshot`, even when both instances parse identical core bytes;
 - frame identity retains the snapshot-owned `NT_FILE` pathname without requiring the module file to remain available on the host, preserving the Priority 2 rule that an unavailable module keeps frame 0 as immutable crash evidence and stops further unwind as invalid;
-- `build_snapshot_inspection_frames` is now the single snapshot CFI walk: it preserves runtime PC, stack/frame cursor, module ownership, and only the historical register state carried by the bounded unwind cursor (`RBX`, `RBP`, and `RSP`); the older `unwind_eh_frame` surface projects its `CfiStackFrame` view from this richer trace rather than maintaining a second unwind loop;
+- `build_snapshot_inspection_frames` is the single snapshot CFI walk: it preserves runtime PC, stack/frame cursor, module ownership, and only the historical register state carried by the bounded unwind cursor (`RBX`, `RBP`, and `RSP`); the older `unwind_eh_frame` surface projects its `CfiStackFrame` view from this richer trace rather than maintaining a second unwind loop;
 - a real kernel-generated core is produced from the existing compiler-proven Phase 6 formal-parameter fixture at the `clobber_argument_registers` callee; PIE and non-PIE tests recover the caller `inspect_entry_parameter` frame and require its historical `RBX=0x1020304050607080`, while exact-owner validation remains fail-closed under both permanent GCC and Clang-large lanes;
 - the fixture crash path is opt-in (`--snapshot-crash`), so all existing live Phase 6 compiler-value coverage remains unchanged.
 
-P3-A deliberately does not claim source-value inspection yet. It establishes the immutable frame/register/module ownership required to reuse that existing evaluator without a fake live debugger domain.
+### P3-B: snapshot caller source-value evaluation — complete
 
-### P3-B: snapshot caller source-value evaluation — next slice
+Completed bounded capability:
 
-Acceptance criteria:
+- `inspect_local_value` / `inspect_local_integer` accept a `CoreSnapshot` plus an exact-owner `SnapshotInspectionFrameContext`; frame 0 is rejected because this slice is specifically caller-frame inspection and ownership validation occurs before any DWARF evaluation;
+- the evaluator resolves the frame PC only through snapshot `NT_FILE` ownership, verifies that resolved module identity still matches the inspection frame, opens that recorded module's compiler DWARF, and never calls `ElfFile::load_bias(pid)`, `/proc`, or a live `Debugger`;
+- the first post-mortem source-value path deliberately reuses the already compiler-proven Phase 6 scalar expression family for caller local `transformed`: `DW_OP_breg3` followed by the existing bounded XOR/stack-value form; no new DWARF expression family is accepted for this milestone;
+- evaluation requires the caller frame's CFI-recovered historical `RBX`; if that evidence is absent the request fails explicitly instead of substituting the crash-frame register file or any host/live process state;
+- the existing private DWARF parser/evaluator implementation is factored into one internal translation-unit include so live and snapshot adapters reuse the same parser helpers without maintaining a second parser or widening their public surface;
+- real kernel-generated PIE and non-PIE cores recover caller `inspect_entry_parameter`, resolve its module-qualified `transformed` local, preserve integer width/signedness and lexical ownership, and require the exact compiler-proven value `0x458a30bf63ac1619` under both permanent GCC and Clang-large lanes;
+- removing recovered caller RBX from the immutable inspection frame deterministically makes the same source-value request fail, directly proving the result is owned by historical caller evidence rather than the crash sentinel.
 
-- reuse one existing compiler-proven caller source-value path from Phase 6 against `SnapshotInspectionFrameContext` memory/register evidence; the preferred first path is the existing `transformed` local whose `DW_OP_breg3` expression already consumes CFI-recovered historical `RBX`;
-- stack/local memory reads must come only from captured snapshot `PT_LOAD` bytes, and required bytes/registers absent from the core or unwind cursor must fail explicitly rather than substituting live process state;
-- module virtual-PC calculation must derive only from snapshot `NT_FILE` ownership rather than `ElfFile::load_bias(pid)` or `/proc`;
-- kernel-generated PIE and non-PIE core integration must prove the caller value is owned by the snapshot frame and remains module/type/lexical-scope qualified under GCC and Clang-large;
-- do not broaden DWARF expression support merely to manufacture a post-mortem example.
+No snapshot inspection context gains resume, single-step, signal delivery, register/memory mutation, software/hardware breakpoint ownership, process/thread selection, or a fake PID/TID. Missing module files, missing historical registers, unsupported source-value forms, and absent snapshot evidence remain fail-closed.
 
-No snapshot inspection context may become an execution selector or gain resume, signal, register/memory mutation, breakpoint, watchpoint, or fake PID/TID behavior.
+## Phase 7 seal
 
-Do not start generic frame UI, arbitrary historical-register reconstruction, or additional DWARF-expression families unless a compiler-produced snapshot caller value demonstrates a concrete missing requirement.
+Phase 7 is complete for the current bounded immutable post-mortem milestone. The repo now owns a real x86-64 ELF core snapshot, resolves snapshot module/symbol/source identity, unwinds a compiler caller from captured bytes, owns immutable caller inspection contexts, and evaluates one existing compiler-proven caller source value without crossing into live execution semantics.
+
+Further post-mortem work must not grow by enumerating ELF notes, DWARF expressions, or historical registers without a concrete failing workflow. New capability should move upward into an integrated read-only inspection experience while preserving `CoreSnapshot` as immutable evidence.
+
+## Phase 8 promotion: read-only core inspection session — current frontier
+
+The next architectural hypothesis is a **read-only core inspection session** that composes the completed Phase 7 primitives into a coherent user workflow without disguising a snapshot as a live debugger.
+
+First executable gate:
+
+- open one real kernel-generated core through an explicit core-file session entry point backed by `CoreSnapshot`, not `Process` or `Debugger`;
+- expose bounded snapshot backtrace and immutable frame selection so a user can move from the crash frame to recovered caller frame 1 without changing any execution owner;
+- evaluate `print transformed` from the selected caller through the completed snapshot source-value path, preserving module/source/type ownership;
+- prove the workflow end to end on real PIE and non-PIE kernel cores under GCC and Clang-large, including module-qualified frame output and the expected historical caller value;
+- execution or mutation operations such as continue/step/signal delivery/register or memory writes/breakpoints/watchpoints must be unavailable or explicitly rejected by the core-session command surface, not routed through dummy PID/TID state;
+- unavailable modules, unreadable snapshot bytes, unsupported unwind/value evidence, and invalid frame selection remain deterministic fail-closed outcomes.
+
+Do not implement Phase 8 as a generic command-mode enum or presentation-only shell. The first slice must prove a real `core -> backtrace -> caller frame -> source value` workflow before the new phase is considered started.
 
 ## Selection rule
 

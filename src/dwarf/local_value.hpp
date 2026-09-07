@@ -8,9 +8,11 @@
 
 namespace mdbg {
 
+class CoreSnapshot;
 class Debugger;
 class ElfFile;
 struct InspectionFrameContext;
+struct SnapshotInspectionFrameContext;
 
 enum class LocalValueKind { Integer, Pointer, Structure };
 
@@ -40,6 +42,9 @@ LocalScalarValue inspect_local_value(const Debugger& debugger,
                                      const ElfFile& preferred_elf,
                                      const InspectionFrameContext& frame,
                                      std::string_view name);
+LocalScalarValue inspect_local_value(const CoreSnapshot& snapshot,
+                                     const SnapshotInspectionFrameContext& frame,
+                                     std::string_view name);
 
 LocalIntegerValue inspect_local_integer(const Debugger& debugger,
                                         const ElfFile& preferred_elf,
@@ -47,6 +52,9 @@ LocalIntegerValue inspect_local_integer(const Debugger& debugger,
 LocalIntegerValue inspect_local_integer(const Debugger& debugger,
                                         const ElfFile& preferred_elf,
                                         const InspectionFrameContext& frame,
+                                        std::string_view name);
+LocalIntegerValue inspect_local_integer(const CoreSnapshot& snapshot,
+                                        const SnapshotInspectionFrameContext& frame,
                                         std::string_view name);
 
 }  // namespace mdbg

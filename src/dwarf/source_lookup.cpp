@@ -6,6 +6,9 @@ namespace mdbg {
 namespace {
 
 constexpr std::uint8_t kDwOpAddr = 0x03;
+constexpr std::uint64_t kSnapshotDwAteFloat = 0x04;
+constexpr std::uint8_t kSnapshotDwOpXmm0 =
+    static_cast<std::uint8_t>(kDwOpReg0 + 17U);
 
 std::uint64_t decode_snapshot_address(const std::vector<std::byte>& expression) {
   constexpr std::size_t kAddressSize = sizeof(std::uint64_t);
@@ -35,6 +38,88 @@ std::uint64_t decode_snapshot_scalar(const SnapshotMemoryRead& memory,
            << (index * 8U);
   }
   return raw;
+}
+
+std::optional<ValueType> resolve_snapshot_floating_type(
+    const std::vector<Die>& dies, std::uint64_t type_offset) {
+  for (unsigned depth = 0; depth < 16; ++depth) {
+    const auto index = die_index_by_offset(dies, type_offset);
+    if (!index) {
+      throw std::runtime_error("snapshot local value type references an unknown DIE");
+    }
+    const auto& die = dies[*index];
+    if (die.tag == kDwTagTypedef || die.tag == kDwTagConstType) {
+      const auto* type = attribute(die, kDwAtType);
+      if (type == nullptr || type->form != kDwFormRef4) {
+        throw std::runtime_error(
+            "snapshot floating type wrapper does not use DW_FORM_ref4");
+      }
+      type_offset = type->number;
+      continue;
+    }
+    if (die.tag != kDwTagBaseType) return std::nullopt;
+
+    const auto* size = attribute(die, kDwAtByteSize);
+    const auto* encoding = attribute(die, kDwAtEncoding);
+    if (encoding == nullptr || encoding->number != kSnapshotDwAteFloat) {
+      return std::nullopt;
+    }
+    if (size == nullptr || (size->number != 4 && size->number != 8)) {
+      throw std::runtime_error(
+          "snapshot floating base type must be a compiler-proven 4/8-byte scalar");
+    }
+    return ValueType{static_cast<std::size_t>(size->number), false,
+                     LocalValueKind::Floating, {}};
+  }
+  throw std::runtime_error("snapshot floating type chain is too deep");
+}
+
+std::size_t snapshot_xmm_index(const std::vector<std::byte>& expression) {
+  if (expression.size() != 1) {
+    throw std::runtime_error(
+        "snapshot XMM local requires one exact compiler-proven DW_OP_reg expression");
+  }
+  const auto opcode = std::to_integer<std::uint8_t>(expression.front());
+  if (opcode != kSnapshotDwOpXmm0) {
+    throw std::runtime_error(
+        "snapshot XMM local currently supports only compiler-proven DW_OP_reg17 (xmm0)");
+  }
+  return 0;
+}
+
+LocalScalarValue materialize_snapshot_xmm_value(
+    const CoreSnapshot& snapshot, const SnapshotInspectionFrameContext& frame,
+    const SnapshotModuleAddress& owner, std::string_view name,
+    const ValueType& value_type, const std::vector<std::byte>& expression) {
+  if (frame.index != 0) {
+    throw std::logic_error("snapshot XMM register ownership is only defined for frame 0");
+  }
+  if (value_type.kind != LocalValueKind::Floating ||
+      (value_type.byte_size != 4 && value_type.byte_size != 8)) {
+    throw std::runtime_error(
+        "snapshot XMM register location requires a bounded floating scalar type");
+  }
+  const auto index = snapshot_xmm_index(expression);
+  const auto floating = snapshot.floating_point_state(frame.thread_tid);
+  if (!floating) {
+    throw std::runtime_error(
+        "selected core thread has no NT_FPREGSET state for XMM source recovery");
+  }
+  if (index >= floating->xmm.size()) {
+    throw std::runtime_error("snapshot XMM register number is outside the FPREGSET model");
+  }
+
+  std::uint64_t raw = 0;
+  for (std::size_t byte = 0; byte < value_type.byte_size; ++byte) {
+    raw |= static_cast<std::uint64_t>(
+               std::to_integer<unsigned int>(floating->xmm[index][byte]))
+           << (byte * 8U);
+  }
+  LocalScalarValue result{owner.module_path, std::string(name), raw,
+                          value_type.byte_size, false,
+                          LocalValueKind::Floating};
+  result.storage = LocalValueStorage::SnapshotCoreRegister;
+  return result;
 }
 
 LocalScalarValue materialize_snapshot_memory_value(
@@ -77,7 +162,7 @@ LocalScalarValue materialize_snapshot_memory_value(
   return result;
 }
 
-std::optional<LocalScalarValue> inspect_snapshot_caller_unit(
+std::optional<LocalScalarValue> inspect_snapshot_unit(
     const DebugSections& sections, const CoreSnapshot& snapshot,
     const SnapshotInspectionFrameContext& frame,
     const SnapshotModulePathResolver& module_paths,
@@ -151,7 +236,9 @@ std::optional<LocalScalarValue> inspect_snapshot_caller_unit(
     throw std::runtime_error("local value has no supported DW_FORM_ref4 type");
   }
 
-  const auto value_type = resolve_value_type(dies, type->number);
+  const auto floating_type = resolve_snapshot_floating_type(dies, type->number);
+  const auto value_type = floating_type ? *floating_type
+                                        : resolve_value_type(dies, type->number);
   std::vector<std::byte> location_expression;
   if (location->form == kDwFormExprloc) {
     location_expression = location->expression;
@@ -164,14 +251,20 @@ std::optional<LocalScalarValue> inspect_snapshot_caller_unit(
 
   if (location_expression.empty()) {
     throw std::runtime_error(
-        "snapshot caller local requires a compiler-proven location form");
+        "snapshot local requires a compiler-proven location form");
+  }
+
+  if (frame.index == 0) {
+    return materialize_snapshot_xmm_value(snapshot, frame, owner, name,
+                                          value_type, location_expression);
   }
 
   const auto opcode = std::to_integer<std::uint8_t>(location_expression.front());
   if (opcode == kDwOpBreg3) {
-    if (value_type.kind == LocalValueKind::Structure) {
+    if (value_type.kind == LocalValueKind::Structure ||
+        value_type.kind == LocalValueKind::Floating) {
       throw std::runtime_error(
-          "snapshot caller DW_OP_breg3 requires a scalar value");
+          "snapshot caller DW_OP_breg3 requires an integer/pointer scalar value");
     }
     if (!frame.registers.rbx) {
       throw std::runtime_error(
@@ -224,10 +317,6 @@ LocalScalarValue inspect_local_value(const CoreSnapshot& snapshot,
                                      const SnapshotModulePathResolver& module_paths) {
   if (name.empty()) throw std::invalid_argument("local variable name must not be empty");
   validate_snapshot_inspection_frame(snapshot, frame);
-  if (frame.index == 0) {
-    throw std::invalid_argument(
-        "snapshot caller local-value inspection requires a recovered caller frame");
-  }
 
   const auto owner =
       resolve_snapshot_module_address(snapshot, frame.runtime_pc, module_paths);
@@ -239,7 +328,7 @@ LocalScalarValue inspect_local_value(const CoreSnapshot& snapshot,
   std::size_t unit = 0;
   while (unit < sections.info.size()) {
     std::size_t next = unit;
-    const auto result = inspect_snapshot_caller_unit(
+    const auto result = inspect_snapshot_unit(
         sections, snapshot, frame, module_paths, owner, owner.virtual_address,
         name, unit, next);
     if (result) return *result;

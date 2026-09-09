@@ -57,6 +57,8 @@ __attribute__((noinline, noreturn)) void signal_core_interrupted_application(voi
       "signal_core_interrupted_probe:\n"
       "pause\n"
       "jmp signal_core_interrupted_probe\n"
+      ".globl signal_core_interrupted_probe_end\n"
+      "signal_core_interrupted_probe_end:\n"
       :
       :
       : "memory");

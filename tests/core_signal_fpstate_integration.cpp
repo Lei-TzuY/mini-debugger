@@ -1,6 +1,11 @@
 #include "elf/elf.hpp"
 #include "snapshot/session.hpp"
 
+#include <sys/wait.h>
+#include <unistd.h>
+
+#include <cerrno>
+#include <csignal>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -56,6 +61,14 @@ std::uint64_t xmm0_low(const mdbg::CoreFloatingPointState& state) {
   return value;
 }
 
+std::uint64_t frame_xmm0_low(const mdbg::SnapshotInspectionFrameContext& frame) {
+  require(frame.registers.xmm0.has_value(),
+          "restored interrupted frame has no owned XMM0 state");
+  std::uint64_t value = 0;
+  std::memcpy(&value, frame.registers.xmm0->data(), sizeof(value));
+  return value;
+}
+
 const mdbg::SnapshotInspectionFrameContext* trace_context(
     const mdbg::CoreInspectionSession& session, std::uintptr_t instruction_pointer,
     std::uintptr_t stack_pointer) {
@@ -65,6 +78,78 @@ const mdbg::SnapshotInspectionFrameContext* trace_context(
     }
   }
   return nullptr;
+}
+
+std::string run_core_cli(const std::string& cli, const std::string& core,
+                         std::size_t frame_index) {
+  int input_pipe[2];
+  int output_pipe[2];
+  if (::pipe(input_pipe) != 0 || ::pipe(output_pipe) != 0) {
+    throw std::runtime_error("failed to create mdbg-core FP integration pipes");
+  }
+
+  const pid_t pid = ::fork();
+  if (pid == -1) throw std::runtime_error("failed to fork mdbg-core FP integration");
+  if (pid == 0) {
+    ::dup2(input_pipe[0], STDIN_FILENO);
+    ::dup2(output_pipe[1], STDOUT_FILENO);
+    ::dup2(output_pipe[1], STDERR_FILENO);
+    ::close(input_pipe[0]);
+    ::close(input_pipe[1]);
+    ::close(output_pipe[0]);
+    ::close(output_pipe[1]);
+    ::execl(cli.c_str(), cli.c_str(), core.c_str(), nullptr);
+    _exit(127);
+  }
+
+  ::close(input_pipe[0]);
+  ::close(output_pipe[1]);
+  const std::string commands = "frame " + std::to_string(frame_index) +
+                               "\nprint interrupted_fp_local\nquit\n";
+  std::size_t offset = 0;
+  while (offset < commands.size()) {
+    const auto written =
+        ::write(input_pipe[1], commands.data() + offset, commands.size() - offset);
+    if (written == -1 && errno == EINTR) continue;
+    if (written <= 0) {
+      ::close(input_pipe[1]);
+      ::close(output_pipe[0]);
+      ::kill(pid, SIGKILL);
+      int status = 0;
+      while (::waitpid(pid, &status, 0) == -1 && errno == EINTR) {
+      }
+      throw std::runtime_error("failed to write mdbg-core FP integration commands");
+    }
+    offset += static_cast<std::size_t>(written);
+  }
+  ::close(input_pipe[1]);
+
+  std::string output;
+  char buffer[1024];
+  for (;;) {
+    const auto count = ::read(output_pipe[0], buffer, sizeof(buffer));
+    if (count == -1 && errno == EINTR) continue;
+    if (count < 0) {
+      ::close(output_pipe[0]);
+      ::kill(pid, SIGKILL);
+      int status = 0;
+      while (::waitpid(pid, &status, 0) == -1 && errno == EINTR) {
+      }
+      throw std::runtime_error("failed to read mdbg-core FP integration output");
+    }
+    if (count == 0) break;
+    output.append(buffer, static_cast<std::size_t>(count));
+  }
+  ::close(output_pipe[0]);
+
+  int status = 0;
+  pid_t waited;
+  do {
+    waited = ::waitpid(pid, &status, 0);
+  } while (waited == -1 && errno == EINTR);
+  require(waited == pid && WIFEXITED(status) && WEXITSTATUS(status) == 0,
+          "mdbg-core restored-XMM session did not exit cleanly");
+  return output;
 }
 
 }  // namespace
@@ -117,6 +202,14 @@ int main(int argc, char** argv) {
     const auto* restored = trace_context(session, saved_rip, saved_rsp);
     require(restored != nullptr,
             "snapshot unwind did not restore the interrupted application frame");
+    require(frame_xmm0_low(*restored) == kInterruptedXmm0Low,
+            "restored interrupted frame did not own the signal-saved XMM0 value");
+    for (const auto& frame : session.trace().frames) {
+      if (frame.index <= restored->index) continue;
+      require(!frame.registers.xmm0.has_value(),
+              "ordinary CFI frame inherited signal-restored XMM0 ownership");
+    }
+
     session.select_frame(restored->index);
     const auto value = session.inspect_value("interrupted_fp_local");
     require(value.kind == mdbg::LocalValueKind::Floating && value.byte_size == 8,
@@ -125,6 +218,11 @@ int main(int argc, char** argv) {
             "signal-restored interrupted floating local has the wrong value");
     require(value.storage == mdbg::LocalValueStorage::SnapshotCoreRegister,
             "signal-restored interrupted floating local lost register provenance");
+
+    const auto cli = (std::filesystem::path(argv[0]).parent_path() / "mdbg-core").string();
+    const auto cli_output = run_core_cli(cli, argv[1], restored->index);
+    require(cli_output.find("interrupted_fp_local = 1234.5") != std::string::npos,
+            "mdbg-core did not print the signal-restored floating local");
 
     std::cout << "signal-restored XMM evidence integration passed\n";
   } catch (const std::exception& error) {

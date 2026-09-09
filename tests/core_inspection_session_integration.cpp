@@ -19,6 +19,8 @@ namespace {
 
 constexpr const char* kExpectedCaller = "inspect_entry_parameter";
 constexpr const char* kExpectedValue = "0x458a30bf63ac1619";
+constexpr const char* kExpectedSourceContext =
+    "const uint64_t side_effect = clobber_argument_registers(1, 2, 3, 4, 5, 6);";
 
 void require(bool condition, const std::string& message) {
   if (!condition) throw std::runtime_error(message);
@@ -273,6 +275,7 @@ std::string run_core_cli(const std::string& cli, const GeneratedCore& core,
       "thread " + std::to_string(core.crash_tid) + "\n"
       "bt\n"
       "frame 1\n"
+      "list\n"
       "print transformed\n"
       "continue\n"
       "thread 999999999\n"
@@ -405,6 +408,10 @@ void require_core_session_output(const std::string& output,
           "core session caller frame lost recorded module-qualified ownership");
   require(output.find("selected frame 1") != std::string::npos,
           "core session did not select the recovered caller frame");
+  require(output.find("unsupported in core session: list") == std::string::npos,
+          "core session still lacks immutable source-context listing");
+  require(output.find(kExpectedSourceContext) != std::string::npos,
+          "core session did not render real caller source context");
   require(output.find(recorded_module + "!transformed = " + std::string(kExpectedValue)) !=
               std::string::npos,
           "core session did not evaluate the historical caller source value");

@@ -16,6 +16,7 @@ struct InspectionFrameContext;
 struct SnapshotInspectionFrameContext;
 
 enum class LocalValueKind { Integer, Pointer, Structure };
+enum class LocalValueStorage { Computed, SnapshotCoreMemory, SnapshotRuntimeArtifact };
 
 struct LocalStructMember {
   std::string name;
@@ -32,6 +33,10 @@ struct LocalIntegerValue {
   bool is_signed;
   LocalValueKind kind{LocalValueKind::Integer};
   std::vector<LocalStructMember> members{};
+  LocalValueStorage storage{LocalValueStorage::Computed};
+  std::string storage_module_path{};
+  std::string storage_file_path{};
+  std::uint64_t storage_file_offset{0};
 };
 
 using LocalScalarValue = LocalIntegerValue;

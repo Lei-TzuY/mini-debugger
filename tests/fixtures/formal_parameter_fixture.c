@@ -15,6 +15,7 @@
 #define INDIRECT_LOCAL_EXPECTED UINT64_C(0x8877665544332211)
 #define INDIRECT_LOCAL_XOR UINT64_C(0x55aa00ff33cc6699)
 #define INLINE_LOCAL_EXPECTED UINT64_C(0x02146638cadcae70)
+#define SNAPSHOT_FILE_SCALAR_EXPECTED UINT64_C(0x6a09e667f3bcc909)
 
 volatile uint64_t parameter_seed = UINT64_C(0x1122334455667788);
 volatile uint64_t inline_seed = INLINE_LOCAL_EXPECTED;
@@ -74,7 +75,9 @@ __attribute__((noinline)) uint64_t clobber_argument_registers(
 }
 
 __attribute__((noinline)) uint64_t inspect_entry_parameter(uint64_t entry_parameter) {
+  static const uint64_t snapshot_file_scalar = SNAPSHOT_FILE_SCALAR_EXPECTED;
   uint64_t transformed = entry_parameter ^ ENTRY_PARAMETER_XOR;
+  __asm__ volatile("" : : "m"(snapshot_file_scalar) : "memory");
   const uint64_t side_effect = clobber_argument_registers(1, 2, 3, 4, 5, 6);
   __asm__ volatile("nop" ::: "memory");
   __asm__ volatile(".globl transformed_local_probe\n"

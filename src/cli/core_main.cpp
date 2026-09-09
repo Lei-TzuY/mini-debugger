@@ -68,7 +68,14 @@ void print_value(const mdbg::LocalScalarValue& value) {
     std::cout << "0x" << std::hex << value.raw_value << std::dec;
   }
   std::cout << " [" << value.byte_size << "-byte "
-            << (value.is_signed ? "signed" : "unsigned") << "]\n";
+            << (value.is_signed ? "signed" : "unsigned") << ']';
+  if (value.storage == mdbg::LocalValueStorage::SnapshotCoreMemory) {
+    std::cout << " [value-core]";
+  } else if (value.storage == mdbg::LocalValueStorage::SnapshotRuntimeArtifact) {
+    std::cout << " [value-artifact:" << value.storage_module_path << " file+0x"
+              << std::hex << value.storage_file_offset << std::dec << ']';
+  }
+  std::cout << '\n';
 }
 
 void print_memory(std::uintptr_t address, const mdbg::SnapshotMemoryRead& memory) {

@@ -1,12 +1,47 @@
 #include "dwarf/source_lookup_impl.inc"
 #include "snapshot/inspection.hpp"
+#include "snapshot/memory.hpp"
 
 namespace mdbg {
 namespace {
 
-std::optional<LocalScalarValue> inspect_snapshot_caller_breg3_unit(
-    const DebugSections& sections, const SnapshotInspectionFrameContext& frame,
-    std::string_view recorded_module_path, std::uint64_t virtual_pc,
+constexpr std::uint8_t kDwOpAddr = 0x03;
+
+std::uint64_t decode_snapshot_address(const std::vector<std::byte>& expression) {
+  constexpr std::size_t kAddressSize = sizeof(std::uint64_t);
+  if (expression.size() != 1 + kAddressSize) {
+    throw std::runtime_error(
+        "snapshot DW_OP_addr requires one exact x86-64 address operand");
+  }
+  std::uint64_t address = 0;
+  for (std::size_t index = 0; index < kAddressSize; ++index) {
+    address |= static_cast<std::uint64_t>(
+                   std::to_integer<unsigned int>(expression[index + 1]))
+               << (index * 8U);
+  }
+  return address;
+}
+
+std::uint64_t decode_snapshot_scalar(const SnapshotMemoryRead& memory,
+                                     std::size_t byte_size) {
+  if (byte_size == 0 || byte_size > sizeof(std::uint64_t) ||
+      memory.bytes.size() != byte_size) {
+    throw std::runtime_error("snapshot scalar memory width is unsupported");
+  }
+  std::uint64_t raw = 0;
+  for (std::size_t index = 0; index < memory.bytes.size(); ++index) {
+    raw |= static_cast<std::uint64_t>(
+               std::to_integer<unsigned int>(memory.bytes[index]))
+           << (index * 8U);
+  }
+  return raw;
+}
+
+std::optional<LocalScalarValue> inspect_snapshot_caller_unit(
+    const DebugSections& sections, const CoreSnapshot& snapshot,
+    const SnapshotInspectionFrameContext& frame,
+    const SnapshotModulePathResolver& module_paths,
+    const SnapshotModuleAddress& owner, std::uint64_t virtual_pc,
     std::string_view name, std::size_t unit_start, std::size_t& next_unit) {
   std::uint16_t unit_version = 0;
   const auto dies = parse_unit_dies(sections, unit_start, next_unit, unit_version);
@@ -87,22 +122,66 @@ std::optional<LocalScalarValue> inspect_snapshot_caller_breg3_unit(
     throw std::runtime_error("local value has no supported DW_AT_location form");
   }
 
-  if (value_type.kind == LocalValueKind::Structure || location_expression.empty() ||
-      std::to_integer<std::uint8_t>(location_expression.front()) != kDwOpBreg3) {
+  if (value_type.kind == LocalValueKind::Structure || location_expression.empty()) {
     throw std::runtime_error(
-        "snapshot caller local requires the existing compiler-proven DW_OP_breg3 scalar form");
-  }
-  if (!frame.registers.rbx) {
-    throw std::runtime_error(
-        "snapshot caller DW_OP_breg3 requires CFI-recovered historical RBX");
+        "snapshot caller local requires a compiler-proven scalar location form");
   }
 
-  const auto raw = truncate_integer(
-      evaluate_breg3_xor_stack_value(location_expression, *frame.registers.rbx),
+  const auto opcode = std::to_integer<std::uint8_t>(location_expression.front());
+  if (opcode == kDwOpBreg3) {
+    if (!frame.registers.rbx) {
+      throw std::runtime_error(
+          "snapshot caller DW_OP_breg3 requires CFI-recovered historical RBX");
+    }
+    const auto raw = truncate_integer(
+        evaluate_breg3_xor_stack_value(location_expression, *frame.registers.rbx),
+        value_type.byte_size);
+    return LocalScalarValue{owner.module_path, std::string(name), raw,
+                            value_type.byte_size, value_type.is_signed,
+                            value_type.kind};
+  }
+
+  if (opcode != kDwOpAddr) {
+    throw std::runtime_error(
+        "snapshot caller local requires a compiler-proven DW_OP_breg3 or DW_OP_addr scalar form");
+  }
+  if (value_type.byte_size == 0 || value_type.byte_size > sizeof(std::uint64_t)) {
+    throw std::runtime_error("snapshot DW_OP_addr scalar width exceeds the bounded reader");
+  }
+  if (frame.runtime_pc < owner.virtual_address) {
+    throw std::runtime_error("snapshot frame runtime PC is below its module virtual address");
+  }
+  const auto load_bias =
+      static_cast<std::uint64_t>(frame.runtime_pc) - owner.virtual_address;
+  const auto virtual_address = decode_snapshot_address(location_expression);
+  if (virtual_address > std::numeric_limits<std::uint64_t>::max() - load_bias) {
+    throw std::overflow_error("snapshot DW_OP_addr runtime address overflow");
+  }
+  const auto runtime_address_u64 = virtual_address + load_bias;
+  if (runtime_address_u64 > std::numeric_limits<std::uintptr_t>::max()) {
+    throw std::overflow_error("snapshot DW_OP_addr exceeds runtime address width");
+  }
+  const auto memory = read_snapshot_memory(
+      snapshot, module_paths, static_cast<std::uintptr_t>(runtime_address_u64),
       value_type.byte_size);
-  return LocalScalarValue{std::string(recorded_module_path), std::string(name), raw,
+  if (memory.provenance == SnapshotMemoryProvenance::RuntimeArtifact &&
+      memory.module_path != owner.module_path) {
+    throw std::logic_error("snapshot local artifact ownership changed during value read");
+  }
+
+  LocalScalarValue result{owner.module_path, std::string(name),
+                          decode_snapshot_scalar(memory, value_type.byte_size),
                           value_type.byte_size, value_type.is_signed,
                           value_type.kind};
+  if (memory.provenance == SnapshotMemoryProvenance::Core) {
+    result.storage = LocalValueStorage::SnapshotCoreMemory;
+  } else {
+    result.storage = LocalValueStorage::SnapshotRuntimeArtifact;
+    result.storage_module_path = memory.module_path;
+    result.storage_file_path = memory.module_file_path;
+    result.storage_file_offset = memory.artifact_file_offset;
+  }
+  return result;
 }
 
 }  // namespace
@@ -128,8 +207,9 @@ LocalScalarValue inspect_local_value(const CoreSnapshot& snapshot,
   std::size_t unit = 0;
   while (unit < sections.info.size()) {
     std::size_t next = unit;
-    const auto result = inspect_snapshot_caller_breg3_unit(
-        sections, frame, owner.module_path, owner.virtual_address, name, unit, next);
+    const auto result = inspect_snapshot_caller_unit(
+        sections, snapshot, frame, module_paths, owner, owner.virtual_address,
+        name, unit, next);
     if (result) return *result;
     if (next <= unit) {
       throw std::runtime_error("DWARF parser did not advance to the next unit");

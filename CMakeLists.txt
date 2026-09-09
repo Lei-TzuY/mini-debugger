@@ -471,4 +471,16 @@ if(BUILD_TESTING)
     COMMAND core_inspection_session_integration
       $<TARGET_FILE:formal_parameter_fixture_nopie>
       $<TARGET_FILE:mdbg-core>)
+
+  add_executable(snapshot_file_backed_local_value_integration
+    tests/snapshot_file_backed_local_value_integration.cpp)
+  target_link_libraries(snapshot_file_backed_local_value_integration PRIVATE mdbg_core)
+  target_compile_options(snapshot_file_backed_local_value_integration PRIVATE
+    -Wall -Wextra -Wpedantic -Werror)
+  add_test(NAME snapshot_file_backed_local_value_integration_pie
+    COMMAND snapshot_file_backed_local_value_integration
+      $<TARGET_FILE:formal_parameter_fixture_pie>)
+  add_test(NAME snapshot_file_backed_local_value_integration_nopie
+    COMMAND snapshot_file_backed_local_value_integration
+      $<TARGET_FILE:formal_parameter_fixture_nopie>)
 endif()

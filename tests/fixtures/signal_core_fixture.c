@@ -15,7 +15,7 @@ volatile uintptr_t signal_core_saved_rsp = 0;
 volatile sig_atomic_t signal_core_interrupted_ready = 0;
 volatile sig_atomic_t signal_core_main_tid = 0;
 
-__attribute__((noinline, noreturn)) void signal_core_crash_from_handler(void) {
+__attribute__((noinline)) void signal_core_crash_from_handler(void) {
   __asm__ volatile(
       ".globl signal_core_crash_probe\n"
       "signal_core_crash_probe:\n"
@@ -23,7 +23,6 @@ __attribute__((noinline, noreturn)) void signal_core_crash_from_handler(void) {
       :
       : "a"(0)
       : "memory");
-  __builtin_unreachable();
 }
 
 __attribute__((noinline)) void signal_core_handler(int signal_number, siginfo_t* info,
@@ -38,6 +37,7 @@ __attribute__((noinline)) void signal_core_handler(int signal_number, siginfo_t*
                    "signal_core_handler_probe:\n"
                    ::: "memory");
   signal_core_crash_from_handler();
+  __asm__ volatile("" ::: "memory");
 }
 
 static void* signal_sender(void* argument) {

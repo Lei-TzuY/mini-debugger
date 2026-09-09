@@ -15,14 +15,15 @@
 #define INDIRECT_LOCAL_EXPECTED UINT64_C(0x8877665544332211)
 #define INDIRECT_LOCAL_XOR UINT64_C(0x55aa00ff33cc6699)
 #define INLINE_LOCAL_EXPECTED UINT64_C(0x02146638cadcae70)
+#define SNAPSHOT_FILE_LOCAL_EXPECTED UINT64_C(0x7a6b5c4d3e2f1908)
 
 volatile uint64_t parameter_seed = UINT64_C(0x1122334455667788);
 volatile uint64_t inline_seed = INLINE_LOCAL_EXPECTED;
 uint64_t indirect_seed = INDIRECT_LOCAL_EXPECTED ^ INDIRECT_LOCAL_XOR;
 uint64_t* indirect_ptr = &indirect_seed;
-const uint64_t snapshot_file_seed = INDIRECT_LOCAL_EXPECTED ^ INDIRECT_LOCAL_XOR;
+const volatile uint64_t* snapshot_file_local_address = NULL;
 static volatile int snapshot_crash_enabled = 0;
-static volatile int snapshot_indirect_crash_enabled = 0;
+static volatile int snapshot_file_local_crash_enabled = 0;
 static volatile int snapshot_sibling_ready = 0;
 
 static void* snapshot_sibling_worker(void* argument) {
@@ -121,23 +122,19 @@ __attribute__((noinline)) uint64_t inspect_indirect_local(uint64_t** ptr) {
   return indirect_local;
 }
 
-__attribute__((noinline)) uint64_t inspect_snapshot_indirect_local(
-    const volatile uint64_t** ptr) {
-  const uint64_t snapshot_indirect_local = **ptr ^ INDIRECT_LOCAL_XOR;
-  __asm__ volatile(".globl snapshot_indirect_local_probe\n"
-                   "snapshot_indirect_local_probe:\n"
+__attribute__((noinline)) uint64_t inspect_snapshot_file_local(void) {
+  static const volatile uint64_t snapshot_file_local = SNAPSHOT_FILE_LOCAL_EXPECTED;
+  snapshot_file_local_address = &snapshot_file_local;
+  __asm__ volatile(".globl snapshot_file_local_probe\n"
+                   "snapshot_file_local_probe:\n"
                    "nop\n"
-                   :
-                   : "D"(ptr)
-                   : "memory");
-  if (snapshot_indirect_crash_enabled) {
+                   ::: "memory");
+  if (snapshot_file_local_crash_enabled) {
     __asm__ volatile("xorq %%rax, %%rax\n"
                      "movq %%rax, (%%rax)\n"
-                     :
-                     : "D"(ptr)
-                     : "rax", "memory");
+                     ::: "rax", "memory");
   }
-  return snapshot_indirect_local;
+  return snapshot_file_local;
 }
 
 static __attribute__((always_inline)) inline uint64_t inspect_inlined_local(
@@ -155,12 +152,16 @@ static __attribute__((always_inline)) inline uint64_t inspect_inlined_local(
 int main(int argc, char** argv) {
   const int threaded_snapshot =
       argc == 3 && strcmp(argv[1], "--snapshot-crash-threaded") == 0;
-  const int indirect_snapshot =
-      argc == 2 && strcmp(argv[1], "--snapshot-crash-indirect") == 0;
+  const int file_local_snapshot =
+      argc == 2 && strcmp(argv[1], "--snapshot-crash-file-local") == 0;
   snapshot_crash_enabled =
       (argc == 2 && strcmp(argv[1], "--snapshot-crash") == 0) || threaded_snapshot;
-  snapshot_indirect_crash_enabled = indirect_snapshot;
+  snapshot_file_local_crash_enabled = file_local_snapshot;
   if (threaded_snapshot && !start_snapshot_sibling(argv[2])) return 7;
+  if (file_local_snapshot) {
+    (void)inspect_snapshot_file_local();
+    return 8;
+  }
 
   const uint64_t parameter = parameter_seed ^ UINT64_C(0x0102030405060708);
   if (inspect_parameter_value(parameter) != PARAMETER_EXPECTED) return 1;
@@ -170,11 +171,6 @@ int main(int argc, char** argv) {
                                UINT64_C(0x50), UINT64_C(0x40), UINT64_C(0x102030)) !=
       ARITHMETIC_LOCAL_EXPECTED) {
     return 4;
-  }
-  if (indirect_snapshot) {
-    const volatile uint64_t* snapshot_indirect_ptr = &snapshot_file_seed;
-    (void)inspect_snapshot_indirect_local(&snapshot_indirect_ptr);
-    return 8;
   }
   if (inspect_indirect_local(&indirect_ptr) != INDIRECT_LOCAL_EXPECTED) return 5;
   return inspect_inlined_local(inline_seed) == INLINE_LOCAL_EXPECTED ? 0 : 6;

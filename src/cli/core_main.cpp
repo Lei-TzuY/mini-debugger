@@ -8,6 +8,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <utility>
 
 namespace {
 
@@ -17,8 +18,8 @@ void print_frame(const mdbg::CoreInspectionSession& session,
             << frame.index << " 0x" << std::hex << frame.runtime_pc << std::dec << ' '
             << frame.module_path;
   try {
-    if (const auto symbol =
-            mdbg::find_snapshot_symbol_by_runtime_address(session.snapshot(), frame.runtime_pc)) {
+    if (const auto symbol = mdbg::find_snapshot_symbol_by_runtime_address(
+            session.snapshot(), frame.runtime_pc, session.module_resolver())) {
       std::cout << '!' << symbol->name;
       if (symbol->offset != 0) {
         std::cout << "+0x" << std::hex << symbol->offset << std::dec;
@@ -27,8 +28,8 @@ void print_frame(const mdbg::CoreInspectionSession& session,
   } catch (const std::exception&) {
   }
   try {
-    if (const auto source =
-            mdbg::find_snapshot_source_by_runtime_address(session.snapshot(), frame.runtime_pc)) {
+    if (const auto source = mdbg::find_snapshot_source_by_runtime_address(
+            session.snapshot(), frame.runtime_pc, session.module_resolver())) {
       std::cout << ' ' << source->module_path << '!' << source->file << ':' << source->line;
       if (source->column != 0) std::cout << ':' << source->column;
     }
@@ -100,8 +101,8 @@ void print_help() {
                "  quit | q             exit the core session\n";
 }
 
-int run_session(const std::string& core_path) {
-  mdbg::CoreInspectionSession session(core_path);
+int run_session(const std::string& core_path, mdbg::SnapshotModuleResolver resolver) {
+  mdbg::CoreInspectionSession session(core_path, std::move(resolver));
   std::cout << "core signal " << session.snapshot().signal_number() << " tid "
             << session.snapshot().crashed_tid() << " frames " << session.trace().frames.size()
             << '\n';
@@ -176,15 +177,30 @@ int run_session(const std::string& core_path) {
   return 0;
 }
 
+void print_usage() {
+  std::cerr << "usage: mdbg-core [--module-map <recorded-path> <backing-path>]... "
+               "<core-file>\n";
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
-  if (argc != 2) {
-    std::cerr << "usage: mdbg-core <core-file>\n";
-    return 2;
-  }
   try {
-    return run_session(argv[1]);
+    mdbg::SnapshotModuleResolver resolver;
+    int index = 1;
+    while (index < argc && std::string(argv[index]) == "--module-map") {
+      if (index + 2 >= argc) {
+        print_usage();
+        return 2;
+      }
+      resolver.add_exact_mapping(argv[index + 1], argv[index + 2]);
+      index += 3;
+    }
+    if (index != argc - 1) {
+      print_usage();
+      return 2;
+    }
+    return run_session(argv[index], std::move(resolver));
   } catch (const std::exception& error) {
     std::cerr << "mdbg-core: " << error.what() << '\n';
     return 1;

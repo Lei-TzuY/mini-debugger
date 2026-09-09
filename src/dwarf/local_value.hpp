@@ -24,10 +24,18 @@ enum class LocalValueStorage {
   SnapshotRuntimeArtifact
 };
 
+struct LocalStructMemberType {
+  std::string name;
+  std::size_t offset;
+  std::size_t byte_size;
+  bool is_signed;
+};
+
 struct LocalPointeeType {
   std::size_t byte_size;
   bool is_signed;
   LocalValueKind kind{LocalValueKind::Integer};
+  std::vector<LocalStructMemberType> members{};
 };
 
 struct LocalStructMember {

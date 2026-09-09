@@ -127,11 +127,7 @@ __attribute__((noinline)) uint64_t inspect_indirect_local(uint64_t** ptr) {
 __attribute__((noinline)) uint64_t inspect_snapshot_artifact_local(
     const uint64_t* ptr) {
   const uint64_t artifact_local = *ptr ^ SNAPSHOT_ARTIFACT_XOR;
-  __asm__ volatile(".globl snapshot_artifact_local_probe\n"
-                   "snapshot_artifact_local_probe:\n"
-                   "nop\n"
-                   :
-                   : "D"(ptr));
+  __asm__ volatile("" : : "D"(ptr));
   if (snapshot_artifact_crash_enabled) {
     __asm__ volatile("xorq %%rax, %%rax\n"
                      "movq %%rax, (%%rax)\n"

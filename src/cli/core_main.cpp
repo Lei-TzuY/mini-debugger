@@ -23,7 +23,7 @@ void print_frame(const mdbg::CoreInspectionSession& session,
             << frame.index << " 0x" << std::hex << frame.runtime_pc << std::dec << ' '
             << frame.module_path;
   try {
-    if (const auto symbol = session.find_symbol(frame.runtime_pc)) {
+    if (const auto symbol = session.find_frame_symbol(frame)) {
       std::cout << '!' << symbol->name;
       if (symbol->offset != 0) {
         std::cout << "+0x" << std::hex << symbol->offset << std::dec;
@@ -32,7 +32,7 @@ void print_frame(const mdbg::CoreInspectionSession& session,
   } catch (const std::exception&) {
   }
   try {
-    if (const auto source = session.find_source(frame.runtime_pc)) {
+    if (const auto source = session.find_frame_source(frame)) {
       std::cout << ' ' << source->module_path << '!' << source->file << ':' << source->line;
       if (source->column != 0) std::cout << ':' << source->column;
     }
@@ -150,7 +150,7 @@ void print_selected_source_context(const mdbg::CoreInspectionSession& session,
                                    const mdbg::SourcePathResolver& source_paths) {
   const auto& frame = session.selected_frame();
   try {
-    if (const auto source = session.find_source(frame.runtime_pc)) {
+    if (const auto source = session.find_frame_source(frame)) {
       std::cout << source->module_path << '!' << source->file << ':' << source->line;
       if (source->column != 0) std::cout << ':' << source->column;
       std::cout << '\n';

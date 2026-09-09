@@ -85,6 +85,14 @@ std::string trim_left(std::string value) {
   return value;
 }
 
+std::string bounded_process_text(const char* data, std::size_t size) {
+  std::size_t length = 0;
+  while (length < size && data[length] != '\0') ++length;
+  std::string result(data, length);
+  while (!result.empty() && result.back() == ' ') result.pop_back();
+  return result;
+}
+
 std::string mapped_identity_path(const std::string& path) {
   std::error_code error;
   const auto canonical = std::filesystem::canonical(path, error);
@@ -330,6 +338,17 @@ void CoreSnapshot::parse() {
   if (crash_info_ && crash_info_->signal_number != signal_number_) {
     throw std::runtime_error("NT_SIGINFO and crashed NT_PRSTATUS disagree on signal identity");
   }
+  if (process_info_) {
+    if (process_info_->pid <= 0) {
+      throw std::runtime_error("NT_PRPSINFO has invalid process PID");
+    }
+    const auto process_thread = std::find_if(
+        threads_.begin(), threads_.end(),
+        [&](const CoreThreadSnapshot& thread) { return thread.tid == process_info_->pid; });
+    if (process_thread == threads_.end()) {
+      throw std::runtime_error("NT_PRPSINFO PID is not present in NT_PRSTATUS thread catalogue");
+    }
+  }
   if (load_segments_.empty()) throw std::runtime_error("ELF core lacks PT_LOAD memory");
   if (file_mappings_.empty()) throw std::runtime_error("ELF core lacks NT_FILE mappings");
   if (!mapping_for_address(static_cast<std::uintptr_t>(registers_.rip))) {
@@ -384,6 +403,23 @@ void CoreSnapshot::parse_notes(std::uint64_t offset, std::uint64_t size) {
         signal_number_ = thread_signal;
         has_registers_ = true;
       }
+      continue;
+    }
+
+    if (note.n_type == NT_PRPSINFO) {
+      if (process_info_) throw std::runtime_error("duplicate NT_PRPSINFO note");
+      if (note.n_descsz != sizeof(elf_prpsinfo)) {
+        throw std::runtime_error("unsupported x86-64 NT_PRPSINFO size");
+      }
+      const auto process =
+          read_struct<elf_prpsinfo>(bytes_, static_cast<std::size_t>(desc_offset));
+      process_info_ = CoreProcessInfo{
+          process.pr_pid,
+          process.pr_ppid,
+          process.pr_pgrp,
+          process.pr_sid,
+          bounded_process_text(process.pr_fname, sizeof(process.pr_fname)),
+          bounded_process_text(process.pr_psargs, sizeof(process.pr_psargs))};
       continue;
     }
 

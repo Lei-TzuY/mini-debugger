@@ -67,6 +67,15 @@ struct CoreCrashInfo {
   std::optional<std::uintptr_t> fault_address;
 };
 
+struct CoreProcessInfo {
+  pid_t pid;
+  pid_t parent_pid;
+  pid_t process_group_id;
+  pid_t session_id;
+  std::string file_name;
+  std::string command;
+};
+
 struct CoreThreadSnapshot {
   pid_t tid;
   int signal_number;
@@ -83,6 +92,9 @@ class CoreSnapshot {
   [[nodiscard]] int signal_number() const noexcept { return signal_number_; }
   [[nodiscard]] const std::optional<CoreCrashInfo>& crash_info() const noexcept {
     return crash_info_;
+  }
+  [[nodiscard]] const std::optional<CoreProcessInfo>& process_info() const noexcept {
+    return process_info_;
   }
   [[nodiscard]] const user_regs_struct& registers() const noexcept { return registers_; }
   [[nodiscard]] const std::vector<CoreThreadSnapshot>& threads() const noexcept {
@@ -117,6 +129,7 @@ class CoreSnapshot {
   std::vector<CoreFileMapping> file_mappings_;
   std::vector<CoreThreadSnapshot> threads_;
   std::optional<CoreCrashInfo> crash_info_;
+  std::optional<CoreProcessInfo> process_info_;
   user_regs_struct registers_{};
   pid_t crashed_tid_{-1};
   int signal_number_{0};

@@ -36,6 +36,9 @@ class CoreInspectionSession {
   [[nodiscard]] const std::optional<CoreCrashInfo>& crash_info() const noexcept {
     return snapshot_.crash_info();
   }
+  [[nodiscard]] const std::optional<CoreProcessInfo>& process_info() const noexcept {
+    return snapshot_.process_info();
+  }
   [[nodiscard]] const SnapshotInspectionTrace& trace() const noexcept { return trace_; }
   [[nodiscard]] pid_t selected_thread_tid() const noexcept { return selected_thread_tid_; }
   [[nodiscard]] const std::vector<CoreThreadSnapshot>& threads() const noexcept {

@@ -71,6 +71,17 @@ void print_crash(const mdbg::CoreInspectionSession& session) {
   std::cout << '\n';
 }
 
+void print_process(const mdbg::CoreInspectionSession& session) {
+  const auto& process = session.process_info();
+  if (!process) {
+    std::cout << "process metadata unavailable\n";
+    return;
+  }
+  std::cout << "process pid " << process->pid << " parent " << process->parent_pid
+            << " pgrp " << process->process_group_id << " sid " << process->session_id
+            << " file " << process->file_name << " command " << process->command << '\n';
+}
+
 void print_source_excerpt(const mdbg::SourcePathResolver& source_paths,
                           const std::string& file, std::uint64_t line,
                           const std::string& module_path) {
@@ -204,6 +215,7 @@ std::size_t parse_memory_length(const std::string& text) {
 void print_help() {
   std::cout << "read-only core commands:\n"
                "  crash                show kernel-recorded crash metadata\n"
+               "  process              show kernel-recorded process identity\n"
                "  threads              show immutable core thread contexts\n"
                "  thread <tid>         select an immutable core thread\n"
                "  bt | backtrace       show immutable snapshot frames\n"
@@ -242,6 +254,12 @@ int run_session(const std::string& core_path, mdbg::SnapshotModulePathResolver m
         std::string extra;
         if (input >> extra) throw std::invalid_argument("usage: crash");
         print_crash(session);
+        continue;
+      }
+      if (command == "process") {
+        std::string extra;
+        if (input >> extra) throw std::invalid_argument("usage: process");
+        print_process(session);
         continue;
       }
       if (command == "threads") {

@@ -100,6 +100,18 @@ First executable gate:
 
 Do not implement Phase 8 as a generic command-mode enum or presentation-only shell. The first slice must prove a real `core -> backtrace -> caller frame -> source value` workflow before the new phase is considered started.
 
+### P8-A: immutable core inspection session — complete
+
+Completed executable capability:
+
+- `CoreInspectionSession` owns one `CoreSnapshot`, one bounded immutable snapshot frame trace, and one selected frame index; it has no `Process`, `Debugger`, PID execution owner, resume path, or mutation API;
+- the dedicated `mdbg-core <core-file>` entry point is separate from the live `mdbg` command loop and exposes only read-only `bt`, `frame`, `print`, `help`, and `quit` commands; unknown live commands such as `continue` are rejected explicitly rather than routed through dummy execution state;
+- frame output preserves recorded module ownership and layers existing snapshot symbol/source resolution on top when that evidence is available; invalid immutable frame indices remain deterministic errors;
+- `print` delegates directly to the selected frame's existing snapshot local-value evaluator, so historical register/module/type ownership is unchanged and unsupported evidence keeps the Phase 7 fail-closed behavior;
+- real kernel-generated PIE and non-PIE cores from the compiler-proven formal-parameter fixture are driven through an actual `mdbg-core` subprocess under both permanent GCC and Clang-large lanes; the workflow requires crash and caller frames, selects caller frame 1, prints module-qualified `transformed = 0x458a30bf63ac1619`, rejects `continue`, rejects an out-of-range frame, and exits cleanly.
+
+Phase 8 remains the current frontier. The next slice must be selected from a concrete failing post-mortem workflow rather than by adding shell commands. One now-visible architectural gap is immutable multi-thread core ownership: `CoreSnapshot` currently owns only one register/TID/signal tuple even though real Linux process cores can contain multiple `NT_PRSTATUS` thread contexts. A future P8-B may promote that evidence into a read-only thread catalogue and thread-scoped frame selection only after a real kernel core proves the required note/identity semantics; it must not reuse live `Process`/`ThreadInfo` ownership.
+
 ## Selection rule
 
 Choose the smallest real post-mortem workflow that advances immutable inspection ownership. Do not start generic note enumeration, every Linux note type, multi-thread core selection, CLI cosmetics, or a fake live-debugger facade. Every new inspection feature must demonstrate which bytes/registers/module mappings it owns and must remain non-executable by construction.

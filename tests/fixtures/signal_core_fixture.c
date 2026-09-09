@@ -9,6 +9,14 @@
 #include <ucontext.h>
 #include <unistd.h>
 
+struct SignalRegisterPair {
+  uint64_t first;
+  uint64_t second;
+};
+
+#define SIGNAL_PAIR_FIRST UINT64_C(0x1122334455667788)
+#define SIGNAL_PAIR_SECOND UINT64_C(0x99aabbccddeeff00)
+
 volatile uintptr_t signal_core_ucontext_address = 0;
 volatile uintptr_t signal_core_saved_rip = 0;
 volatile uintptr_t signal_core_saved_rsp = 0;
@@ -71,22 +79,22 @@ static void* signal_sender(void* argument) {
   return NULL;
 }
 
-__attribute__((noinline, noreturn)) void signal_core_interrupted_application(void) {
+__attribute__((noinline, noreturn)) void signal_core_interrupted_application(
+    struct SignalRegisterPair interrupted_pair) {
   register uint64_t interrupted_register_local __asm__("r12") =
       signal_core_value_seed ^ UINT64_C(0xa5a55a5ac3c33c3c);
   double interrupted_fp_local = signal_core_fp_seed;
   signal_core_interrupted_ready = 1;
-  __asm__ volatile(
-      ".globl signal_core_interrupted_probe\n"
-      "signal_core_interrupted_probe:\n"
-      "pause\n"
-      "jmp signal_core_interrupted_probe\n"
-      ".globl signal_core_interrupted_probe_end\n"
-      "signal_core_interrupted_probe_end:\n"
-      : "+r"(interrupted_register_local), "+x"(interrupted_fp_local)
-      :
-      : "memory");
-  __builtin_unreachable();
+  for (;;) {
+    __asm__ volatile(
+        ".globl signal_core_interrupted_probe\n"
+        "signal_core_interrupted_probe:\n"
+        "pause\n"
+        : "+D"(interrupted_pair.first), "+S"(interrupted_pair.second),
+          "+r"(interrupted_register_local), "+x"(interrupted_fp_local)
+        :
+        : "memory");
+  }
 }
 
 int main(void) {
@@ -101,5 +109,7 @@ int main(void) {
 
   pthread_t sender;
   if (pthread_create(&sender, NULL, signal_sender, NULL) != 0) return 3;
-  signal_core_interrupted_application();
+  const struct SignalRegisterPair interrupted_pair = {SIGNAL_PAIR_FIRST,
+                                                       SIGNAL_PAIR_SECOND};
+  signal_core_interrupted_application(interrupted_pair);
 }

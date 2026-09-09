@@ -92,6 +92,12 @@ std::optional<LocalPointeeType> resolve_pointer_pointee_type(
       continue;
     }
     if (die.tag != kDwTagPointerType) return std::nullopt;
+    const auto* size = attribute(die, kDwAtByteSize);
+    const auto pointer_size = size == nullptr ? std::size_t{8}
+                                              : static_cast<std::size_t>(size->number);
+    if (pointer_size != 8) {
+      throw std::runtime_error("snapshot pointer type has an unsupported byte size");
+    }
     const auto* pointee = attribute(die, kDwAtType);
     if (pointee == nullptr || pointee->form != kDwFormRef4) {
       throw std::runtime_error("snapshot pointer has no supported DW_FORM_ref4 pointee");
@@ -313,11 +319,15 @@ std::optional<LocalScalarValue> inspect_snapshot_unit(
   }
 
   const auto floating_type = resolve_snapshot_floating_type(dies, type->number);
-  const auto value_type = floating_type ? *floating_type
-                                        : resolve_value_type(dies, type->number);
-  const auto pointee_type = value_type.kind == LocalValueKind::Pointer
-                                ? resolve_pointer_pointee_type(dies, type->number)
-                                : std::optional<LocalPointeeType>{};
+  const auto pointee_type = floating_type
+                                ? std::optional<LocalPointeeType>{}
+                                : resolve_pointer_pointee_type(dies, type->number);
+  const auto value_type = floating_type
+                              ? *floating_type
+                              : pointee_type
+                                    ? ValueType{sizeof(std::uintptr_t), false,
+                                                LocalValueKind::Pointer, {}}
+                                    : resolve_value_type(dies, type->number);
   std::vector<std::byte> location_expression;
   if (location->form == kDwFormExprloc) {
     location_expression = location->expression;

@@ -109,7 +109,7 @@ inline std::optional<SnapshotResolvedSymbol> find_snapshot_symbol_by_runtime_add
     const SnapshotModulePathResolver& module_paths) {
   const auto module_address =
       resolve_snapshot_module_address(snapshot, address, module_paths);
-  const ElfFile module(module_address.module_file_path);
+  const ElfFile module(module_paths.resolve_debug_file(module_address.module_path));
   const auto resolved = module.find_symbol_by_virtual_address(module_address.virtual_address);
   if (!resolved) return std::nullopt;
   return SnapshotResolvedSymbol{module_address.module_path, resolved->symbol.name,
@@ -127,7 +127,7 @@ inline std::optional<SnapshotResolvedSource> find_snapshot_source_by_runtime_add
     const SnapshotModulePathResolver& module_paths) {
   const auto module_address =
       resolve_snapshot_module_address(snapshot, address, module_paths);
-  const DwarfLineTable lines(module_address.module_file_path);
+  const DwarfLineTable lines(module_paths.resolve_debug_file(module_address.module_path));
   if (!lines.available()) return std::nullopt;
   const auto source = lines.find_virtual_address(module_address.virtual_address);
   if (!source) return std::nullopt;

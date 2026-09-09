@@ -33,6 +33,37 @@ std::string temp_path() {
   return pattern;
 }
 
+std::string temp_directory() {
+  char pattern[] = "/tmp/mdbg-core-debuglink-XXXXXX";
+  char* path = ::mkdtemp(pattern);
+  if (path == nullptr) throw std::runtime_error("mkdtemp failed for debuglink fixture");
+  return path;
+}
+
+void run_command(const std::vector<std::string>& arguments) {
+  require(!arguments.empty(), "tool command must not be empty");
+  const pid_t child = ::fork();
+  if (child == -1) throw std::runtime_error("fork failed for tool command");
+  if (child == 0) {
+    std::vector<char*> argv;
+    argv.reserve(arguments.size() + 1);
+    for (const auto& argument : arguments) {
+      argv.push_back(const_cast<char*>(argument.c_str()));
+    }
+    argv.push_back(nullptr);
+    ::execvp(argv.front(), argv.data());
+    _exit(127);
+  }
+
+  int status = 0;
+  pid_t waited;
+  do {
+    waited = ::waitpid(child, &status, 0);
+  } while (waited == -1 && errno == EINTR);
+  require(waited == child && WIFEXITED(status) && WEXITSTATUS(status) == 0,
+          "tool command failed: " + arguments.front());
+}
+
 std::vector<std::byte> read_file_bytes(const std::string& path) {
   std::ifstream input(path, std::ios::binary);
   if (!input) throw std::runtime_error("failed to open core file: " + path);
@@ -148,9 +179,45 @@ GeneratedCore generate_core(const std::string& fixture) {
   return GeneratedCore{core_path, child, static_cast<pid_t>(sibling)};
 }
 
+struct DebugArtifacts {
+  std::string directory;
+  std::string runtime_module;
+  std::string debug_file;
+  std::string bad_debug_file;
+};
+
+DebugArtifacts make_debuglink_artifacts(const std::string& fixture) {
+  DebugArtifacts result;
+  result.directory = temp_directory();
+  result.runtime_module = result.directory + "/snapshot-runtime";
+  result.debug_file = result.directory + "/snapshot-runtime.debug";
+  const auto bad_directory = result.directory + "/bad";
+  result.bad_debug_file = bad_directory + "/snapshot-runtime.debug";
+
+  std::filesystem::copy_file(fixture, result.runtime_module,
+                             std::filesystem::copy_options::overwrite_existing);
+  std::filesystem::permissions(result.runtime_module,
+                               std::filesystem::status(fixture).permissions());
+  run_command({"objcopy", "--only-keep-debug", fixture, result.debug_file});
+  run_command({"objcopy", "--strip-debug", result.runtime_module});
+  run_command({"objcopy", "--add-gnu-debuglink=" + result.debug_file,
+               result.runtime_module});
+
+  std::filesystem::create_directories(bad_directory);
+  std::filesystem::copy_file(result.debug_file, result.bad_debug_file,
+                             std::filesystem::copy_options::overwrite_existing);
+  std::ofstream corrupt(result.bad_debug_file, std::ios::binary | std::ios::app);
+  const char marker = '\x7f';
+  corrupt.write(&marker, 1);
+  if (!corrupt) throw std::runtime_error("failed to corrupt debug companion");
+  return result;
+}
+
 std::string run_core_cli(const std::string& cli, const GeneratedCore& core,
                          const std::string& recorded_module = {},
-                         const std::string& local_module = {}) {
+                         const std::string& local_module = {},
+                         const std::string& debug_module = {},
+                         const std::string& debug_file = {}) {
   int input_pipe[2];
   int output_pipe[2];
   if (::pipe(input_pipe) != 0 || ::pipe(output_pipe) != 0) {
@@ -167,12 +234,26 @@ std::string run_core_cli(const std::string& cli, const GeneratedCore& core,
     ::close(input_pipe[1]);
     ::close(output_pipe[0]);
     ::close(output_pipe[1]);
+
+    std::vector<std::string> arguments{cli};
     if (!recorded_module.empty()) {
-      ::execl(cli.c_str(), cli.c_str(), "--substitute-module-path",
-              recorded_module.c_str(), local_module.c_str(), core.path.c_str(), nullptr);
-    } else {
-      ::execl(cli.c_str(), cli.c_str(), core.path.c_str(), nullptr);
+      arguments.push_back("--substitute-module-path");
+      arguments.push_back(recorded_module);
+      arguments.push_back(local_module);
     }
+    if (!debug_module.empty()) {
+      arguments.push_back("--debug-file");
+      arguments.push_back(debug_module);
+      arguments.push_back(debug_file);
+    }
+    arguments.push_back(core.path);
+    std::vector<char*> argv;
+    argv.reserve(arguments.size() + 1);
+    for (const auto& argument : arguments) {
+      argv.push_back(const_cast<char*>(argument.c_str()));
+    }
+    argv.push_back(nullptr);
+    ::execv(cli.c_str(), argv.data());
     _exit(127);
   }
 
@@ -216,7 +297,7 @@ std::string run_core_cli(const std::string& cli, const GeneratedCore& core,
     waited = ::waitpid(child, &status, 0);
   } while (waited == -1 && errno == EINTR);
   require(waited == child && WIFEXITED(status) && WEXITSTATUS(status) == 0,
-          "mdbg-core did not exit cleanly");
+          "mdbg-core did not exit cleanly; output: " + output);
   return output;
 }
 
@@ -284,6 +365,34 @@ void test_core_session(const std::string& fixture, const std::string& cli) {
   std::remove(core.path.c_str());
 }
 
+void test_separate_debug_file(const std::string& fixture, const std::string& cli) {
+  const auto artifacts = make_debuglink_artifacts(fixture);
+  GeneratedCore core{};
+  try {
+    core = generate_core(artifacts.runtime_module);
+    const auto without_debug = run_core_cli(cli, core);
+    require(without_debug.find("#1 0x") != std::string::npos,
+            "stripped runtime ELF lost .eh_frame caller recovery");
+    require(without_debug.find(kExpectedValue) == std::string::npos,
+            "stripped runtime ELF unexpectedly retained caller DWARF value evidence");
+
+    const auto with_debug = run_core_cli(cli, core, {}, {}, artifacts.runtime_module,
+                                         artifacts.debug_file);
+    require_core_session_output(with_debug, core, artifacts.runtime_module);
+
+    const auto bad_debug = run_core_cli(cli, core, {}, {}, artifacts.runtime_module,
+                                        artifacts.bad_debug_file);
+    require(bad_debug.find("debug companion CRC mismatch") != std::string::npos,
+            "corrupted debug companion was not rejected by GNU debuglink identity");
+  } catch (...) {
+    if (!core.path.empty()) std::remove(core.path.c_str());
+    std::filesystem::remove_all(artifacts.directory);
+    throw;
+  }
+  if (!core.path.empty()) std::remove(core.path.c_str());
+  std::filesystem::remove_all(artifacts.directory);
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -293,6 +402,7 @@ int main(int argc, char** argv) {
   }
   try {
     test_core_session(argv[1], argv[2]);
+    test_separate_debug_file(argv[1], argv[2]);
     std::cout << "core inspection session integration passed\n";
   } catch (const std::exception& error) {
     std::cerr << "core inspection session failure: " << error.what() << '\n';

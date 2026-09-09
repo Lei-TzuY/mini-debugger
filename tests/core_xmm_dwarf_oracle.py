@@ -197,22 +197,22 @@ def verify(function_name, probe_name, loc_text, records, symbols):
     )
 
 
-def verify_stack_local(function_name, probe_name, loc_text, records, symbols):
+def verify_stack_local(function_name, variable_name, probe_name, loc_text, records, symbols):
     if probe_name not in symbols:
         raise RuntimeError(f"missing probe symbol: {probe_name}")
     probe = symbols[probe_name]
-    location = find_variable_location(records, function_name, "stack_local")
+    location = find_variable_location(records, function_name, variable_name)
     base = frame_base_kind(records, function_name)
     direct = direct_fbreg(location)
     if direct is not None:
         print(
-            f"{function_name}: stack_local probe=0x{probe:x} direct "
+            f"{function_name}: {variable_name} probe=0x{probe:x} direct "
             f"DW_OP_fbreg {direct} frame_base={base}"
         )
         return
     offset, begin, end = list_fbreg(location, loc_text, probe)
     print(
-        f"{function_name}: stack_local probe=0x{probe:x} "
+        f"{function_name}: {variable_name} probe=0x{probe:x} "
         f"range=[0x{begin:x},0x{end:x}) DW_OP_fbreg {offset} frame_base={base}"
     )
 
@@ -226,7 +226,17 @@ def main():
     records = parse_dies(info)
     symbols = symbol_addresses(path)
     verify("crash_with_xmm", "snapshot_xmm_crash_probe", loc, records, symbols)
-    verify_stack_local("crash_with_xmm", "snapshot_xmm_crash_probe", loc, records, symbols)
+    verify_stack_local(
+        "crash_with_xmm", "stack_local", "snapshot_xmm_crash_probe", loc, records, symbols
+    )
+    verify_stack_local(
+        "caller_with_stack_local",
+        "caller_stack_local",
+        "snapshot_caller_resume_probe",
+        loc,
+        records,
+        symbols,
+    )
     verify("sibling_hold_xmm", "snapshot_xmm_sibling_probe", loc, records, symbols)
 
 

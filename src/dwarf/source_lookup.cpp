@@ -64,10 +64,6 @@ std::uint64_t snapshot_frame_base(
     const CoreSnapshot& snapshot, const SnapshotInspectionFrameContext& frame,
     const SnapshotModulePathResolver& module_paths,
     const SnapshotModuleAddress& owner) {
-  if (frame.index != 0) {
-    throw std::runtime_error(
-        "snapshot DW_OP_fbreg is currently bounded to compiler-proven frame zero");
-  }
   const auto* frame_base = attribute(dies[subprogram], kDwAtFrameBase);
   if (frame_base == nullptr || frame_base->form != kDwFormExprloc ||
       frame_base->expression.size() != 1) {
@@ -81,6 +77,10 @@ std::uint64_t snapshot_frame_base(
     if (!frame.registers.rsp) {
       throw std::runtime_error(
           "snapshot DW_OP_reg7 frame base requires immutable RSP ownership");
+    }
+    if (*frame.registers.rsp != frame.stack_pointer) {
+      throw std::logic_error(
+          "snapshot inspection-frame RSP ownership does not match its stack pointer");
     }
     return *frame.registers.rsp;
   }
@@ -417,7 +417,7 @@ std::optional<LocalScalarValue> inspect_snapshot_unit(
                                           value_type, location_expression);
   }
 
-  if (frame.index == 0 && opcode == kDwOpFbreg) {
+  if (opcode == kDwOpFbreg) {
     if (value_type.kind != LocalValueKind::Integer || value_type.byte_size == 0 ||
         value_type.byte_size > sizeof(std::uint64_t)) {
       throw std::runtime_error(
@@ -437,7 +437,6 @@ std::optional<LocalScalarValue> inspect_snapshot_unit(
         value_type.byte_size);
     return materialize_snapshot_memory_value(owner, name, value_type, memory);
   }
-
   if (opcode == kDwOpBreg3) {
     if (value_type.kind == LocalValueKind::Structure ||
         value_type.kind == LocalValueKind::Floating) {
@@ -464,7 +463,7 @@ std::optional<LocalScalarValue> inspect_snapshot_unit(
           "snapshot frame-zero local requires compiler-proven XMM0, DW_OP_fbreg, or DW_OP_addr ownership");
     }
     throw std::runtime_error(
-        "snapshot caller local requires a compiler-proven DW_OP_breg3 scalar or DW_OP_addr memory form");
+        "snapshot caller local requires compiler-proven DW_OP_fbreg, DW_OP_breg3, or DW_OP_addr ownership");
   }
   if (value_type.kind != LocalValueKind::Structure &&
       (value_type.byte_size == 0 || value_type.byte_size > sizeof(std::uint64_t))) {

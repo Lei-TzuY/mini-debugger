@@ -58,6 +58,22 @@ __attribute__((noinline, noreturn)) static void crash_with_xmm(void) {
   __builtin_unreachable();
 }
 
+static void (*volatile crash_target)(void) = crash_with_xmm;
+
+__attribute__((noinline, noreturn)) static void caller_with_stack_local(void) {
+  uint64_t caller_stack_local = UINT64_C(0xcafebabedeadbeef);
+  __asm__ volatile("" : "+m"(caller_stack_local) : : "memory");
+  crash_target();
+  __asm__ volatile(
+      ".globl snapshot_caller_resume_probe\n"
+      "snapshot_caller_resume_probe:\n"
+      "nop\n"
+      : "+m"(caller_stack_local)
+      :
+      : "memory");
+  __builtin_unreachable();
+}
+
 int main(int argc, char** argv) {
   if (argc != 2) return 2;
 
@@ -72,5 +88,5 @@ int main(int argc, char** argv) {
   fprintf(ready, "%d\n", (int)sibling_tid);
   if (fclose(ready) != 0) return 5;
 
-  crash_with_xmm();
+  caller_with_stack_local();
 }

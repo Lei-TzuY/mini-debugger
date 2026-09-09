@@ -1,9 +1,13 @@
 #include "snapshot/session.hpp"
 
+#include <sys/wait.h>
+
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <iostream>
 #include <stdexcept>
 #include <string>
@@ -13,6 +17,7 @@ namespace {
 constexpr double kCrashValue = 1234.25;
 constexpr double kSiblingValue = 9876.5;
 constexpr std::uint64_t kStackLocalValue = UINT64_C(0x4f3e2d1c0b9a8877);
+constexpr std::uint64_t kCallerStackLocalValue = UINT64_C(0xcafebabedeadbeef);
 constexpr std::uint64_t kPointerPointeeValue = UINT64_C(0x8877665544332211);
 constexpr std::uint64_t kAggregateFirst = UINT64_C(0x0123456789abcdef);
 constexpr std::uint64_t kAggregateSecond = UINT64_C(0xfedcba9876543210);
@@ -36,6 +41,38 @@ std::uint64_t xmm_low_u64(const mdbg::CoreFloatingPointState& state,
   return raw;
 }
 
+std::string shell_quote(const std::string& text) {
+  std::string result{"'"};
+  for (const char ch : text) {
+    if (ch == '\'') {
+      result += "'\\''";
+    } else {
+      result += ch;
+    }
+  }
+  result += '\'';
+  return result;
+}
+
+std::string run_core_cli(const std::string& executable,
+                         const std::string& core_path) {
+  const std::string command =
+      "printf 'frame 1\\nprint caller_stack_local\\nquit\\n' | " +
+      shell_quote(executable) + " " + shell_quote(core_path) + " 2>&1";
+  FILE* pipe = ::popen(command.c_str(), "r");
+  if (pipe == nullptr) throw std::runtime_error("failed to launch mdbg-core subprocess");
+
+  std::string output;
+  std::array<char, 512> buffer{};
+  while (std::fgets(buffer.data(), static_cast<int>(buffer.size()), pipe) != nullptr) {
+    output += buffer.data();
+  }
+  const int status = ::pclose(pipe);
+  require(status != -1 && WIFEXITED(status) && WEXITSTATUS(status) == 0,
+          "mdbg-core subprocess did not exit cleanly: " + output);
+  return output;
+}
+
 void require_source_value(const mdbg::LocalScalarValue& value, double expected,
                           const std::string& context) {
   require(value.name == "xmm_value", context + " changed the source-value name");
@@ -54,6 +91,37 @@ void require_stack_local(const mdbg::CoreInspectionSession& session) {
           "stack-local lookup did not recover the genuine core stack value");
   require(value.storage == mdbg::LocalValueStorage::SnapshotCoreMemory,
           "stack-local lookup did not preserve immutable core-memory provenance");
+}
+
+void require_caller_stack_local(mdbg::CoreInspectionSession& session) {
+  require(session.trace().frames.size() > 1,
+          "genuine core did not recover the historical caller frame");
+  session.select_frame(1);
+  require(session.selected_frame_index() == 1,
+          "core session did not select the historical caller frame");
+
+  const auto value = session.inspect_value("caller_stack_local");
+  require(value.name == "caller_stack_local",
+          "caller stack-local lookup changed the source name");
+  require(value.kind == mdbg::LocalValueKind::Integer &&
+              value.byte_size == sizeof(std::uint64_t) && !value.is_signed,
+          "caller stack-local lookup lost uint64_t type identity");
+  require(value.raw_value == kCallerStackLocalValue,
+          "caller stack-local lookup did not recover historical stack ownership");
+  require(value.storage == mdbg::LocalValueStorage::SnapshotCoreMemory,
+          "caller stack-local lookup did not preserve immutable core-memory provenance");
+}
+
+void require_value_unavailable(const mdbg::CoreInspectionSession& session,
+                               const std::string& name,
+                               const std::string& context) {
+  bool unavailable = false;
+  try {
+    (void)session.inspect_value(name);
+  } catch (const std::exception&) {
+    unavailable = true;
+  }
+  require(unavailable, context + " unexpectedly revived stale local ownership");
 }
 
 void require_pointer_dereference(const mdbg::CoreInspectionSession& session) {
@@ -163,19 +231,41 @@ int main(int argc, char** argv) {
     require_stack_local(session);
     require_pointer_dereference(session);
     require_aggregate_pointer_dereference(session);
+    require_caller_stack_local(session);
 
     session.select_thread(sibling_tid);
     require(session.selected_thread_tid() == sibling_tid,
             "core thread selection did not select the sibling TID");
     require(session.selected_frame_index() == 0,
             "core thread selection did not reset to sibling frame 0");
+    require_value_unavailable(session, "caller_stack_local",
+                              "sibling-thread frame selection");
     require_source_value(session.inspect_value("xmm_value"), kSiblingValue,
                          "sibling-thread frame 0");
 
-    std::cout << "core XMM/stack/pointer source-value integration passed\n";
+    session.select_thread(crash_tid);
+    require(session.selected_thread_tid() == crash_tid &&
+                session.selected_frame_index() == 0,
+            "returning to the crash thread did not reset historical frame selection");
+    require_value_unavailable(session, "caller_stack_local",
+                              "crash-thread frame-zero selection");
+    require_caller_stack_local(session);
+
+    const auto core_cli =
+        (std::filesystem::path(argv[0]).parent_path() / "mdbg-core").string();
+    const auto cli_output = run_core_cli(core_cli, argv[1]);
+    require(cli_output.find("selected frame 1") != std::string::npos,
+            "mdbg-core did not expose historical frame selection");
+    require(cli_output.find("caller_stack_local = 0xcafebabedeadbeef") !=
+                std::string::npos,
+            "mdbg-core did not render the historical caller stack local");
+    require(cli_output.find("[value-core]") != std::string::npos,
+            "mdbg-core lost immutable core-memory provenance for caller local");
+
+    std::cout << "core XMM/stack/pointer/caller source-value integration passed\n";
   } catch (const std::exception& error) {
-    std::cerr << "core XMM/stack/pointer source-value integration failure: " << error.what()
-              << '\n';
+    std::cerr << "core XMM/stack/pointer/caller source-value integration failure: "
+              << error.what() << '\n';
     return 1;
   }
   return 0;

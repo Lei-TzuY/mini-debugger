@@ -72,16 +72,24 @@ bool trace_has_symbol(const mdbg::CoreInspectionSession& session,
   return false;
 }
 
-bool trace_has_context(const mdbg::CoreInspectionSession& session,
-                       std::uintptr_t instruction_pointer,
-                       std::uintptr_t stack_pointer) {
+const mdbg::SnapshotInspectionFrameContext* trace_context(
+    const mdbg::CoreInspectionSession& session, std::uintptr_t instruction_pointer,
+    std::uintptr_t stack_pointer) {
   for (const auto& frame : session.trace().frames) {
     if (frame.runtime_pc == instruction_pointer &&
         frame.stack_pointer == stack_pointer) {
-      return true;
+      return &frame;
     }
   }
-  return false;
+  return nullptr;
+}
+
+const mdbg::SnapshotInspectionFrameContext* trace_stack_boundary(
+    const mdbg::CoreInspectionSession& session, std::uintptr_t stack_pointer) {
+  for (const auto& frame : session.trace().frames) {
+    if (frame.stack_pointer == stack_pointer) return &frame;
+  }
+  return nullptr;
 }
 
 void print_evidence(const mdbg::CoreInspectionSession& session,
@@ -112,8 +120,12 @@ void print_evidence(const mdbg::CoreInspectionSession& session,
                        static_cast<std::int64_t>(frame.stack_pointer);
     std::cout << "  frame #" << frame.index << " rip=0x" << std::hex
               << frame.runtime_pc << " rsp=0x" << frame.stack_pointer << std::dec
-              << " ucontext-rsp=" << delta << " module=" << frame.module_path
-              << " symbol=" << symbol_name << '\n';
+              << " ucontext-rsp=" << delta
+              << " pc-owner="
+              << (frame.pc_ownership == mdbg::SnapshotFramePcOwnership::ExactInstruction
+                      ? "exact"
+                      : "return")
+              << " module=" << frame.module_path << " symbol=" << symbol_name << '\n';
   }
 }
 
@@ -170,15 +182,37 @@ int main(int argc, char** argv) {
                 saved_rip < interrupted_end,
             "saved signal RIP is outside the explicit interrupted application probe range");
     require(trace_has_symbol(session, "signal_core_crash_probe"),
-            "ordinary core unwind lost the signal-handler crash probe");
+            "snapshot unwind lost the signal-handler crash probe");
     require(trace_has_symbol(session, "signal_core_handler_probe"),
-            "ordinary core unwind lost the signal handler probe");
-    require(!session.trace().frames.empty() &&
-                session.trace().frames.back().stack_pointer == ucontext_address,
-            "ordinary unwind did not stop at the kernel-provided signal ucontext boundary");
+            "snapshot unwind lost the signal handler probe");
 
-    require(trace_has_context(session, saved_rip, saved_rsp),
-            "ordinary CFI did not cross the genuine signal frame to the interrupted application context");
+    const auto* boundary = trace_stack_boundary(session, ucontext_address);
+    require(boundary != nullptr,
+            "snapshot unwind lost the kernel-provided signal ucontext boundary");
+    require(boundary->pc_ownership == mdbg::SnapshotFramePcOwnership::ReturnAddress,
+            "signal-restorer boundary unexpectedly owns an exact instruction PC");
+    require(boundary->index + 1 < session.trace().frames.size(),
+            "snapshot unwind stopped before restoring the interrupted application context");
+
+    const auto* restored = trace_context(session, saved_rip, saved_rsp);
+    require(restored != nullptr,
+            "snapshot unwind did not cross the genuine signal frame to the interrupted application context");
+    require(restored->index == boundary->index + 1,
+            "restored interrupted context does not immediately follow the signal-frame boundary");
+    require(restored->pc_ownership == mdbg::SnapshotFramePcOwnership::ExactInstruction,
+            "signal-restored interrupted PC is incorrectly owned as a return address");
+    require(mdbg::snapshot_frame_lookup_pc(*restored) == saved_rip,
+            "signal-restored interrupted PC was incorrectly normalized as a historical return address");
+    require(restored->frame_pointer.has_value() && *restored->frame_pointer == saved_rbp,
+            "signal-restored RBP does not match the kernel ucontext oracle");
+    require(restored->registers.rbx.has_value() && *restored->registers.rbx == saved_rbx,
+            "signal-restored RBX does not match the kernel ucontext oracle");
+
+    const auto restored_symbol = session.find_frame_symbol(*restored);
+    require(restored_symbol && restored_symbol->name == "signal_core_interrupted_probe",
+            "signal-restored exact PC does not resolve to the interrupted application probe");
+    require(trace_has_symbol(session, "main"),
+            "ordinary CFI did not resume beyond the signal-restored application context");
 
     std::cout << "genuine signal-frame core integration passed\n";
   } catch (const std::exception& error) {

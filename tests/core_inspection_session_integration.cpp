@@ -12,6 +12,7 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <vector>
 
 namespace {
 
@@ -80,7 +81,14 @@ GeneratedCore generate_core(const std::string& fixture) {
   return GeneratedCore{core_path, child, static_cast<pid_t>(sibling)};
 }
 
-std::string run_core_cli(const std::string& cli, const GeneratedCore& core) {
+struct CliResult {
+  int exit_code;
+  std::string output;
+};
+
+CliResult run_core_cli_process(const std::string& cli,
+                               const std::vector<std::string>& arguments,
+                               const std::string& script) {
   int input_pipe[2];
   int output_pipe[2];
   if (::pipe(input_pipe) != 0 || ::pipe(output_pipe) != 0) {
@@ -97,24 +105,19 @@ std::string run_core_cli(const std::string& cli, const GeneratedCore& core) {
     ::close(input_pipe[1]);
     ::close(output_pipe[0]);
     ::close(output_pipe[1]);
-    ::execl(cli.c_str(), cli.c_str(), core.path.c_str(), nullptr);
+    std::vector<char*> argv;
+    argv.reserve(arguments.size() + 2);
+    argv.push_back(const_cast<char*>(cli.c_str()));
+    for (const auto& argument : arguments) {
+      argv.push_back(const_cast<char*>(argument.c_str()));
+    }
+    argv.push_back(nullptr);
+    ::execv(cli.c_str(), argv.data());
     _exit(127);
   }
 
   ::close(input_pipe[0]);
   ::close(output_pipe[1]);
-  const std::string script =
-      "threads\n"
-      "thread " + std::to_string(core.sibling_tid) + "\n"
-      "bt\n"
-      "thread " + std::to_string(core.crash_tid) + "\n"
-      "bt\n"
-      "frame 1\n"
-      "print transformed\n"
-      "continue\n"
-      "thread 999999999\n"
-      "frame 999\n"
-      "quit\n";
   std::size_t offset = 0;
   while (offset < script.size()) {
     const auto count = ::write(input_pipe[1], script.data() + offset, script.size() - offset);
@@ -140,9 +143,28 @@ std::string run_core_cli(const std::string& cli, const GeneratedCore& core) {
   do {
     waited = ::waitpid(child, &status, 0);
   } while (waited == -1 && errno == EINTR);
-  require(waited == child && WIFEXITED(status) && WEXITSTATUS(status) == 0,
-          "mdbg-core did not exit cleanly");
-  return output;
+  require(waited == child && WIFEXITED(status), "mdbg-core did not exit normally");
+  return CliResult{WEXITSTATUS(status), std::move(output)};
+}
+
+std::string session_script(const GeneratedCore& core) {
+  return "threads\n"
+         "thread " + std::to_string(core.sibling_tid) + "\n"
+         "bt\n"
+         "thread " + std::to_string(core.crash_tid) + "\n"
+         "bt\n"
+         "frame 1\n"
+         "print transformed\n"
+         "continue\n"
+         "thread 999999999\n"
+         "frame 999\n"
+         "quit\n";
+}
+
+std::string run_core_cli(const std::string& cli, const GeneratedCore& core) {
+  const auto result = run_core_cli_process(cli, {core.path}, session_script(core));
+  require(result.exit_code == 0, "mdbg-core did not exit cleanly");
+  return result.output;
 }
 
 void test_core_session(const std::string& fixture, const std::string& cli) {
@@ -186,6 +208,42 @@ void test_core_session(const std::string& fixture, const std::string& cli) {
   std::remove(core.path.c_str());
 }
 
+void test_relocated_core_module_mapping(const std::string& fixture,
+                                        const std::string& cli) {
+  const auto recorded_path = temp_path();
+  std::filesystem::copy_file(fixture, recorded_path,
+                             std::filesystem::copy_options::overwrite_existing);
+  std::filesystem::permissions(recorded_path,
+                               std::filesystem::status(fixture).permissions());
+  const auto core = generate_core(recorded_path);
+  std::remove(recorded_path.c_str());
+
+  try {
+    const auto no_map = run_core_cli_process(cli, {core.path}, "quit\n");
+    require(no_map.exit_code != 0,
+            "relocated core unexpectedly resolved its deleted recorded module path");
+
+    const auto mapped = run_core_cli_process(
+        cli, {"--module-map", recorded_path, fixture, core.path},
+        "bt\nframe 1\nprint transformed\nquit\n");
+    require(mapped.exit_code == 0,
+            "explicit core module mapping did not restore the read-only session\n" +
+                mapped.output);
+    require(mapped.output.find(recorded_path + "!" + kExpectedCaller) !=
+                std::string::npos,
+            "mapped core session lost the recorded NT_FILE module identity");
+    require(mapped.output.find("!transformed = " + std::string(kExpectedValue)) !=
+                std::string::npos,
+            "mapped core session did not recover caller source-value inspection");
+    require(mapped.output.find(fixture + "!") == std::string::npos,
+            "mapped core session leaked the local backing path as historical module identity");
+  } catch (...) {
+    std::remove(core.path.c_str());
+    throw;
+  }
+  std::remove(core.path.c_str());
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -195,6 +253,7 @@ int main(int argc, char** argv) {
   }
   try {
     test_core_session(argv[1], argv[2]);
+    test_relocated_core_module_mapping(argv[1], argv[2]);
     std::cout << "core inspection session integration passed\n";
   } catch (const std::exception& error) {
     std::cerr << "core inspection session failure: " << error.what() << '\n';

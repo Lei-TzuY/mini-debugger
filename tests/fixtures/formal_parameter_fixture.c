@@ -16,6 +16,13 @@
 #define INDIRECT_LOCAL_XOR UINT64_C(0x55aa00ff33cc6699)
 #define INLINE_LOCAL_EXPECTED UINT64_C(0x02146638cadcae70)
 #define SNAPSHOT_FILE_SCALAR_EXPECTED UINT64_C(0x6a09e667f3bcc909)
+#define SNAPSHOT_AGGREGATE_FIRST UINT64_C(0xbb67ae8584caa73b)
+#define SNAPSHOT_AGGREGATE_SECOND UINT64_C(0x3c6ef372fe94f82b)
+
+struct SnapshotFileAggregate {
+  uint64_t first;
+  uint64_t second;
+};
 
 volatile uint64_t parameter_seed = UINT64_C(0x1122334455667788);
 volatile uint64_t inline_seed = INLINE_LOCAL_EXPECTED;
@@ -76,8 +83,10 @@ __attribute__((noinline)) uint64_t clobber_argument_registers(
 
 __attribute__((noinline)) uint64_t inspect_entry_parameter(uint64_t entry_parameter) {
   static const uint64_t snapshot_file_scalar = SNAPSHOT_FILE_SCALAR_EXPECTED;
+  static const struct SnapshotFileAggregate snapshot_file_aggregate = {
+      SNAPSHOT_AGGREGATE_FIRST, SNAPSHOT_AGGREGATE_SECOND};
   uint64_t transformed = entry_parameter ^ ENTRY_PARAMETER_XOR;
-  __asm__ volatile("" : : "m"(snapshot_file_scalar) : "memory");
+  __asm__ volatile("" : : "m"(snapshot_file_scalar), "m"(snapshot_file_aggregate) : "memory");
   const uint64_t side_effect = clobber_argument_registers(1, 2, 3, 4, 5, 6);
   __asm__ volatile("nop" ::: "memory");
   __asm__ volatile(".globl transformed_local_probe\n"

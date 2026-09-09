@@ -37,6 +37,46 @@ std::uint64_t decode_snapshot_scalar(const SnapshotMemoryRead& memory,
   return raw;
 }
 
+LocalScalarValue materialize_snapshot_memory_value(
+    const SnapshotModuleAddress& owner, std::string_view name,
+    const ValueType& value_type, const SnapshotMemoryRead& memory) {
+  LocalScalarValue result;
+  if (value_type.kind == LocalValueKind::Structure) {
+    if (value_type.byte_size == 0 || value_type.byte_size > kMaxLocalStructSize ||
+        memory.bytes.size() != value_type.byte_size) {
+      throw std::runtime_error("snapshot aggregate bytes exceed the bounded structure model");
+    }
+    result = LocalScalarValue{owner.module_path, std::string(name), 0,
+                              value_type.byte_size, false,
+                              LocalValueKind::Structure};
+    result.members.reserve(value_type.members.size());
+    for (const auto& member : value_type.members) {
+      result.members.push_back(LocalStructMember{
+          member.name,
+          decode_integer(memory.bytes, member.offset, member.integer.byte_size),
+          member.integer.byte_size, member.integer.is_signed});
+    }
+  } else {
+    result = LocalScalarValue{
+        owner.module_path, std::string(name),
+        decode_snapshot_scalar(memory, value_type.byte_size), value_type.byte_size,
+        value_type.is_signed, value_type.kind};
+  }
+
+  if (memory.provenance == SnapshotMemoryProvenance::Core) {
+    result.storage = LocalValueStorage::SnapshotCoreMemory;
+  } else {
+    if (memory.module_path != owner.module_path) {
+      throw std::logic_error("snapshot local artifact ownership changed during value read");
+    }
+    result.storage = LocalValueStorage::SnapshotRuntimeArtifact;
+    result.storage_module_path = memory.module_path;
+    result.storage_file_path = memory.module_file_path;
+    result.storage_file_offset = memory.artifact_file_offset;
+  }
+  return result;
+}
+
 std::optional<LocalScalarValue> inspect_snapshot_caller_unit(
     const DebugSections& sections, const CoreSnapshot& snapshot,
     const SnapshotInspectionFrameContext& frame,
@@ -122,13 +162,17 @@ std::optional<LocalScalarValue> inspect_snapshot_caller_unit(
     throw std::runtime_error("local value has no supported DW_AT_location form");
   }
 
-  if (value_type.kind == LocalValueKind::Structure || location_expression.empty()) {
+  if (location_expression.empty()) {
     throw std::runtime_error(
-        "snapshot caller local requires a compiler-proven scalar location form");
+        "snapshot caller local requires a compiler-proven location form");
   }
 
   const auto opcode = std::to_integer<std::uint8_t>(location_expression.front());
   if (opcode == kDwOpBreg3) {
+    if (value_type.kind == LocalValueKind::Structure) {
+      throw std::runtime_error(
+          "snapshot caller DW_OP_breg3 requires a scalar value");
+    }
     if (!frame.registers.rbx) {
       throw std::runtime_error(
           "snapshot caller DW_OP_breg3 requires CFI-recovered historical RBX");
@@ -143,10 +187,15 @@ std::optional<LocalScalarValue> inspect_snapshot_caller_unit(
 
   if (opcode != kDwOpAddr) {
     throw std::runtime_error(
-        "snapshot caller local requires a compiler-proven DW_OP_breg3 or DW_OP_addr scalar form");
+        "snapshot caller local requires a compiler-proven DW_OP_breg3 scalar or DW_OP_addr memory form");
   }
-  if (value_type.byte_size == 0 || value_type.byte_size > sizeof(std::uint64_t)) {
+  if (value_type.kind != LocalValueKind::Structure &&
+      (value_type.byte_size == 0 || value_type.byte_size > sizeof(std::uint64_t))) {
     throw std::runtime_error("snapshot DW_OP_addr scalar width exceeds the bounded reader");
+  }
+  if (value_type.kind == LocalValueKind::Structure &&
+      (value_type.byte_size == 0 || value_type.byte_size > kMaxLocalStructSize)) {
+    throw std::runtime_error("snapshot DW_OP_addr aggregate width exceeds the bounded reader");
   }
   if (frame.runtime_pc < owner.virtual_address) {
     throw std::runtime_error("snapshot frame runtime PC is below its module virtual address");
@@ -164,24 +213,7 @@ std::optional<LocalScalarValue> inspect_snapshot_caller_unit(
   const auto memory = read_snapshot_memory(
       snapshot, module_paths, static_cast<std::uintptr_t>(runtime_address_u64),
       value_type.byte_size);
-  if (memory.provenance == SnapshotMemoryProvenance::RuntimeArtifact &&
-      memory.module_path != owner.module_path) {
-    throw std::logic_error("snapshot local artifact ownership changed during value read");
-  }
-
-  LocalScalarValue result{owner.module_path, std::string(name),
-                          decode_snapshot_scalar(memory, value_type.byte_size),
-                          value_type.byte_size, value_type.is_signed,
-                          value_type.kind};
-  if (memory.provenance == SnapshotMemoryProvenance::Core) {
-    result.storage = LocalValueStorage::SnapshotCoreMemory;
-  } else {
-    result.storage = LocalValueStorage::SnapshotRuntimeArtifact;
-    result.storage_module_path = memory.module_path;
-    result.storage_file_path = memory.module_file_path;
-    result.storage_file_offset = memory.artifact_file_offset;
-  }
-  return result;
+  return materialize_snapshot_memory_value(owner, name, value_type, memory);
 }
 
 }  // namespace

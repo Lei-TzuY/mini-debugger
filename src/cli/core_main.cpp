@@ -176,8 +176,9 @@ int run_session(const std::string& core_path, mdbg::SnapshotModulePathResolver m
 }
 
 void print_usage() {
-  std::cerr << "usage: mdbg-core [--substitute-module-path <recorded-prefix> <local-prefix>]... "
-               "<core-file>\n";
+  std::cerr
+      << "usage: mdbg-core [--substitute-module-path <recorded-prefix> <local-prefix>]... "
+         "[--debug-file <recorded-module> <local-debug-file>]... <core-file>\n";
 }
 
 }  // namespace
@@ -186,13 +187,27 @@ int main(int argc, char** argv) {
   try {
     mdbg::SnapshotModulePathResolver module_paths;
     int argument = 1;
-    while (argument < argc && std::string(argv[argument]) == "--substitute-module-path") {
-      if (argument + 2 >= argc) {
-        print_usage();
-        return 2;
+    while (argument < argc - 1) {
+      const std::string option(argv[argument]);
+      if (option == "--substitute-module-path") {
+        if (argument + 2 >= argc) {
+          print_usage();
+          return 2;
+        }
+        module_paths.add_substitution(argv[argument + 1], argv[argument + 2]);
+        argument += 3;
+        continue;
       }
-      module_paths.add_substitution(argv[argument + 1], argv[argument + 2]);
-      argument += 3;
+      if (option == "--debug-file") {
+        if (argument + 2 >= argc) {
+          print_usage();
+          return 2;
+        }
+        module_paths.add_debug_file(argv[argument + 1], argv[argument + 2]);
+        argument += 3;
+        continue;
+      }
+      break;
     }
     if (argument + 1 != argc) {
       print_usage();

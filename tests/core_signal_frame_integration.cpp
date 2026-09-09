@@ -227,7 +227,7 @@ int main(int argc, char** argv) {
 
     session.select_frame(restored->index);
     const auto value = session.inspect_value("interrupted_register_local");
-    require(value.unsigned_value == kInterruptedRegisterValue,
+    require(value.raw_value == kInterruptedRegisterValue,
             "signal-restored register local has the wrong source value");
     require(session.selected_frame().registers.r12.has_value() &&
                 *session.selected_frame().registers.r12 == saved_r12,

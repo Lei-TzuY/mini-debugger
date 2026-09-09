@@ -8,6 +8,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <utility>
 
 namespace {
 
@@ -17,8 +18,7 @@ void print_frame(const mdbg::CoreInspectionSession& session,
             << frame.index << " 0x" << std::hex << frame.runtime_pc << std::dec << ' '
             << frame.module_path;
   try {
-    if (const auto symbol =
-            mdbg::find_snapshot_symbol_by_runtime_address(session.snapshot(), frame.runtime_pc)) {
+    if (const auto symbol = session.find_symbol(frame.runtime_pc)) {
       std::cout << '!' << symbol->name;
       if (symbol->offset != 0) {
         std::cout << "+0x" << std::hex << symbol->offset << std::dec;
@@ -27,8 +27,7 @@ void print_frame(const mdbg::CoreInspectionSession& session,
   } catch (const std::exception&) {
   }
   try {
-    if (const auto source =
-            mdbg::find_snapshot_source_by_runtime_address(session.snapshot(), frame.runtime_pc)) {
+    if (const auto source = session.find_source(frame.runtime_pc)) {
       std::cout << ' ' << source->module_path << '!' << source->file << ':' << source->line;
       if (source->column != 0) std::cout << ':' << source->column;
     }
@@ -100,8 +99,8 @@ void print_help() {
                "  quit | q             exit the core session\n";
 }
 
-int run_session(const std::string& core_path) {
-  mdbg::CoreInspectionSession session(core_path);
+int run_session(const std::string& core_path, mdbg::SnapshotModulePathResolver module_paths) {
+  mdbg::CoreInspectionSession session(core_path, std::move(module_paths));
   std::cout << "core signal " << session.snapshot().signal_number() << " tid "
             << session.snapshot().crashed_tid() << " frames " << session.trace().frames.size()
             << '\n';
@@ -176,15 +175,30 @@ int run_session(const std::string& core_path) {
   return 0;
 }
 
+void print_usage() {
+  std::cerr << "usage: mdbg-core [--substitute-module-path <recorded-prefix> <local-prefix>]... "
+               "<core-file>\n";
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
-  if (argc != 2) {
-    std::cerr << "usage: mdbg-core <core-file>\n";
-    return 2;
-  }
   try {
-    return run_session(argv[1]);
+    mdbg::SnapshotModulePathResolver module_paths;
+    int argument = 1;
+    while (argument < argc && std::string(argv[argument]) == "--substitute-module-path") {
+      if (argument + 2 >= argc) {
+        print_usage();
+        return 2;
+      }
+      module_paths.add_substitution(argv[argument + 1], argv[argument + 2]);
+      argument += 3;
+    }
+    if (argument + 1 != argc) {
+      print_usage();
+      return 2;
+    }
+    return run_session(argv[argument], std::move(module_paths));
   } catch (const std::exception& error) {
     std::cerr << "mdbg-core: " << error.what() << '\n';
     return 1;

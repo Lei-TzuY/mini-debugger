@@ -34,3 +34,22 @@ jobs:
           sudo sysctl -w kernel.core_pattern=/tmp/mdbg-core-%p
           ulimit -c unlimited
           ctest --test-dir build --output-on-failure --timeout 30
+
+          "$CXX" -std=c++17 -Wall -Wextra -Wpedantic -Werror -Isrc \
+            tests/core_fpregset_integration.cpp build/libmdbg_core.a -pthread \
+            -o build/core_fpregset_integration
+          rm -f /tmp/mdbg-core-* /tmp/mdbg-fpregset-ready
+          set +e
+          ./build/formal_parameter_fixture_pie \
+            --snapshot-crash-threaded /tmp/mdbg-fpregset-ready
+          status=$?
+          set -e
+          if [ "$status" -eq 0 ]; then
+            echo "FPREGSET fixture unexpectedly exited cleanly"
+            exit 1
+          fi
+          core=$(find /tmp -maxdepth 1 -type f -name 'mdbg-core-*' | head -n 1)
+          test -n "$core"
+          sibling=$(cat /tmp/mdbg-fpregset-ready)
+          python3 tests/core_fpregset_oracle.py "$core"
+          ./build/core_fpregset_integration "$core" "$sibling"

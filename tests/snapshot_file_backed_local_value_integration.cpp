@@ -18,6 +18,8 @@
 namespace {
 
 constexpr std::uint64_t kExpectedValue = 0x6a09e667f3bcc909ULL;
+constexpr std::uint64_t kExpectedFirst = 0xbb67ae8584caa73bULL;
+constexpr std::uint64_t kExpectedSecond = 0x3c6ef372fe94f82bULL;
 
 void require(bool condition, const std::string& message) {
   if (!condition) throw std::runtime_error(message);
@@ -68,6 +70,7 @@ void test_file_backed_local(const std::string& fixture) {
     require(session.trace().frames.size() > 1,
             "restricted snapshot did not recover the caller frame");
     session.select_frame(1);
+
     const auto value = session.inspect_value("snapshot_file_scalar");
     require(value.kind == mdbg::LocalValueKind::Integer && value.byte_size == 8 &&
                 value.raw_value == kExpectedValue,
@@ -76,6 +79,23 @@ void test_file_backed_local(const std::string& fixture) {
             "restricted snapshot local did not report runtime-artifact provenance");
     require(value.storage_module_path == fixture && !value.storage_file_path.empty(),
             "snapshot local artifact provenance lost module/file ownership");
+
+    const auto aggregate = session.inspect_value("snapshot_file_aggregate");
+    require(aggregate.kind == mdbg::LocalValueKind::Structure && aggregate.byte_size == 16,
+            "artifact-backed snapshot aggregate type/size was not reconstructed");
+    require(aggregate.members.size() == 2,
+            "artifact-backed snapshot aggregate did not expose both members");
+    require(aggregate.members[0].name == "first" &&
+                aggregate.members[0].raw_value == kExpectedFirst &&
+                aggregate.members[0].byte_size == 8 &&
+                aggregate.members[1].name == "second" &&
+                aggregate.members[1].raw_value == kExpectedSecond &&
+                aggregate.members[1].byte_size == 8,
+            "artifact-backed snapshot aggregate member values were not reconstructed");
+    require(aggregate.storage == mdbg::LocalValueStorage::SnapshotRuntimeArtifact,
+            "restricted snapshot aggregate did not report runtime-artifact provenance");
+    require(aggregate.storage_module_path == fixture && !aggregate.storage_file_path.empty(),
+            "snapshot aggregate artifact provenance lost module/file ownership");
   } catch (...) {
     std::remove(core_path.c_str());
     throw;

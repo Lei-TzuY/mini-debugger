@@ -1,0 +1,61 @@
+#define _GNU_SOURCE
+
+#include <pthread.h>
+#include <signal.h>
+#include <stdio.h>
+#include <sys/syscall.h>
+#include <unistd.h>
+
+static volatile sig_atomic_t sibling_ready = 0;
+static volatile sig_atomic_t sibling_tid = 0;
+
+__attribute__((noinline, noreturn)) static void sibling_hold_xmm(double seed) {
+  double xmm_value = seed;
+  __asm__ volatile("" : "+x"(xmm_value));
+  sibling_ready = 1;
+  __asm__ volatile(
+      ".globl snapshot_xmm_sibling_probe\n"
+      "snapshot_xmm_sibling_probe:\n"
+      "pause\n"
+      "jmp snapshot_xmm_sibling_probe\n"
+      : "+x"(xmm_value)
+      :
+      : "memory");
+  __builtin_unreachable();
+}
+
+static void* sibling_main(void* argument) {
+  (void)argument;
+  sibling_tid = (sig_atomic_t)syscall(SYS_gettid);
+  sibling_hold_xmm(9876.5);
+}
+
+__attribute__((noinline, noreturn)) static void crash_with_xmm(void) {
+  double xmm_value = 1234.25;
+  __asm__ volatile("" : "+x"(xmm_value));
+  __asm__ volatile(
+      ".globl snapshot_xmm_crash_probe\n"
+      "snapshot_xmm_crash_probe:\n"
+      "movl $0, (%%rax)\n"
+      : "+x"(xmm_value)
+      : "a"(0)
+      : "memory");
+  __builtin_unreachable();
+}
+
+int main(int argc, char** argv) {
+  if (argc != 2) return 2;
+
+  pthread_t thread;
+  if (pthread_create(&thread, NULL, sibling_main, NULL) != 0) return 3;
+  while (!sibling_ready) {
+    __asm__ volatile("pause" ::: "memory");
+  }
+
+  FILE* ready = fopen(argv[1], "w");
+  if (ready == NULL) return 4;
+  fprintf(ready, "%d\n", (int)sibling_tid);
+  if (fclose(ready) != 0) return 5;
+
+  crash_with_xmm();
+}

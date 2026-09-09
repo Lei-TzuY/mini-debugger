@@ -201,9 +201,9 @@ void print_help() {
                "  quit | q             exit the core session\n";
 }
 
-int run_session(const std::string& core_path, mdbg::SnapshotModulePathResolver module_paths) {
+int run_session(const std::string& core_path, mdbg::SnapshotModulePathResolver module_paths,
+                mdbg::SourcePathResolver source_paths) {
   mdbg::CoreInspectionSession session(core_path, std::move(module_paths));
-  mdbg::SourcePathResolver source_paths;
   std::cout << "core signal " << session.snapshot().signal_number() << " tid "
             << session.snapshot().crashed_tid() << " frames " << session.trace().frames.size()
             << '\n';
@@ -299,7 +299,8 @@ int run_session(const std::string& core_path, mdbg::SnapshotModulePathResolver m
 void print_usage() {
   std::cerr
       << "usage: mdbg-core [--substitute-module-path <recorded-prefix> <local-prefix>]... "
-         "[--debug-file <recorded-module> <local-debug-file>]... <core-file>\n";
+         "[--debug-file <recorded-module> <local-debug-file>]... "
+         "[--substitute-source-path <recorded-prefix> <local-prefix>]... <core-file>\n";
 }
 
 }  // namespace
@@ -307,6 +308,7 @@ void print_usage() {
 int main(int argc, char** argv) {
   try {
     mdbg::SnapshotModulePathResolver module_paths;
+    mdbg::SourcePathResolver source_paths;
     int argument = 1;
     while (argument < argc - 1) {
       const std::string option(argv[argument]);
@@ -328,13 +330,22 @@ int main(int argc, char** argv) {
         argument += 3;
         continue;
       }
+      if (option == "--substitute-source-path") {
+        if (argument + 2 >= argc) {
+          print_usage();
+          return 2;
+        }
+        source_paths.add_substitution(argv[argument + 1], argv[argument + 2]);
+        argument += 3;
+        continue;
+      }
       break;
     }
     if (argument + 1 != argc) {
       print_usage();
       return 2;
     }
-    return run_session(argv[argument], std::move(module_paths));
+    return run_session(argv[argument], std::move(module_paths), std::move(source_paths));
   } catch (const std::exception& error) {
     std::cerr << "mdbg-core: " << error.what() << '\n';
     return 1;

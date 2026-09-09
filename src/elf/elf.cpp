@@ -1,6 +1,7 @@
 #include "elf/elf.hpp"
 
 #include <elf.h>
+#include <signal.h>
 #include <sys/procfs.h>
 #include <unistd.h>
 
@@ -116,6 +117,19 @@ std::string note_owner(const std::vector<std::byte>& bytes, std::uint64_t offset
     result.push_back(character);
   }
   return result;
+}
+
+std::optional<std::uintptr_t> fault_address_for_siginfo(const siginfo_t& info) {
+  switch (info.si_signo) {
+    case SIGILL:
+    case SIGFPE:
+    case SIGSEGV:
+    case SIGBUS:
+    case SIGTRAP:
+      return reinterpret_cast<std::uintptr_t>(info.si_addr);
+    default:
+      return std::nullopt;
+  }
 }
 
 }  // namespace
@@ -313,6 +327,9 @@ void CoreSnapshot::parse() {
   if (!has_registers_ || threads_.empty()) {
     throw std::runtime_error("ELF core lacks NT_PRSTATUS registers");
   }
+  if (crash_info_ && crash_info_->signal_number != signal_number_) {
+    throw std::runtime_error("NT_SIGINFO and crashed NT_PRSTATUS disagree on signal identity");
+  }
   if (load_segments_.empty()) throw std::runtime_error("ELF core lacks PT_LOAD memory");
   if (file_mappings_.empty()) throw std::runtime_error("ELF core lacks NT_FILE mappings");
   if (!mapping_for_address(static_cast<std::uintptr_t>(registers_.rip))) {
@@ -367,6 +384,17 @@ void CoreSnapshot::parse_notes(std::uint64_t offset, std::uint64_t size) {
         signal_number_ = thread_signal;
         has_registers_ = true;
       }
+      continue;
+    }
+
+    if (note.n_type == NT_SIGINFO) {
+      if (crash_info_) throw std::runtime_error("duplicate NT_SIGINFO note");
+      if (note.n_descsz != sizeof(siginfo_t)) {
+        throw std::runtime_error("unsupported x86-64 NT_SIGINFO size");
+      }
+      const auto info = read_struct<siginfo_t>(bytes_, static_cast<std::size_t>(desc_offset));
+      if (info.si_signo <= 0) throw std::runtime_error("NT_SIGINFO has invalid signal number");
+      crash_info_ = CoreCrashInfo{info.si_signo, info.si_code, fault_address_for_siginfo(info)};
       continue;
     }
 

@@ -472,6 +472,19 @@ if(BUILD_TESTING)
       $<TARGET_FILE:formal_parameter_fixture_nopie>
       $<TARGET_FILE:mdbg-core>)
 
+  add_executable(core_siginfo_integration tests/core_siginfo_integration.cpp)
+  target_link_libraries(core_siginfo_integration PRIVATE mdbg_core)
+  target_compile_options(core_siginfo_integration PRIVATE
+    -Wall -Wextra -Wpedantic -Werror)
+  add_test(NAME core_siginfo_integration_pie
+    COMMAND core_siginfo_integration
+      $<TARGET_FILE:formal_parameter_fixture_pie>
+      $<TARGET_FILE:mdbg-core>)
+  add_test(NAME core_siginfo_integration_nopie
+    COMMAND core_siginfo_integration
+      $<TARGET_FILE:formal_parameter_fixture_nopie>
+      $<TARGET_FILE:mdbg-core>)
+
   add_executable(snapshot_file_backed_local_value_integration
     tests/snapshot_file_backed_local_value_integration.cpp)
   target_link_libraries(snapshot_file_backed_local_value_integration PRIVATE mdbg_core)

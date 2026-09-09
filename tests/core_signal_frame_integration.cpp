@@ -1,6 +1,10 @@
 #include "elf/elf.hpp"
 #include "snapshot/session.hpp"
 
+#include <sys/wait.h>
+#include <unistd.h>
+
+#include <cerrno>
 #include <csignal>
 #include <cstddef>
 #include <cstdint>
@@ -92,6 +96,78 @@ const mdbg::SnapshotInspectionFrameContext* trace_stack_boundary(
     if (frame.stack_pointer == stack_pointer) return &frame;
   }
   return nullptr;
+}
+
+std::string run_core_cli(const std::string& cli, const std::string& core,
+                         std::size_t frame_index) {
+  int input_pipe[2];
+  int output_pipe[2];
+  if (::pipe(input_pipe) != 0 || ::pipe(output_pipe) != 0) {
+    throw std::runtime_error("failed to create mdbg-core integration pipes");
+  }
+
+  const pid_t pid = ::fork();
+  if (pid == -1) throw std::runtime_error("failed to fork mdbg-core integration");
+  if (pid == 0) {
+    ::dup2(input_pipe[0], STDIN_FILENO);
+    ::dup2(output_pipe[1], STDOUT_FILENO);
+    ::dup2(output_pipe[1], STDERR_FILENO);
+    ::close(input_pipe[0]);
+    ::close(input_pipe[1]);
+    ::close(output_pipe[0]);
+    ::close(output_pipe[1]);
+    ::execl(cli.c_str(), cli.c_str(), core.c_str(), nullptr);
+    _exit(127);
+  }
+
+  ::close(input_pipe[0]);
+  ::close(output_pipe[1]);
+  const std::string commands = "frame " + std::to_string(frame_index) +
+                               "\nprint interrupted_register_local\nquit\n";
+  std::size_t offset = 0;
+  while (offset < commands.size()) {
+    const auto written =
+        ::write(input_pipe[1], commands.data() + offset, commands.size() - offset);
+    if (written == -1 && errno == EINTR) continue;
+    if (written <= 0) {
+      ::close(input_pipe[1]);
+      ::close(output_pipe[0]);
+      ::kill(pid, SIGKILL);
+      int status = 0;
+      while (::waitpid(pid, &status, 0) == -1 && errno == EINTR) {
+      }
+      throw std::runtime_error("failed to write mdbg-core integration commands");
+    }
+    offset += static_cast<std::size_t>(written);
+  }
+  ::close(input_pipe[1]);
+
+  std::string output;
+  char buffer[1024];
+  for (;;) {
+    const auto count = ::read(output_pipe[0], buffer, sizeof(buffer));
+    if (count == -1 && errno == EINTR) continue;
+    if (count < 0) {
+      ::close(output_pipe[0]);
+      ::kill(pid, SIGKILL);
+      int status = 0;
+      while (::waitpid(pid, &status, 0) == -1 && errno == EINTR) {
+      }
+      throw std::runtime_error("failed to read mdbg-core integration output");
+    }
+    if (count == 0) break;
+    output.append(buffer, static_cast<std::size_t>(count));
+  }
+  ::close(output_pipe[0]);
+
+  int status = 0;
+  pid_t waited;
+  do {
+    waited = ::waitpid(pid, &status, 0);
+  } while (waited == -1 && errno == EINTR);
+  require(waited == pid && WIFEXITED(status) && WEXITSTATUS(status) == 0,
+          "mdbg-core signal-restored source-value session did not exit cleanly");
+  return output;
 }
 
 void print_evidence(const mdbg::CoreInspectionSession& session,
@@ -218,10 +294,19 @@ int main(int argc, char** argv) {
             "signal-restored RBP does not match the kernel ucontext oracle");
     require(restored->registers.rbx.has_value() && *restored->registers.rbx == saved_rbx,
             "signal-restored RBX does not match the kernel ucontext oracle");
+    require(restored->registers.r12.has_value() && *restored->registers.r12 == saved_r12,
+            "signal-restored frame did not retain kernel-owned R12 state");
 
     const auto restored_symbol = session.find_frame_symbol(*restored);
     require(restored_symbol && restored_symbol->name == "signal_core_interrupted_probe",
             "signal-restored exact PC does not resolve to the interrupted application probe");
+    require(restored->index + 1 < session.trace().frames.size(),
+            "ordinary CFI did not resume beyond the signal-restored frame");
+    for (std::size_t index = restored->index + 1;
+         index < session.trace().frames.size(); ++index) {
+      require(!session.trace().frames[index].registers.r12.has_value(),
+              "signal-restored R12 leaked into a later ordinary-CFI frame");
+    }
     require(trace_has_symbol(session, "main"),
             "ordinary CFI did not resume beyond the signal-restored application context");
 
@@ -229,9 +314,16 @@ int main(int argc, char** argv) {
     const auto value = session.inspect_value("interrupted_register_local");
     require(value.raw_value == kInterruptedRegisterValue,
             "signal-restored register local has the wrong source value");
-    require(session.selected_frame().registers.r12.has_value() &&
-                *session.selected_frame().registers.r12 == saved_r12,
-            "signal-restored frame did not retain kernel-owned R12 state");
+    require(value.storage == mdbg::LocalValueStorage::SnapshotCoreRegister,
+            "signal-restored register local did not retain core-register provenance");
+
+    const auto cli_path =
+        (std::filesystem::path(argv[0]).parent_path() / "mdbg-core").string();
+    const auto cli_output = run_core_cli(cli_path, argv[1], restored->index);
+    require(cli_output.find("interrupted_register_local") != std::string::npos,
+            "mdbg-core did not render the signal-restored local name");
+    require(cli_output.find("0xb5856a1a93a34cbc") != std::string::npos,
+            "mdbg-core did not render the signal-restored R12 local value");
 
     std::cout << "genuine signal-frame core integration passed\n";
   } catch (const std::exception& error) {

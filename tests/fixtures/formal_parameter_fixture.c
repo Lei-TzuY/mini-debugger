@@ -15,13 +15,18 @@
 #define INDIRECT_LOCAL_EXPECTED UINT64_C(0x8877665544332211)
 #define INDIRECT_LOCAL_XOR UINT64_C(0x55aa00ff33cc6699)
 #define INLINE_LOCAL_EXPECTED UINT64_C(0x02146638cadcae70)
+#define SNAPSHOT_ARTIFACT_EXPECTED UINT64_C(0x6a5b4c3d2e1f9081)
+#define SNAPSHOT_ARTIFACT_XOR UINT64_C(0x13579bdf2468ace0)
 
 volatile uint64_t parameter_seed = UINT64_C(0x1122334455667788);
 volatile uint64_t inline_seed = INLINE_LOCAL_EXPECTED;
 uint64_t indirect_seed = INDIRECT_LOCAL_EXPECTED ^ INDIRECT_LOCAL_XOR;
 uint64_t* indirect_ptr = &indirect_seed;
+static const uint64_t snapshot_artifact_seed =
+    SNAPSHOT_ARTIFACT_EXPECTED ^ SNAPSHOT_ARTIFACT_XOR;
 static volatile int snapshot_crash_enabled = 0;
 static volatile int snapshot_sibling_ready = 0;
+static volatile int snapshot_artifact_crash_enabled = 0;
 
 static void* snapshot_sibling_worker(void* argument) {
   const char* ready_path = (const char*)argument;
@@ -119,6 +124,32 @@ __attribute__((noinline)) uint64_t inspect_indirect_local(uint64_t** ptr) {
   return indirect_local;
 }
 
+__attribute__((noinline)) uint64_t inspect_snapshot_artifact_local(
+    const uint64_t* ptr) {
+  const uint64_t artifact_local = *ptr ^ SNAPSHOT_ARTIFACT_XOR;
+  __asm__ volatile(".globl snapshot_artifact_local_probe\n"
+                   "snapshot_artifact_local_probe:\n"
+                   "nop\n"
+                   :
+                   : "D"(ptr));
+  if (snapshot_artifact_crash_enabled) {
+    __asm__ volatile("xorq %%rax, %%rax\n"
+                     "movq %%rax, (%%rax)\n"
+                     ::: "rax", "memory");
+  }
+  return artifact_local;
+}
+
+static int run_snapshot_artifact_crash(const char* ready_path) {
+  FILE* ready = fopen(ready_path, "w");
+  if (ready == NULL) return 8;
+  fprintf(ready, "%p\n", (const void*)&snapshot_artifact_seed);
+  if (fclose(ready) != 0) return 9;
+  snapshot_artifact_crash_enabled = 1;
+  (void)inspect_snapshot_artifact_local(&snapshot_artifact_seed);
+  return 10;
+}
+
 static __attribute__((always_inline)) inline uint64_t inspect_inlined_local(
     uint64_t parameter) {
   uint64_t inline_local = parameter;
@@ -132,6 +163,10 @@ static __attribute__((always_inline)) inline uint64_t inspect_inlined_local(
 }
 
 int main(int argc, char** argv) {
+  if (argc == 3 && strcmp(argv[1], "--snapshot-artifact-crash") == 0) {
+    return run_snapshot_artifact_crash(argv[2]);
+  }
+
   const int threaded_snapshot =
       argc == 3 && strcmp(argv[1], "--snapshot-crash-threaded") == 0;
   snapshot_crash_enabled =
@@ -148,5 +183,9 @@ int main(int argc, char** argv) {
     return 4;
   }
   if (inspect_indirect_local(&indirect_ptr) != INDIRECT_LOCAL_EXPECTED) return 5;
+  if (inspect_snapshot_artifact_local(&snapshot_artifact_seed) !=
+      SNAPSHOT_ARTIFACT_EXPECTED) {
+    return 8;
+  }
   return inspect_inlined_local(inline_seed) == INLINE_LOCAL_EXPECTED ? 0 : 6;
 }

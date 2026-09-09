@@ -90,3 +90,52 @@ jobs:
             printf '%s\n' "$output" | grep -F '*aggregate_pointer = { first=0x123456789abcdef, second=0xfedcba9876543210 }'
             printf '%s\n' "$output" | grep -F 'xmm_value = 9876.5'
           done
+
+          "$CC" -O1 -g -gdwarf-4 -fPIE -pie \
+            tests/fixtures/signal_core_fixture.c -pthread \
+            -o build/signal_core_fixture_pie
+          "$CC" -O1 -g -gdwarf-4 -fno-pie -no-pie \
+            tests/fixtures/signal_core_fixture.c -pthread \
+            -o build/signal_core_fixture_nopie
+          "$CXX" -std=c++17 -Wall -Wextra -Wpedantic -Werror -Isrc \
+            tests/core_signal_frame_integration.cpp build/libmdbg_core.a -pthread \
+            -o build/core_signal_frame_integration
+
+          signal_failures=0
+          for fixture in build/signal_core_fixture_pie build/signal_core_fixture_nopie; do
+            rm -f /tmp/mdbg-core-*
+            set +e
+            "$fixture"
+            status=$?
+            set -e
+            if [ "$status" -eq 0 ]; then
+              echo "signal-frame fixture unexpectedly exited cleanly"
+              exit 1
+            fi
+            core=$(find /tmp -maxdepth 1 -type f -name 'mdbg-core-*' | head -n 1)
+            test -n "$core"
+            set +e
+            ./build/core_signal_frame_integration "$core" "$fixture"
+            status=$?
+            set -e
+            if [ "$status" -ne 0 ]; then
+              signal_failures=1
+              continue
+            fi
+
+            output=$(printf 'bt\nquit\n' | ./build/mdbg-core "$core")
+            printf '%s\n' "$output"
+            if ! printf '%s\n' "$output" | grep -Fq 'signal_core_handler_probe'; then
+              echo "mdbg-core backtrace lost the signal handler"
+              signal_failures=1
+            fi
+            if ! printf '%s\n' "$output" | grep -Fq 'signal_core_interrupted_probe'; then
+              echo "mdbg-core backtrace lost the interrupted application context"
+              signal_failures=1
+            fi
+            if ! printf '%s\n' "$output" | grep -Fq '!main'; then
+              echo "mdbg-core backtrace did not resume ordinary CFI after signal recovery"
+              signal_failures=1
+            fi
+          done
+          test "$signal_failures" -eq 0

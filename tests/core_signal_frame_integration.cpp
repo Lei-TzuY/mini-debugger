@@ -58,6 +58,18 @@ bool trace_has_symbol(const mdbg::CoreInspectionSession& session,
   return false;
 }
 
+bool trace_has_context(const mdbg::CoreInspectionSession& session,
+                       std::uintptr_t instruction_pointer,
+                       std::uintptr_t stack_pointer) {
+  for (const auto& frame : session.trace().frames) {
+    if (frame.runtime_pc == instruction_pointer &&
+        frame.stack_pointer == stack_pointer) {
+      return true;
+    }
+  }
+  return false;
+}
+
 void print_evidence(const mdbg::CoreInspectionSession& session,
                     std::uintptr_t ucontext_address,
                     std::uintptr_t saved_rip,
@@ -125,13 +137,15 @@ int main(int argc, char** argv) {
     require(interrupted_begin < interrupted_end && saved_rip >= interrupted_begin &&
                 saved_rip < interrupted_end,
             "saved signal RIP is outside the explicit interrupted application probe range");
+    require(trace_has_symbol(session, "signal_core_crash_probe"),
+            "ordinary core unwind lost the signal-handler crash probe");
+    require(trace_has_symbol(session, "signal_core_handler_probe"),
+            "ordinary core unwind lost the signal handler probe");
+    require(!session.trace().frames.empty() &&
+                session.trace().frames.back().stack_pointer == ucontext_address,
+            "ordinary unwind did not stop at the kernel-provided signal ucontext boundary");
 
-    require(trace_has_symbol(session, "signal_core_crash_from_handler"),
-            "ordinary core unwind lost the signal-handler crash frame");
-    require(trace_has_symbol(session, "signal_core_handler"),
-            "ordinary core unwind lost the signal handler frame");
-
-    require(trace_has_symbol(session, "signal_core_interrupted_application"),
+    require(trace_has_context(session, saved_rip, saved_rsp),
             "ordinary CFI did not cross the genuine signal frame to the interrupted application context");
 
     std::cout << "genuine signal-frame core integration passed\n";

@@ -17,6 +17,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -133,6 +134,68 @@ std::string bounded_text(const char* data, std::size_t size) {
   std::string result(data, length);
   while (!result.empty() && result.back() == ' ') result.pop_back();
   return result;
+}
+
+struct AuxvEvidence {
+  std::uint64_t entry_point;
+  std::uint64_t program_headers;
+  std::uint64_t program_header_count;
+  std::uint64_t page_size;
+  std::optional<std::uint64_t> interpreter_base;
+};
+
+AuxvEvidence parse_auxv_evidence(const std::vector<std::byte>& bytes,
+                                 const NoteRef& note) {
+  constexpr std::size_t kMaxAuxvBytes = 4096;
+  require(note.header.n_descsz != 0 && note.header.n_descsz <= kMaxAuxvBytes,
+          "genuine NT_AUXV descriptor is outside the bounded evidence window");
+  require(note.header.n_descsz % sizeof(Elf64_auxv_t) == 0,
+          "genuine NT_AUXV is not a native x86-64 auxiliary-vector array");
+  require(note.desc_offset <= bytes.size() &&
+              note.header.n_descsz <= bytes.size() - note.desc_offset,
+          "genuine NT_AUXV descriptor extends past the core file");
+
+  std::optional<std::uint64_t> entry;
+  std::optional<std::uint64_t> phdr;
+  std::optional<std::uint64_t> phnum;
+  std::optional<std::uint64_t> page_size;
+  std::optional<std::uint64_t> base;
+  bool saw_null = false;
+  const auto count = note.header.n_descsz / sizeof(Elf64_auxv_t);
+  for (std::size_t index = 0; index < count; ++index) {
+    Elf64_auxv_t value{};
+    std::memcpy(&value,
+                bytes.data() + note.desc_offset + index * sizeof(Elf64_auxv_t),
+                sizeof(value));
+    if (value.a_type == AT_NULL) {
+      saw_null = true;
+      break;
+    }
+    auto assign_once = [&](std::optional<std::uint64_t>& target, const char* label) {
+      require(!target.has_value(), std::string("genuine NT_AUXV duplicated ") + label);
+      target = value.a_un.a_val;
+    };
+    switch (value.a_type) {
+      case AT_ENTRY: assign_once(entry, "AT_ENTRY"); break;
+      case AT_PHDR: assign_once(phdr, "AT_PHDR"); break;
+      case AT_PHNUM: assign_once(phnum, "AT_PHNUM"); break;
+      case AT_PAGESZ: assign_once(page_size, "AT_PAGESZ"); break;
+      case AT_BASE: assign_once(base, "AT_BASE"); break;
+      default: break;
+    }
+  }
+
+  require(saw_null, "genuine NT_AUXV did not terminate with AT_NULL");
+  require(entry.has_value() && *entry != 0,
+          "genuine NT_AUXV did not provide a nonzero AT_ENTRY");
+  require(phdr.has_value() && *phdr != 0,
+          "genuine NT_AUXV did not provide a nonzero AT_PHDR");
+  require(phnum.has_value() && *phnum != 0,
+          "genuine NT_AUXV did not provide a nonzero AT_PHNUM");
+  require(page_size.has_value() && *page_size != 0 &&
+              (*page_size & (*page_size - 1)) == 0,
+          "genuine NT_AUXV did not provide a power-of-two AT_PAGESZ");
+  return AuxvEvidence{*entry, *phdr, *phnum, *page_size, base};
 }
 
 std::string generate_core(const std::string& fixture, pid_t* recorded_pid = nullptr) {
@@ -266,6 +329,21 @@ void test_real_siginfo(const std::string& fixture, const std::string& cli) {
     const auto note = find_core_note(original, NT_SIGINFO, "CORE/NT_SIGINFO");
     require(note.header.n_descsz == sizeof(siginfo_t),
             "genuine x86-64 Linux NT_SIGINFO size is outside the bounded contract");
+
+    const auto auxv_note = find_core_note(original, NT_AUXV, "CORE/NT_AUXV");
+    const auto auxv = parse_auxv_evidence(original, auxv_note);
+    const auto entry_mapping = snapshot.mapping_for_address(auxv.entry_point);
+    require(entry_mapping.has_value(),
+            "genuine AT_ENTRY is not owned by any NT_FILE mapping");
+    require(std::filesystem::weakly_canonical(entry_mapping->path) ==
+                std::filesystem::weakly_canonical(fixture),
+            "genuine AT_ENTRY is not owned by the crashed executable mapping");
+    const auto phdr_mapping = snapshot.mapping_for_address(auxv.program_headers);
+    require(phdr_mapping.has_value(),
+            "genuine AT_PHDR is not owned by any NT_FILE mapping");
+    require(std::filesystem::weakly_canonical(phdr_mapping->path) ==
+                std::filesystem::weakly_canonical(fixture),
+            "genuine AT_PHDR is not owned by the crashed executable mapping");
 
     const auto process_note =
         find_core_note(original, NT_PRPSINFO, "CORE/NT_PRPSINFO");

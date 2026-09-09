@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -44,6 +45,16 @@ void print_backtrace(const mdbg::CoreInspectionSession& session) {
   }
 }
 
+void print_threads(const mdbg::CoreInspectionSession& session) {
+  for (const auto& thread : session.threads()) {
+    std::cout << (thread.tid == session.selected_thread_tid() ? "* " : "  ")
+              << "tid " << thread.tid;
+    if (thread.is_crashed) std::cout << " crash";
+    std::cout << " signal " << thread.signal_number << " rip 0x" << std::hex
+              << thread.registers.rip << std::dec << '\n';
+  }
+}
+
 void print_value(const mdbg::LocalScalarValue& value) {
   std::cout << value.module_path << '!' << value.name << " = ";
   if (value.kind == mdbg::LocalValueKind::Structure) {
@@ -68,8 +79,20 @@ std::size_t parse_frame_index(const std::string& text) {
   return static_cast<std::size_t>(value);
 }
 
+pid_t parse_thread_tid(const std::string& text) {
+  std::size_t consumed = 0;
+  const auto value = std::stoll(text, &consumed, 10);
+  if (consumed != text.size() || value <= 0 ||
+      value > static_cast<long long>(std::numeric_limits<pid_t>::max())) {
+    throw std::invalid_argument("invalid core thread TID: " + text);
+  }
+  return static_cast<pid_t>(value);
+}
+
 void print_help() {
   std::cout << "read-only core commands:\n"
+               "  threads              show immutable core thread contexts\n"
+               "  thread <tid>         select an immutable core thread\n"
                "  bt | backtrace       show immutable snapshot frames\n"
                "  frame <index>        select an immutable snapshot frame\n"
                "  print <name> | p <name>  inspect a source value in the selected frame\n"
@@ -97,6 +120,24 @@ int run_session(const std::string& core_path) {
       if (command == "q" || command == "quit") break;
       if (command == "help") {
         print_help();
+        continue;
+      }
+      if (command == "threads") {
+        std::string extra;
+        if (input >> extra) throw std::invalid_argument("usage: threads");
+        print_threads(session);
+        continue;
+      }
+      if (command == "thread") {
+        std::string tid_text;
+        std::string extra;
+        if (!(input >> tid_text) || (input >> extra)) {
+          throw std::invalid_argument("usage: thread <tid>");
+        }
+        const auto tid = parse_thread_tid(tid_text);
+        session.select_thread(tid);
+        std::cout << "selected thread " << tid << '\n';
+        print_frame(session, session.selected_frame());
         continue;
       }
       if (command == "bt" || command == "backtrace") {

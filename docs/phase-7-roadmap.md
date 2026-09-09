@@ -77,7 +77,7 @@ Completed bounded capability:
 - real kernel-generated PIE and non-PIE cores recover caller `inspect_entry_parameter`, resolve its module-qualified `transformed` local, preserve integer width/signedness and lexical ownership, and require the exact compiler-proven value `0x458a30bf63ac1619` under both permanent GCC and Clang-large lanes;
 - removing recovered caller RBX from the immutable inspection frame deterministically makes the same source-value request fail, directly proving the result is owned by historical caller evidence rather than the crash sentinel.
 
-No snapshot inspection context gains resume, single-step, signal delivery, register/memory mutation, software/hardware breakpoint ownership, process/thread selection, or a fake PID/TID. Missing module files, missing historical registers, unsupported source-value forms, and absent snapshot evidence remain fail-closed.
+No snapshot inspection context gains resume, single-step, signal delivery, register/memory mutation, software/hardware breakpoint ownership, live process/thread selection, or a fake PID/TID. Missing module files, missing historical registers, unsupported source-value forms, and absent snapshot evidence remain fail-closed.
 
 ## Phase 7 seal
 
@@ -110,8 +110,20 @@ Completed executable capability:
 - `print` delegates directly to the selected frame's existing snapshot local-value evaluator, so historical register/module/type ownership is unchanged and unsupported evidence keeps the Phase 7 fail-closed behavior;
 - real kernel-generated PIE and non-PIE cores from the compiler-proven formal-parameter fixture are driven through an actual `mdbg-core` subprocess under both permanent GCC and Clang-large lanes; the workflow requires crash and caller frames, selects caller frame 1, prints module-qualified `transformed = 0x458a30bf63ac1619`, rejects `continue`, rejects an out-of-range frame, and exits cleanly.
 
-Phase 8 remains the current frontier. The next slice must be selected from a concrete failing post-mortem workflow rather than by adding shell commands. One now-visible architectural gap is immutable multi-thread core ownership: `CoreSnapshot` currently owns only one register/TID/signal tuple even though real Linux process cores can contain multiple `NT_PRSTATUS` thread contexts. A future P8-B may promote that evidence into a read-only thread catalogue and thread-scoped frame selection only after a real kernel core proves the required note/identity semantics; it must not reuse live `Process`/`ThreadInfo` ownership.
+### P8-B: immutable multi-thread core ownership — complete
+
+Completed executable capability:
+
+- `CoreSnapshot` retains every bounded x86-64 `CORE/NT_PRSTATUS` record as an immutable `CoreThreadSnapshot` containing TID, note-owned signal field, full `user_regs_struct`, and explicit crash-owner identity; duplicate or invalid TIDs fail closed instead of silently aliasing one thread context;
+- the first real `NT_PRSTATUS` remains the compatibility crash owner for `crashed_tid()`, `signal_number()`, and `registers()`. Existing targeted-worker core coverage already proves that this ordering identifies the worker deliberately killed with `tgkill(..., SIGSEGV)`, while later PRSTATUS records are no longer discarded;
+- snapshot inspection frames are now explicitly thread-owned: their TID, signal field, and origin RIP/RSP/RBP fingerprint are validated against one exact `CoreThreadSnapshot`, while the older crash-thread build/unwind overload delegates to `crashed_thread()` and preserves all Phase 7 behavior;
+- `CoreInspectionSession` owns an immutable selected-thread TID. Selecting another recorded TID rebuilds its bounded CFI trace from that thread's captured registers and the same snapshot memory, resets frame selection to frame 0, and never creates a live `Process`, performs ptrace, or changes snapshot bytes;
+- `mdbg-core` adds read-only `threads` and `thread <tid>` commands. The catalogue marks the currently selected thread and crash owner, reports note-owned signal/RIP evidence, rejects unavailable TIDs deterministically, and keeps execution commands such as `continue` unsupported;
+- a snapshot-only formal-parameter fixture mode creates a real blocked pthread sibling before the existing deterministic crash path. PIE and non-PIE `mdbg-core` integration therefore operate on genuine multi-thread kernel cores under GCC and Clang-large, require both the crash TID and published sibling TID in the catalogue, select the sibling and build its immutable frame trace, switch back to the crash thread, recover caller frame 1, and still evaluate the exact historical `transformed = 0x458a30bf63ac1619` value;
+- normal non-snapshot compiler-value fixtures remain unchanged, and no generic ELF-note enumeration, live thread state, resume/signal semantics, or mutation surface is introduced.
+
+Phase 8 remains the current frontier, but further thread work needs a new concrete post-mortem behavior rather than more catalogue metadata. A possible P8-C is thread-scoped source-value inspection only if a real compiler-generated sibling frame exposes a stable local/parameter ownership case that the selected immutable thread can evaluate. If such evidence is unavailable, do not farm thread names, signal variants, or arbitrary PRSTATUS fields; perform an architecture audit and promote to the next post-mortem subsystem gap instead.
 
 ## Selection rule
 
-Choose the smallest real post-mortem workflow that advances immutable inspection ownership. Do not start generic note enumeration, every Linux note type, multi-thread core selection, CLI cosmetics, or a fake live-debugger facade. Every new inspection feature must demonstrate which bytes/registers/module mappings it owns and must remain non-executable by construction.
+Choose the smallest real post-mortem workflow that advances immutable inspection ownership. Do not start generic note enumeration, every Linux note type, CLI cosmetics, or a fake live-debugger facade. Every new inspection feature must demonstrate which bytes/registers/module mappings it owns and must remain non-executable by construction.

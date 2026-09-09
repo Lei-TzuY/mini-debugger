@@ -69,8 +69,15 @@ inline std::array<std::byte, 16> read_linux_x86_signal_xmm0(
                             kFxsaveXmm0Offset) {
     throw std::overflow_error("Linux x86-64 signal XMM0 address overflows");
   }
-  const auto bytes =
-      snapshot.read_memory(fpstate_address + kFxsaveXmm0Offset, kXmmSize);
+  const auto xmm0_address = fpstate_address + kFxsaveXmm0Offset;
+  if (xmm0_address > std::numeric_limits<std::uintptr_t>::max() - kXmmSize) {
+    throw std::overflow_error("Linux x86-64 signal XMM0 range overflows");
+  }
+  if (xmm0_address + kXmmSize > restored_rsp) {
+    throw std::runtime_error(
+        "Linux x86-64 signal XMM0 state extends outside the evidence-proven same-stack layout");
+  }
+  const auto bytes = snapshot.read_memory(xmm0_address, kXmmSize);
   if (bytes.size() != kXmmSize) {
     throw std::runtime_error("Linux x86-64 signal XMM0 state is truncated");
   }

@@ -59,6 +59,7 @@ constexpr std::uint64_t kDwFormData8 = 0x07;
 constexpr std::uint64_t kDwFormString = 0x08;
 constexpr std::uint64_t kDwFormData1 = 0x0b;
 constexpr std::uint64_t kDwFormStrp = 0x0e;
+constexpr std::uint64_t kDwFormUdata = 0x0f;
 constexpr std::uint64_t kDwFormRef4 = 0x13;
 constexpr std::uint64_t kDwFormSecOffset = 0x17;
 constexpr std::uint64_t kDwFormExprloc = 0x18;
@@ -378,6 +379,9 @@ AttributeValue read_attribute(const AttributeSpec& spec, const DebugSections& se
       break;
     case kDwFormData8:
       value.number = read_scalar<std::uint64_t>(sections.info, cursor, unit_end, "DW_FORM_data8");
+      break;
+    case kDwFormUdata:
+      value.number = read_uleb(sections.info, cursor, unit_end, "DW_FORM_udata");
       break;
     case kDwFormString:
       value.text = read_c_string(sections.info, cursor, unit_end, "DW_FORM_string");
@@ -1846,23 +1850,18 @@ LocalIntegerValue inspect_local_integer(const Debugger& debugger,
 std::optional<std::uint64_t> DwarfLineTable::find_virtual_source(
     std::string_view file, std::uint64_t line) const {
   if (file.empty() || line == 0) return std::nullopt;
-
   const std::filesystem::path query_path{std::string(file)};
   const auto normalized_query = query_path.lexically_normal();
   const bool qualified_query = query_path.is_absolute() || query_path.has_parent_path();
-
   std::optional<std::uint64_t> best_address;
   std::optional<std::string> matched_file;
-
   for (const auto& range : ranges_) {
     if (range.location.line != line) continue;
-
     const std::filesystem::path candidate_path(range.location.file);
     const bool matches = qualified_query
                              ? candidate_path.lexically_normal() == normalized_query
                              : candidate_path.filename() == normalized_query.filename();
     if (!matches) continue;
-
     if (!qualified_query) {
       const auto candidate_identity = normalized_source_path(candidate_path);
       if (matched_file && *matched_file != candidate_identity) {
@@ -1871,10 +1870,8 @@ std::optional<std::uint64_t> DwarfLineTable::find_virtual_source(
       }
       matched_file = candidate_identity;
     }
-
     if (!best_address || range.begin < *best_address) best_address = range.begin;
   }
-
   return best_address;
 }
 

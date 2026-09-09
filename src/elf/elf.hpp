@@ -61,6 +61,12 @@ struct CoreFileMapping {
   std::string path;
 };
 
+struct CoreCrashInfo {
+  int signal_number;
+  int signal_code;
+  std::optional<std::uintptr_t> fault_address;
+};
+
 struct CoreThreadSnapshot {
   pid_t tid;
   int signal_number;
@@ -75,6 +81,9 @@ class CoreSnapshot {
   [[nodiscard]] const std::string& path() const noexcept { return path_; }
   [[nodiscard]] pid_t crashed_tid() const noexcept { return crashed_tid_; }
   [[nodiscard]] int signal_number() const noexcept { return signal_number_; }
+  [[nodiscard]] const std::optional<CoreCrashInfo>& crash_info() const noexcept {
+    return crash_info_;
+  }
   [[nodiscard]] const user_regs_struct& registers() const noexcept { return registers_; }
   [[nodiscard]] const std::vector<CoreThreadSnapshot>& threads() const noexcept {
     return threads_;
@@ -107,6 +116,7 @@ class CoreSnapshot {
   std::vector<LoadSegment> load_segments_;
   std::vector<CoreFileMapping> file_mappings_;
   std::vector<CoreThreadSnapshot> threads_;
+  std::optional<CoreCrashInfo> crash_info_;
   user_regs_struct registers_{};
   pid_t crashed_tid_{-1};
   int signal_number_{0};

@@ -53,3 +53,37 @@ jobs:
           sibling=$(cat /tmp/mdbg-fpregset-ready)
           python3 tests/core_fpregset_oracle.py "$core"
           ./build/core_fpregset_integration "$core" "$sibling"
+
+          "$CC" -O1 -g -gdwarf-4 -fPIE -pie \
+            tests/fixtures/xmm_core_value_fixture.c -pthread \
+            -o build/xmm_core_value_fixture_pie
+          "$CC" -O1 -g -gdwarf-4 -fno-pie -no-pie \
+            tests/fixtures/xmm_core_value_fixture.c -pthread \
+            -o build/xmm_core_value_fixture_nopie
+          "$CXX" -std=c++17 -Wall -Wextra -Wpedantic -Werror -Isrc \
+            tests/core_xmm_value_integration.cpp build/libmdbg_core.a -pthread \
+            -o build/core_xmm_value_integration
+
+          for fixture in build/xmm_core_value_fixture_pie build/xmm_core_value_fixture_nopie; do
+            python3 tests/core_xmm_dwarf_oracle.py "$fixture"
+            tag=$(basename "$fixture")
+            ready="/tmp/mdbg-${tag}-ready"
+            rm -f /tmp/mdbg-core-* "$ready"
+            set +e
+            "$fixture" "$ready"
+            status=$?
+            set -e
+            if [ "$status" -eq 0 ]; then
+              echo "XMM source-value fixture unexpectedly exited cleanly"
+              exit 1
+            fi
+            core=$(find /tmp -maxdepth 1 -type f -name 'mdbg-core-*' | head -n 1)
+            test -n "$core"
+            sibling=$(cat "$ready")
+            ./build/core_xmm_value_integration "$core" "$sibling"
+            output=$(printf 'print xmm_value\nthread %s\nprint xmm_value\nquit\n' "$sibling" | \
+              ./build/mdbg-core "$core")
+            printf '%s\n' "$output"
+            printf '%s\n' "$output" | grep -F 'xmm_value = 1234.25'
+            printf '%s\n' "$output" | grep -F 'xmm_value = 9876.5'
+          done

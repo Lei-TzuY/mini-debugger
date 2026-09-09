@@ -4,6 +4,7 @@
 #include "snapshot/inspection.hpp"
 #include "snapshot/memory.hpp"
 #include "snapshot/module_path.hpp"
+#include "snapshot/startup.hpp"
 
 #include <cstddef>
 #include <stdexcept>
@@ -21,7 +22,8 @@ class CoreInspectionSession {
   CoreInspectionSession(std::string core_path, SnapshotModulePathResolver module_paths,
                         std::size_t max_frames = 64)
       : snapshot_(std::move(core_path)), module_paths_(std::move(module_paths)),
-        max_frames_(max_frames), selected_thread_tid_(snapshot_.crashed_tid()),
+        startup_info_(read_core_startup_info(snapshot_)), max_frames_(max_frames),
+        selected_thread_tid_(snapshot_.crashed_tid()),
         trace_(build_snapshot_inspection_frames(snapshot_, snapshot_.crashed_thread(),
                                                 max_frames_, module_paths_)) {
     validate_trace();
@@ -38,6 +40,9 @@ class CoreInspectionSession {
   }
   [[nodiscard]] const std::optional<CoreProcessInfo>& process_info() const noexcept {
     return snapshot_.process_info();
+  }
+  [[nodiscard]] const std::optional<CoreStartupInfo>& startup_info() const noexcept {
+    return startup_info_;
   }
   [[nodiscard]] const SnapshotInspectionTrace& trace() const noexcept { return trace_; }
   [[nodiscard]] pid_t selected_thread_tid() const noexcept { return selected_thread_tid_; }
@@ -111,6 +116,7 @@ class CoreInspectionSession {
 
   CoreSnapshot snapshot_;
   SnapshotModulePathResolver module_paths_;
+  std::optional<CoreStartupInfo> startup_info_;
   std::size_t max_frames_{64};
   pid_t selected_thread_tid_{-1};
   SnapshotInspectionTrace trace_;

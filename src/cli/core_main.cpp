@@ -82,6 +82,31 @@ void print_process(const mdbg::CoreInspectionSession& session) {
             << " file " << process->file_name << " command " << process->command << '\n';
 }
 
+void print_startup(const mdbg::CoreInspectionSession& session) {
+  const auto& startup = session.startup_info();
+  if (!startup) {
+    std::cout << "startup metadata unavailable\n";
+    return;
+  }
+  std::cout << "startup";
+  if (startup->entry_point) {
+    std::cout << " entry 0x" << std::hex << *startup->entry_point << std::dec;
+  }
+  if (startup->program_headers) {
+    std::cout << " phdr 0x" << std::hex << *startup->program_headers << std::dec;
+  }
+  if (startup->program_header_count) {
+    std::cout << " phnum " << *startup->program_header_count;
+  }
+  if (startup->page_size) {
+    std::cout << " pagesz " << *startup->page_size;
+  }
+  if (startup->interpreter_base) {
+    std::cout << " base 0x" << std::hex << *startup->interpreter_base << std::dec;
+  }
+  std::cout << '\n';
+}
+
 void print_source_excerpt(const mdbg::SourcePathResolver& source_paths,
                           const std::string& file, std::uint64_t line,
                           const std::string& module_path) {
@@ -216,6 +241,7 @@ void print_help() {
   std::cout << "read-only core commands:\n"
                "  crash                show kernel-recorded crash metadata\n"
                "  process              show kernel-recorded process identity\n"
+               "  startup              show kernel-recorded process startup metadata\n"
                "  threads              show immutable core thread contexts\n"
                "  thread <tid>         select an immutable core thread\n"
                "  bt | backtrace       show immutable snapshot frames\n"
@@ -260,6 +286,12 @@ int run_session(const std::string& core_path, mdbg::SnapshotModulePathResolver m
         std::string extra;
         if (input >> extra) throw std::invalid_argument("usage: process");
         print_process(session);
+        continue;
+      }
+      if (command == "startup") {
+        std::string extra;
+        if (input >> extra) throw std::invalid_argument("usage: startup");
+        print_startup(session);
         continue;
       }
       if (command == "threads") {

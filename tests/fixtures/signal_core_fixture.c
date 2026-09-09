@@ -3,6 +3,7 @@
 #include <pthread.h>
 #include <signal.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/syscall.h>
 #include <ucontext.h>

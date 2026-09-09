@@ -453,3 +453,22 @@ if(BUILD_TESTING)
     $<TARGET_FILE:debugger_fixture_nopie>
     $<TARGET_FILE:debugger_fixture_stripped>)
 endif()
+
+add_executable(mdbg-core src/cli/core_main.cpp)
+target_link_libraries(mdbg-core PRIVATE mdbg_core)
+target_compile_options(mdbg-core PRIVATE -Wall -Wextra -Wpedantic -Werror)
+
+if(BUILD_TESTING)
+  add_executable(core_inspection_session_integration
+    tests/core_inspection_session_integration.cpp)
+  target_compile_options(core_inspection_session_integration PRIVATE
+    -Wall -Wextra -Wpedantic -Werror)
+  add_test(NAME core_inspection_session_integration_pie
+    COMMAND core_inspection_session_integration
+      $<TARGET_FILE:formal_parameter_fixture_pie>
+      $<TARGET_FILE:mdbg-core>)
+  add_test(NAME core_inspection_session_integration_nopie
+    COMMAND core_inspection_session_integration
+      $<TARGET_FILE:formal_parameter_fixture_nopie>
+      $<TARGET_FILE:mdbg-core>)
+endif()

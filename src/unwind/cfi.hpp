@@ -52,7 +52,7 @@ struct InspectionRegisterState {
   std::optional<std::uint64_t> r13;
   std::optional<std::uint64_t> r14;
   std::optional<std::uint64_t> r15;
-  std::optional<std::array<std::byte, 16>> xmm0;
+  std::optional<std::array<std::byte, 16>> xmm0{};
 };
 
 struct InspectionFrameContext {

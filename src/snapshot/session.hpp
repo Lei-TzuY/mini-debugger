@@ -1,6 +1,7 @@
 #pragma once
 
 #include "dwarf/local_value.hpp"
+#include "snapshot/frame_lookup.hpp"
 #include "snapshot/inspection.hpp"
 #include "snapshot/memory.hpp"
 #include "snapshot/module_path.hpp"
@@ -65,6 +66,18 @@ class CoreInspectionSession {
     return find_snapshot_source_by_runtime_address(snapshot_, runtime_pc, module_paths_);
   }
 
+  [[nodiscard]] std::optional<SnapshotResolvedSymbol> find_frame_symbol(
+      const SnapshotInspectionFrameContext& frame) const {
+    validate_selected_frame(frame);
+    return find_symbol(snapshot_frame_lookup_pc(frame));
+  }
+
+  [[nodiscard]] std::optional<SnapshotResolvedSource> find_frame_source(
+      const SnapshotInspectionFrameContext& frame) const {
+    validate_selected_frame(frame);
+    return find_source(snapshot_frame_lookup_pc(frame));
+  }
+
   [[nodiscard]] SnapshotMemoryRead read_memory(std::uintptr_t address,
                                                std::size_t length) const {
     return read_snapshot_memory(snapshot_, module_paths_, address, length);
@@ -78,6 +91,7 @@ class CoreInspectionSession {
       throw std::runtime_error("core thread inspection produced no snapshot frames");
     }
     validate_snapshot_inspection_frame(snapshot_, next_trace.frames.front());
+    validate_snapshot_frame_lookup_pc(next_trace.frames.front());
     trace_ = std::move(next_trace);
     selected_thread_tid_ = tid;
     selected_frame_ = 0;
@@ -88,6 +102,7 @@ class CoreInspectionSession {
       throw std::out_of_range("core frame index is out of range");
     }
     validate_snapshot_inspection_frame(snapshot_, trace_.frames[index]);
+    validate_snapshot_frame_lookup_pc(trace_.frames[index]);
     if (trace_.frames[index].thread_tid != selected_thread_tid_) {
       throw std::logic_error("core frame belongs to a different selected thread");
     }
@@ -109,6 +124,7 @@ class CoreInspectionSession {
  private:
   void validate_selected_frame(const SnapshotInspectionFrameContext& frame) const {
     validate_snapshot_inspection_frame(snapshot_, frame);
+    validate_snapshot_frame_lookup_pc(frame);
     if (frame.thread_tid != selected_thread_tid_) {
       throw std::logic_error("selected core frame belongs to a different thread");
     }
@@ -118,7 +134,10 @@ class CoreInspectionSession {
     if (trace_.frames.empty()) {
       throw std::runtime_error("core inspection produced no snapshot frames");
     }
-    validate_snapshot_inspection_frame(snapshot_, trace_.frames.front());
+    for (const auto& frame : trace_.frames) {
+      validate_snapshot_inspection_frame(snapshot_, frame);
+      validate_snapshot_frame_lookup_pc(frame);
+    }
     if (trace_.frames.front().thread_tid != selected_thread_tid_) {
       throw std::logic_error("core inspection trace belongs to a different thread");
     }

@@ -1,4 +1,5 @@
 #include "dwarf/source_lookup_impl.inc"
+#include "snapshot/frame_lookup.hpp"
 #include "snapshot/inspection.hpp"
 #include "snapshot/memory.hpp"
 
@@ -473,11 +474,12 @@ std::optional<LocalScalarValue> inspect_snapshot_unit(
       (value_type.byte_size == 0 || value_type.byte_size > kMaxLocalStructSize)) {
     throw std::runtime_error("snapshot DW_OP_addr aggregate width exceeds the bounded reader");
   }
-  if (frame.runtime_pc < owner.virtual_address) {
-    throw std::runtime_error("snapshot frame runtime PC is below its module virtual address");
+  const auto lookup_runtime_pc = snapshot_frame_lookup_pc(frame);
+  if (lookup_runtime_pc < owner.virtual_address) {
+    throw std::runtime_error("snapshot frame lookup PC is below its module virtual address");
   }
   const auto load_bias =
-      static_cast<std::uint64_t>(frame.runtime_pc) - owner.virtual_address;
+      static_cast<std::uint64_t>(lookup_runtime_pc) - owner.virtual_address;
   const auto virtual_address = decode_snapshot_address(location_expression);
   if (virtual_address > std::numeric_limits<std::uint64_t>::max() - load_bias) {
     throw std::overflow_error("snapshot DW_OP_addr runtime address overflow");
@@ -502,9 +504,11 @@ LocalScalarValue inspect_local_value(const CoreSnapshot& snapshot,
                                      const SnapshotModulePathResolver& module_paths) {
   if (name.empty()) throw std::invalid_argument("local variable name must not be empty");
   validate_snapshot_inspection_frame(snapshot, frame);
+  validate_snapshot_frame_lookup_pc(frame);
 
+  const auto lookup_runtime_pc = snapshot_frame_lookup_pc(frame);
   const auto owner =
-      resolve_snapshot_module_address(snapshot, frame.runtime_pc, module_paths);
+      resolve_snapshot_module_address(snapshot, lookup_runtime_pc, module_paths);
   if (owner.module_path != frame.module_path) {
     throw std::logic_error("snapshot inspection frame module ownership changed");
   }
@@ -523,7 +527,7 @@ LocalScalarValue inspect_local_value(const CoreSnapshot& snapshot,
     unit = next;
   }
   throw std::runtime_error(
-      "snapshot inspection-frame PC is not covered by a supported DWARF4/5 subprogram");
+      "snapshot inspection-frame lookup PC is not covered by a supported DWARF4/5 subprogram");
 }
 
 LocalScalarValue inspect_local_value(const CoreSnapshot& snapshot,

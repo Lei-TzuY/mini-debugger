@@ -67,7 +67,6 @@ __attribute__((noinline, noreturn)) static void caller_with_stack_local(void) {
   __asm__ volatile(
       ".globl snapshot_caller_resume_probe\n"
       "snapshot_caller_resume_probe:\n"
-      "nop\n"
       : "+m"(caller_stack_local)
       :
       : "memory");

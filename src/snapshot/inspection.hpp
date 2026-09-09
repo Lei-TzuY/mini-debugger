@@ -1,8 +1,10 @@
 #pragma once
 
 #include "dwarf/eh_frame.hpp"
+#include "dwarf/eh_frame_signal.hpp"
 #include "dwarf/line_table.hpp"
 #include "elf/elf.hpp"
+#include "snapshot/linux_x86_signal_frame.hpp"
 #include "snapshot/module_path.hpp"
 #include "unwind/cfi.hpp"
 
@@ -35,6 +37,11 @@ struct SnapshotResolvedSource {
   std::uint64_t column;
 };
 
+enum class SnapshotFramePcOwnership {
+  ExactInstruction,
+  ReturnAddress
+};
+
 struct SnapshotInspectionFrameContext {
   std::size_t index;
   const CoreSnapshot* owner_snapshot;
@@ -46,6 +53,7 @@ struct SnapshotInspectionFrameContext {
   std::uintptr_t runtime_pc;
   std::uintptr_t stack_pointer;
   std::optional<std::uintptr_t> frame_pointer;
+  SnapshotFramePcOwnership pc_ownership;
   std::string module_path;
   InspectionRegisterState registers;
 };
@@ -160,6 +168,10 @@ inline void validate_snapshot_inspection_frame(
   if (frame.runtime_pc == 0 || frame.stack_pointer == 0 || frame.module_path.empty()) {
     throw std::invalid_argument("snapshot inspection frame is incomplete");
   }
+  if (frame.index == 0 &&
+      frame.pc_ownership != SnapshotFramePcOwnership::ExactInstruction) {
+    throw std::logic_error("snapshot frame zero must own an exact instruction PC");
+  }
 }
 
 inline std::string snapshot_frame_module_path(const CoreSnapshot& snapshot,
@@ -176,7 +188,8 @@ inline std::string snapshot_frame_module_path(const CoreSnapshot& snapshot,
 
 inline SnapshotInspectionFrameContext make_snapshot_inspection_frame(
     const CoreSnapshot& snapshot, const CoreThreadSnapshot& thread,
-    std::size_t index, const EhFrameCursor& cursor) {
+    std::size_t index, const EhFrameCursor& cursor,
+    SnapshotFramePcOwnership pc_ownership) {
   const auto& owned = snapshot.thread(thread.tid);
   if (&owned != &thread) {
     throw std::logic_error("snapshot thread context belongs to a different owner");
@@ -197,6 +210,7 @@ inline SnapshotInspectionFrameContext make_snapshot_inspection_frame(
       cursor.instruction_pointer,
       cursor.stack_pointer,
       cursor.frame_pointer,
+      pc_ownership,
       snapshot_frame_module_path(snapshot, cursor.instruction_pointer),
       recovered};
 }
@@ -218,7 +232,8 @@ inline SnapshotInspectionTrace build_snapshot_inspection_frames(
                         static_cast<std::uintptr_t>(regs.rsp),
                         static_cast<std::uintptr_t>(regs.rbp), regs.rbx};
   SnapshotInspectionTrace result{
-      {make_snapshot_inspection_frame(snapshot, thread, 0, current)},
+      {make_snapshot_inspection_frame(snapshot, thread, 0, current,
+                                      SnapshotFramePcOwnership::ExactInstruction)},
       CfiUnwindStopReason::EndOfChain};
   if (max_frames == 1) {
     result.stop_reason = CfiUnwindStopReason::FrameLimit;
@@ -232,6 +247,7 @@ inline SnapshotInspectionTrace build_snapshot_inspection_frames(
 
   while (result.frames.size() < max_frames) {
     std::optional<EhFrameCursor> caller;
+    auto caller_pc_ownership = SnapshotFramePcOwnership::ReturnAddress;
     try {
       const auto module = resolve_snapshot_module_address(
           snapshot, current.instruction_pointer, module_paths);
@@ -242,7 +258,15 @@ inline SnapshotInspectionTrace build_snapshot_inspection_frames(
                                  : CfiUnwindStopReason::EndOfChain;
         return result;
       }
-      caller = cfi.caller_frame(read_memory, module.virtual_address, current);
+
+      const EhFrameSignalIndex signal_index(module.module_file_path);
+      if (signal_index.available() && signal_index.is_signal_frame(module.virtual_address)) {
+        caller = recover_linux_x86_signal_frame(snapshot, current.stack_pointer);
+        caller_pc_ownership = SnapshotFramePcOwnership::ExactInstruction;
+      } else {
+        caller = cfi.caller_frame(read_memory, module.virtual_address, current);
+      }
+
       if (!caller) {
         result.stop_reason = result.frames.size() == 1
                                  ? CfiUnwindStopReason::NoFrameInfo
@@ -262,7 +286,7 @@ inline SnapshotInspectionTrace build_snapshot_inspection_frames(
     }
 
     result.frames.push_back(make_snapshot_inspection_frame(
-        snapshot, thread, result.frames.size(), *caller));
+        snapshot, thread, result.frames.size(), *caller, caller_pc_ownership));
     current = *caller;
   }
 

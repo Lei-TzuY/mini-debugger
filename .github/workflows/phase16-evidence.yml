@@ -1,0 +1,32 @@
+name: phase16-evidence
+
+on:
+  push:
+    branches:
+      - feat/core-extended-thread-state
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build genuine-core fixture
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
+          cmake --build build --target formal_parameter_fixture_pie --parallel 2
+      - name: Probe kernel extended-state notes
+        run: |
+          sudo sysctl -w kernel.core_pattern=/tmp/mdbg-core-%p
+          ulimit -c unlimited
+          rm -f /tmp/mdbg-core-* /tmp/mdbg-phase16-ready
+          set +e
+          ./build/formal_parameter_fixture_pie --snapshot-crash-threaded /tmp/mdbg-phase16-ready
+          status=$?
+          set -e
+          if [ "$status" -eq 0 ]; then
+            echo "fixture unexpectedly exited cleanly"
+            exit 1
+          fi
+          core=$(find /tmp -maxdepth 1 -type f -name 'mdbg-core-*' | head -n 1)
+          test -n "$core"
+          python3 tools/phase16_core_note_probe.py "$core"

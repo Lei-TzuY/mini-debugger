@@ -8,6 +8,7 @@
 #include <csignal>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <iostream>
@@ -18,14 +19,56 @@ namespace {
 
 constexpr std::uintptr_t kLinuxX86UcontextMcontextOffset = 0x28;
 constexpr std::uintptr_t kLinuxX86GregCount = 23;
+constexpr std::uintptr_t kLinuxX86RdiIndex = 8;
+constexpr std::uintptr_t kLinuxX86RsiIndex = 9;
 constexpr std::uintptr_t kLinuxX86FpregsPointerOffset =
     kLinuxX86UcontextMcontextOffset + kLinuxX86GregCount * sizeof(std::uint64_t);
 constexpr std::uintptr_t kLinuxX86Xmm0Offset = 160;
 constexpr std::uint64_t kInterruptedXmm0Low = UINT64_C(0x40934a0000000000);
 constexpr std::uint64_t kHandlerXmm0Low = UINT64_C(0xc0b0e14000000000);
+constexpr std::uint64_t kInterruptedPairFirst = UINT64_C(0x1122334455667788);
+constexpr std::uint64_t kInterruptedPairSecond = UINT64_C(0x99aabbccddeeff00);
 
 void require(bool condition, const std::string& message) {
   if (!condition) throw std::runtime_error(message);
+}
+
+std::string shell_quote(const std::string& text) {
+  std::string result{"'"};
+  for (const char character : text) {
+    if (character == '\'') {
+      result += "'\\''";
+    } else {
+      result.push_back(character);
+    }
+  }
+  result.push_back('\'');
+  return result;
+}
+
+std::string readelf_dwarf(const std::string& executable) {
+  const auto command = "readelf --wide --debug-dump=info --debug-dump=loc " +
+                       shell_quote(executable) + " 2>/dev/null";
+  FILE* pipe = ::popen(command.c_str(), "r");
+  if (pipe == nullptr) throw std::runtime_error("failed to launch readelf DWARF oracle");
+  std::string output;
+  char buffer[4096];
+  while (const auto count = std::fread(buffer, 1, sizeof(buffer), pipe)) {
+    output.append(buffer, count);
+  }
+  const int status = ::pclose(pipe);
+  require(status != -1 && WIFEXITED(status) && WEXITSTATUS(status) == 0,
+          "readelf DWARF oracle did not exit cleanly");
+  return output;
+}
+
+void require_register_piece_dwarf(const std::string& executable) {
+  const auto dwarf = readelf_dwarf(executable);
+  require(dwarf.find("interrupted_pair") != std::string::npos,
+          "signal fixture DWARF lost interrupted_pair ownership");
+  require(dwarf.find("DW_OP_reg5 (rdi); DW_OP_piece: 8; DW_OP_reg4 (rsi); DW_OP_piece: 8") !=
+              std::string::npos,
+          "signal fixture did not preserve the compiler-proven RDI/RSI register-piece shape");
 }
 
 std::uintptr_t runtime_symbol_address(const mdbg::CoreSnapshot& snapshot,
@@ -53,6 +96,13 @@ std::uint64_t read_u64(const mdbg::CoreSnapshot& snapshot, std::uintptr_t addres
   std::uint64_t value = 0;
   std::memcpy(&value, bytes.data(), sizeof(value));
   return value;
+}
+
+std::uint64_t signal_greg(const mdbg::CoreSnapshot& snapshot,
+                          std::uintptr_t ucontext_address,
+                          std::uintptr_t greg_index) {
+  return read_u64(snapshot, ucontext_address + kLinuxX86UcontextMcontextOffset +
+                                greg_index * sizeof(std::uint64_t));
 }
 
 std::uint64_t xmm0_low(const mdbg::CoreFloatingPointState& state) {
@@ -105,7 +155,7 @@ std::string run_core_cli(const std::string& cli, const std::string& core,
   ::close(input_pipe[0]);
   ::close(output_pipe[1]);
   const std::string commands = "frame " + std::to_string(frame_index) +
-                               "\nprint interrupted_fp_local\nquit\n";
+                               "\nprint interrupted_fp_local\nprint interrupted_pair\nquit\n";
   std::size_t offset = 0;
   while (offset < commands.size()) {
     const auto written =
@@ -161,6 +211,7 @@ int main(int argc, char** argv) {
   }
 
   try {
+    require_register_piece_dwarf(argv[2]);
     mdbg::CoreInspectionSession session(argv[1]);
     const auto& snapshot = session.snapshot();
 
@@ -179,6 +230,11 @@ int main(int argc, char** argv) {
 
     require(ucontext_address != 0 && fixture_fpstate != 0,
             "signal fixture did not capture a kernel fpstate pointer");
+    const auto raw_rdi = signal_greg(snapshot, ucontext_address, kLinuxX86RdiIndex);
+    const auto raw_rsi = signal_greg(snapshot, ucontext_address, kLinuxX86RsiIndex);
+    require(raw_rdi == kInterruptedPairFirst && raw_rsi == kInterruptedPairSecond,
+            "kernel ucontext did not preserve the compiler-owned RDI/RSI aggregate pieces");
+
     const auto raw_fpstate = read_u64(snapshot, ucontext_address + kLinuxX86FpregsPointerOffset);
     require(raw_fpstate == fixture_fpstate,
             "raw Linux x86-64 ucontext fpregs pointer disagrees with handler oracle");
@@ -204,10 +260,15 @@ int main(int argc, char** argv) {
             "snapshot unwind did not restore the interrupted application frame");
     require(frame_xmm0_low(*restored) == kInterruptedXmm0Low,
             "restored interrupted frame did not own the signal-saved XMM0 value");
+    require(restored->registers.rdi == kInterruptedPairFirst &&
+                restored->registers.rsi == kInterruptedPairSecond,
+            "restored interrupted frame did not own the signal-saved register pieces");
     for (const auto& frame : session.trace().frames) {
       if (frame.index <= restored->index) continue;
       require(!frame.registers.xmm0.has_value(),
               "ordinary CFI frame inherited signal-restored XMM0 ownership");
+      require(!frame.registers.rdi.has_value() && !frame.registers.rsi.has_value(),
+              "ordinary CFI frame inherited signal-restored aggregate register ownership");
     }
 
     session.select_frame(restored->index);
@@ -219,15 +280,29 @@ int main(int argc, char** argv) {
     require(value.storage == mdbg::LocalValueStorage::SnapshotCoreRegister,
             "signal-restored interrupted floating local lost register provenance");
 
+    const auto pair = session.inspect_value("interrupted_pair");
+    require(pair.kind == mdbg::LocalValueKind::Structure && pair.byte_size == 16,
+            "signal-restored register-piece aggregate lost its structure type");
+    require(pair.members.size() == 2 && pair.members[0].name == "first" &&
+                pair.members[0].raw_value == kInterruptedPairFirst &&
+                pair.members[1].name == "second" &&
+                pair.members[1].raw_value == kInterruptedPairSecond,
+            "signal-restored register-piece aggregate has the wrong member values");
+    require(pair.storage == mdbg::LocalValueStorage::SnapshotCoreRegister,
+            "signal-restored register-piece aggregate lost register provenance");
+
     const auto cli = (std::filesystem::path(argv[0]).parent_path() / "mdbg-core").string();
     const auto cli_output = run_core_cli(cli, argv[1], restored->index);
     require(cli_output.find("interrupted_fp_local = 1234.5") != std::string::npos,
             "mdbg-core did not print the signal-restored floating local");
+    require(cli_output.find("!interrupted_pair = { first=0x1122334455667788 , second=0x99aabbccddeeff00 }") !=
+                std::string::npos,
+            "mdbg-core did not print the signal-restored register-piece aggregate");
 
-    std::cout << "signal-restored XMM evidence integration passed\n";
+    std::cout << "signal-restored XMM/register-piece evidence integration passed\n";
   } catch (const std::exception& error) {
-    std::cerr << "signal-restored XMM evidence integration failure: " << error.what()
-              << '\n';
+    std::cerr << "signal-restored XMM/register-piece evidence integration failure: "
+              << error.what() << '\n';
     return 1;
   }
   return 0;

@@ -15,6 +15,9 @@ NT_AUXV = 6
 NT_SIGINFO = 0x53494749
 NT_FILE = 0x46494c45
 NT_X86_XSTATE = 0x202
+XMM_BASE = 160
+XMM_SIZE = 16
+XMM15_OFFSET = XMM_BASE + 15 * XMM_SIZE
 
 
 def align4(value):
@@ -35,6 +38,7 @@ def main(path):
 
     notes = []
     all_core = []
+    fp_values = []
     for index in range(e_phnum):
         ph = struct.unpack_from(ELF64_PHDR, data, e_phoff + index * e_phentsize)
         p_type, p_offset, p_filesz = ph[0], ph[2], ph[5]
@@ -53,6 +57,11 @@ def main(path):
                 all_core.append((n_type, descsz, desc_offset))
                 if n_type in (NT_PRSTATUS, NT_FPREGSET, NT_X86_XSTATE):
                     notes.append((n_type, descsz, desc_offset))
+                if n_type == NT_FPREGSET:
+                    if descsz < XMM15_OFFSET + XMM_SIZE:
+                        raise SystemExit('FPREGSET too small for x86-64 XMM15')
+                    fp_values.append(data[desc_offset + XMM15_OFFSET:
+                                          desc_offset + XMM15_OFFSET + XMM_SIZE].hex())
 
     labels = {
         NT_PRSTATUS: 'PRSTATUS', NT_FPREGSET: 'FPREGSET', NT_PRPSINFO: 'PRPSINFO',
@@ -67,6 +76,7 @@ def main(path):
     fp = sum(1 for t, _, _ in notes if t == NT_FPREGSET)
     xs = sum(1 for t, _, _ in notes if t == NT_X86_XSTATE)
     print(f'PHASE16_COUNTS prstatus={pr} fpregset={fp} xstate={xs}')
+    print('PHASE16_XMM15=' + ','.join(fp_values))
     if pr == 0:
         raise SystemExit('no NT_PRSTATUS evidence')
     if fp == 0 and xs == 0:

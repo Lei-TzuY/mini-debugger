@@ -21,6 +21,7 @@ volatile uint64_t inline_seed = INLINE_LOCAL_EXPECTED;
 uint64_t indirect_seed = INDIRECT_LOCAL_EXPECTED ^ INDIRECT_LOCAL_XOR;
 uint64_t* indirect_ptr = &indirect_seed;
 static volatile int snapshot_crash_enabled = 0;
+static volatile int snapshot_indirect_crash_enabled = 0;
 static volatile int snapshot_sibling_ready = 0;
 
 static void* snapshot_sibling_worker(void* argument) {
@@ -115,7 +116,15 @@ __attribute__((noinline)) uint64_t inspect_indirect_local(uint64_t** ptr) {
                    "indirect_local_probe:\n"
                    "nop\n"
                    :
-                   : "r"(ptr));
+                   : "D"(ptr)
+                   : "memory");
+  if (snapshot_indirect_crash_enabled) {
+    __asm__ volatile("xorq %%rax, %%rax\n"
+                     "movq %%rax, (%%rax)\n"
+                     :
+                     : "D"(ptr)
+                     : "rax", "memory");
+  }
   return indirect_local;
 }
 
@@ -134,8 +143,11 @@ static __attribute__((always_inline)) inline uint64_t inspect_inlined_local(
 int main(int argc, char** argv) {
   const int threaded_snapshot =
       argc == 3 && strcmp(argv[1], "--snapshot-crash-threaded") == 0;
+  const int indirect_snapshot =
+      argc == 2 && strcmp(argv[1], "--snapshot-crash-indirect") == 0;
   snapshot_crash_enabled =
       (argc == 2 && strcmp(argv[1], "--snapshot-crash") == 0) || threaded_snapshot;
+  snapshot_indirect_crash_enabled = indirect_snapshot;
   if (threaded_snapshot && !start_snapshot_sibling(argv[2])) return 7;
 
   const uint64_t parameter = parameter_seed ^ UINT64_C(0x0102030405060708);
@@ -146,6 +158,11 @@ int main(int argc, char** argv) {
                                UINT64_C(0x50), UINT64_C(0x40), UINT64_C(0x102030)) !=
       ARITHMETIC_LOCAL_EXPECTED) {
     return 4;
+  }
+  if (indirect_snapshot) {
+    uint64_t* snapshot_indirect_ptr = &indirect_seed;
+    (void)inspect_indirect_local(&snapshot_indirect_ptr);
+    return 8;
   }
   if (inspect_indirect_local(&indirect_ptr) != INDIRECT_LOCAL_EXPECTED) return 5;
   return inspect_inlined_local(inline_seed) == INLINE_LOCAL_EXPECTED ? 0 : 6;

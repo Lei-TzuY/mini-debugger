@@ -71,6 +71,22 @@ void print_value(const mdbg::LocalScalarValue& value) {
             << (value.is_signed ? "signed" : "unsigned") << "]\n";
 }
 
+void print_memory(std::uintptr_t address, const mdbg::SnapshotMemoryRead& memory) {
+  std::cout << "0x" << std::hex << address << ":";
+  for (const auto byte : memory.bytes) {
+    std::cout << ' ' << std::setw(2) << std::setfill('0')
+              << std::to_integer<unsigned int>(byte);
+  }
+  std::cout << std::setfill(' ') << std::dec << " [";
+  if (memory.provenance == mdbg::SnapshotMemoryProvenance::Core) {
+    std::cout << "core";
+  } else {
+    std::cout << "artifact:" << memory.module_path << " file+0x" << std::hex
+              << memory.artifact_file_offset << std::dec;
+  }
+  std::cout << "]\n";
+}
+
 std::size_t parse_frame_index(const std::string& text) {
   std::size_t consumed = 0;
   const auto value = std::stoull(text, &consumed, 10);
@@ -88,6 +104,24 @@ pid_t parse_thread_tid(const std::string& text) {
   return static_cast<pid_t>(value);
 }
 
+std::uintptr_t parse_memory_address(const std::string& text) {
+  std::size_t consumed = 0;
+  const auto value = std::stoull(text, &consumed, 0);
+  if (consumed != text.size() || value > std::numeric_limits<std::uintptr_t>::max()) {
+    throw std::invalid_argument("invalid core memory address: " + text);
+  }
+  return static_cast<std::uintptr_t>(value);
+}
+
+std::size_t parse_memory_length(const std::string& text) {
+  std::size_t consumed = 0;
+  const auto value = std::stoull(text, &consumed, 0);
+  if (consumed != text.size() || value == 0 || value > std::numeric_limits<std::size_t>::max()) {
+    throw std::invalid_argument("invalid core memory length: " + text);
+  }
+  return static_cast<std::size_t>(value);
+}
+
 void print_help() {
   std::cout << "read-only core commands:\n"
                "  threads              show immutable core thread contexts\n"
@@ -95,6 +129,7 @@ void print_help() {
                "  bt | backtrace       show immutable snapshot frames\n"
                "  frame <index>        select an immutable snapshot frame\n"
                "  print <name> | p <name>  inspect a source value in the selected frame\n"
+               "  x <address> <length> inspect immutable snapshot memory\n"
                "  help                 show this help\n"
                "  quit | q             exit the core session\n";
 }
@@ -164,6 +199,18 @@ int run_session(const std::string& core_path, mdbg::SnapshotModulePathResolver m
           throw std::invalid_argument("usage: print <name>");
         }
         print_value(session.inspect_value(name));
+        continue;
+      }
+      if (command == "x") {
+        std::string address_text;
+        std::string length_text;
+        std::string extra;
+        if (!(input >> address_text >> length_text) || (input >> extra)) {
+          throw std::invalid_argument("usage: x <address> <length>");
+        }
+        const auto address = parse_memory_address(address_text);
+        const auto length = parse_memory_length(length_text);
+        print_memory(address, session.read_memory(address, length));
         continue;
       }
 

@@ -2,6 +2,7 @@
 
 #include "dwarf/local_value.hpp"
 #include "snapshot/inspection.hpp"
+#include "snapshot/memory.hpp"
 #include "snapshot/module_path.hpp"
 
 #include <cstddef>
@@ -51,6 +52,11 @@ class CoreInspectionSession {
   [[nodiscard]] std::optional<SnapshotResolvedSource> find_source(
       std::uintptr_t runtime_pc) const {
     return find_snapshot_source_by_runtime_address(snapshot_, runtime_pc, module_paths_);
+  }
+
+  [[nodiscard]] SnapshotMemoryRead read_memory(std::uintptr_t address,
+                                               std::size_t length) const {
+    return read_snapshot_memory(snapshot_, module_paths_, address, length);
   }
 
   void select_thread(pid_t tid) {

@@ -72,6 +72,10 @@ void test_file_backed_local(const std::string& fixture) {
     require(value.kind == mdbg::LocalValueKind::Integer && value.byte_size == 8 &&
                 value.raw_value == kExpectedValue,
             "artifact-backed snapshot local value was not reconstructed");
+    require(value.storage == mdbg::LocalValueStorage::SnapshotRuntimeArtifact,
+            "restricted snapshot local did not report runtime-artifact provenance");
+    require(value.storage_module_path == fixture && !value.storage_file_path.empty(),
+            "snapshot local artifact provenance lost module/file ownership");
   } catch (...) {
     std::remove(core_path.c_str());
     throw;

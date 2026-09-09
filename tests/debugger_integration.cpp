@@ -73,6 +73,7 @@ void test_multithread_process_lifecycle(const std::string& fixture) {
   resume_task(process, leader);
 
   std::optional<pid_t> worker_tid;
+  std::optional<pid_t> preclone_worker_stop;
   bool saw_clone = false;
   bool saw_worker_stop = false;
   bool saw_worker_exit = false;
@@ -97,9 +98,22 @@ void test_multithread_process_lifecycle(const std::string& fixture) {
         require(contains_tid(process.tids(), *event.new_tid),
                 "new TID must enter the traced-task registry at clone stop");
         worker_tid = *event.new_tid;
+        if (preclone_worker_stop) {
+          require(*preclone_worker_stop == *worker_tid,
+                  "pre-clone stopped TID did not match kernel-reported worker TID");
+          saw_worker_stop = true;
+        }
         saw_clone = true;
-      } else if (worker_tid && event.tid == *worker_tid) {
-        saw_worker_stop = true;
+      } else if (event.tid != leader) {
+        if (worker_tid) {
+          require(event.tid == *worker_tid,
+                  "unexpected nonleader TID produced a ptrace stop");
+          saw_worker_stop = true;
+        } else {
+          require(!preclone_worker_stop,
+                  "fixture produced more than one pre-clone nonleader stop");
+          preclone_worker_stop = event.tid;
+        }
       }
 
       resume_task(process, event.tid);

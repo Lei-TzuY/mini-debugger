@@ -58,6 +58,19 @@ void print_threads(const mdbg::CoreInspectionSession& session) {
   }
 }
 
+void print_crash(const mdbg::CoreInspectionSession& session) {
+  const auto& crash = session.crash_info();
+  if (!crash) {
+    std::cout << "crash metadata unavailable\n";
+    return;
+  }
+  std::cout << "crash signal " << crash->signal_number << " code " << crash->signal_code;
+  if (crash->fault_address) {
+    std::cout << " address 0x" << std::hex << *crash->fault_address << std::dec;
+  }
+  std::cout << '\n';
+}
+
 void print_source_excerpt(const mdbg::SourcePathResolver& source_paths,
                           const std::string& file, std::uint64_t line,
                           const std::string& module_path) {
@@ -190,6 +203,7 @@ std::size_t parse_memory_length(const std::string& text) {
 
 void print_help() {
   std::cout << "read-only core commands:\n"
+               "  crash                show kernel-recorded crash metadata\n"
                "  threads              show immutable core thread contexts\n"
                "  thread <tid>         select an immutable core thread\n"
                "  bt | backtrace       show immutable snapshot frames\n"
@@ -222,6 +236,12 @@ int run_session(const std::string& core_path, mdbg::SnapshotModulePathResolver m
       if (command == "q" || command == "quit") break;
       if (command == "help") {
         print_help();
+        continue;
+      }
+      if (command == "crash") {
+        std::string extra;
+        if (input >> extra) throw std::invalid_argument("usage: crash");
+        print_crash(session);
         continue;
       }
       if (command == "threads") {

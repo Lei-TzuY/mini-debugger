@@ -2,6 +2,7 @@
 
 #include <elf.h>
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>

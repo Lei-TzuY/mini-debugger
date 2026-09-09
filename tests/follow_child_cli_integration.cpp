@@ -3,7 +3,6 @@
 #include <unistd.h>
 
 #include <cerrno>
-#include <chrono>
 #include <csignal>
 #include <filesystem>
 #include <fstream>
@@ -23,6 +22,7 @@ struct CliProcess {
   pid_t pid{-1};
   int input{-1};
   int output{-1};
+  std::string pending_output;
 };
 
 CliProcess spawn_cli(const std::string& mdbg, const std::string& driver) {
@@ -49,7 +49,7 @@ CliProcess spawn_cli(const std::string& mdbg, const std::string& driver) {
 
   ::close(input_pipe[0]);
   ::close(output_pipe[1]);
-  return CliProcess{pid, input_pipe[1], output_pipe[0]};
+  return CliProcess{pid, input_pipe[1], output_pipe[0], {}};
 }
 
 std::string target_for_driver(const std::string& driver) {
@@ -89,7 +89,7 @@ CliProcess spawn_divergence_cli(const std::string& mdbg, const std::string& driv
 
   ::close(input_pipe[0]);
   ::close(output_pipe[1]);
-  return CliProcess{pid, input_pipe[1], output_pipe[0]};
+  return CliProcess{pid, input_pipe[1], output_pipe[0], {}};
 }
 
 void terminate_cli(CliProcess& cli) noexcept {
@@ -121,46 +121,82 @@ void write_cli(CliProcess& cli, const std::string& command) {
   }
 }
 
+void require_cli_alive(const CliProcess& cli, const std::string& needle) {
+  if (cli.pid <= 0) return;
+  int status = 0;
+  const auto result = ::waitpid(cli.pid, &status, WNOHANG);
+  if (result == 0 || (result == -1 && errno == EINTR)) return;
+  if (result == cli.pid) {
+    throw std::runtime_error("CLI exited before output: " + needle);
+  }
+  if (result == -1 && errno != ECHILD) {
+    throw std::runtime_error("failed checking CLI liveness");
+  }
+}
+
 std::string read_until(CliProcess& cli, const std::string& needle) {
-  std::string output;
-  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
-  while (output.find(needle) == std::string::npos) {
-    const auto now = std::chrono::steady_clock::now();
-    if (now >= deadline) throw std::runtime_error("timed out waiting for CLI output: " + needle);
-    const auto remaining =
-        std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now).count();
+  for (;;) {
+    const auto position = cli.pending_output.find(needle);
+    if (position != std::string::npos) {
+      const auto end = position + needle.size();
+      auto output = cli.pending_output.substr(0, end);
+      cli.pending_output.erase(0, end);
+      return output;
+    }
+
     pollfd descriptor{cli.output, POLLIN | POLLHUP, 0};
-    const int result = ::poll(&descriptor, 1, static_cast<int>(remaining));
+    const int result = ::poll(&descriptor, 1, 250);
     if (result == -1 && errno == EINTR) continue;
-    if (result <= 0) throw std::runtime_error("timed out reading CLI output: " + needle);
+    if (result == -1) throw std::runtime_error("failed polling CLI output");
+    if (result == 0) {
+      require_cli_alive(cli, needle);
+      continue;
+    }
 
     char buffer[512];
     const auto count = ::read(cli.output, buffer, sizeof(buffer));
     if (count == -1 && errno == EINTR) continue;
     if (count <= 0) throw std::runtime_error("CLI exited before output: " + needle);
-    output.append(buffer, static_cast<std::size_t>(count));
+    cli.pending_output.append(buffer, static_cast<std::size_t>(count));
   }
-  return output;
 }
 
 std::string read_to_eof(CliProcess& cli) {
   std::string output;
-  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  output.swap(cli.pending_output);
   for (;;) {
-    const auto now = std::chrono::steady_clock::now();
-    if (now >= deadline) throw std::runtime_error("timed out waiting for CLI exit");
-    const auto remaining =
-        std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now).count();
     pollfd descriptor{cli.output, POLLIN | POLLHUP, 0};
-    const int result = ::poll(&descriptor, 1, static_cast<int>(remaining));
+    const int result = ::poll(&descriptor, 1, 250);
     if (result == -1 && errno == EINTR) continue;
-    if (result <= 0) throw std::runtime_error("timed out reading CLI to EOF");
+    if (result == -1) throw std::runtime_error("failed polling CLI output to EOF");
+    if (result == 0) continue;
     char buffer[512];
     const auto count = ::read(cli.output, buffer, sizeof(buffer));
     if (count == -1 && errno == EINTR) continue;
     if (count == 0) return output;
     if (count < 0) throw std::runtime_error("failed reading CLI output");
     output.append(buffer, static_cast<std::size_t>(count));
+  }
+}
+
+void test_cli_stream_framing() {
+  int pipe_fds[2];
+  if (::pipe(pipe_fds) != 0) throw std::runtime_error("failed to create framing pipe");
+  CliProcess cli{-1, pipe_fds[1], pipe_fds[0], {}};
+  try {
+    write_cli(cli, "first(mdbg) second(mdbg) ");
+    ::close(cli.input);
+    cli.input = -1;
+    require(read_until(cli, "(mdbg) ") == "first(mdbg) ",
+            "CLI framing consumed bytes past the first prompt");
+    require(read_until(cli, "(mdbg) ") == "second(mdbg) ",
+            "CLI framing did not preserve buffered prompt tail");
+    ::close(cli.output);
+    cli.output = -1;
+  } catch (...) {
+    if (cli.input != -1) ::close(cli.input);
+    if (cli.output != -1) ::close(cli.output);
+    throw;
   }
 }
 
@@ -484,6 +520,7 @@ int main(int argc, char** argv) {
     return 2;
   }
   try {
+    test_cli_stream_framing();
     run_follow_child_cli(argv[1], argv[2]);
     run_two_process_cli(argv[1], argv[2]);
     run_process_exec_divergence_cli(argv[1], argv[2]);

@@ -3,6 +3,7 @@
 #include "dwarf/eh_frame.hpp"
 #include "dwarf/line_table.hpp"
 #include "elf/elf.hpp"
+#include "snapshot/module_resolver.hpp"
 #include "unwind/cfi.hpp"
 
 #include <algorithm>
@@ -17,6 +18,7 @@ namespace mdbg {
 
 struct SnapshotModuleAddress {
   std::string module_path;
+  std::string backing_path;
   std::uint64_t virtual_address;
 };
 
@@ -53,8 +55,14 @@ struct SnapshotInspectionTrace {
   CfiUnwindStopReason stop_reason;
 };
 
+inline const SnapshotModuleResolver& identity_snapshot_module_resolver() {
+  static const SnapshotModuleResolver resolver;
+  return resolver;
+}
+
 inline SnapshotModuleAddress resolve_snapshot_module_address(
-    const CoreSnapshot& snapshot, std::uintptr_t address) {
+    const CoreSnapshot& snapshot, std::uintptr_t address,
+    const SnapshotModuleResolver& resolver) {
   const auto mapping = snapshot.mapping_for_address(address);
   if (!mapping) {
     throw std::runtime_error("snapshot address is not covered by NT_FILE mapping");
@@ -63,9 +71,11 @@ inline SnapshotModuleAddress resolve_snapshot_module_address(
     throw std::runtime_error("snapshot NT_FILE mapping lacks an absolute module path");
   }
 
-  const ElfFile module(mapping->path);
+  const auto backing_path = resolver.resolve(mapping->path);
+  const ElfFile module(backing_path);
   if (!module.is_pie()) {
-    return SnapshotModuleAddress{mapping->path, static_cast<std::uint64_t>(address)};
+    return SnapshotModuleAddress{mapping->path, backing_path,
+                                 static_cast<std::uint64_t>(address)};
   }
 
   const auto base = std::find_if(
@@ -85,28 +95,48 @@ inline SnapshotModuleAddress resolve_snapshot_module_address(
   if (runtime < bias) {
     throw std::runtime_error("snapshot runtime address is below module load bias");
   }
-  return SnapshotModuleAddress{mapping->path, runtime - bias};
+  return SnapshotModuleAddress{mapping->path, backing_path, runtime - bias};
+}
+
+inline SnapshotModuleAddress resolve_snapshot_module_address(
+    const CoreSnapshot& snapshot, std::uintptr_t address) {
+  return resolve_snapshot_module_address(snapshot, address,
+                                         identity_snapshot_module_resolver());
 }
 
 inline std::optional<SnapshotResolvedSymbol> find_snapshot_symbol_by_runtime_address(
-    const CoreSnapshot& snapshot, std::uintptr_t address) {
-  const auto module_address = resolve_snapshot_module_address(snapshot, address);
-  const ElfFile module(module_address.module_path);
+    const CoreSnapshot& snapshot, std::uintptr_t address,
+    const SnapshotModuleResolver& resolver) {
+  const auto module_address = resolve_snapshot_module_address(snapshot, address, resolver);
+  const ElfFile module(module_address.backing_path);
   const auto resolved = module.find_symbol_by_virtual_address(module_address.virtual_address);
   if (!resolved) return std::nullopt;
   return SnapshotResolvedSymbol{module_address.module_path, resolved->symbol.name,
                                 resolved->offset};
 }
 
-inline std::optional<SnapshotResolvedSource> find_snapshot_source_by_runtime_address(
+inline std::optional<SnapshotResolvedSymbol> find_snapshot_symbol_by_runtime_address(
     const CoreSnapshot& snapshot, std::uintptr_t address) {
-  const auto module_address = resolve_snapshot_module_address(snapshot, address);
-  const DwarfLineTable lines(module_address.module_path);
+  return find_snapshot_symbol_by_runtime_address(snapshot, address,
+                                                 identity_snapshot_module_resolver());
+}
+
+inline std::optional<SnapshotResolvedSource> find_snapshot_source_by_runtime_address(
+    const CoreSnapshot& snapshot, std::uintptr_t address,
+    const SnapshotModuleResolver& resolver) {
+  const auto module_address = resolve_snapshot_module_address(snapshot, address, resolver);
+  const DwarfLineTable lines(module_address.backing_path);
   if (!lines.available()) return std::nullopt;
   const auto source = lines.find_virtual_address(module_address.virtual_address);
   if (!source) return std::nullopt;
   return SnapshotResolvedSource{module_address.module_path, source->file, source->line,
                                 source->column};
+}
+
+inline std::optional<SnapshotResolvedSource> find_snapshot_source_by_runtime_address(
+    const CoreSnapshot& snapshot, std::uintptr_t address) {
+  return find_snapshot_source_by_runtime_address(snapshot, address,
+                                                 identity_snapshot_module_resolver());
 }
 
 inline void validate_snapshot_inspection_frame(
@@ -171,7 +201,7 @@ inline SnapshotInspectionFrameContext make_snapshot_inspection_frame(
 
 inline SnapshotInspectionTrace build_snapshot_inspection_frames(
     const CoreSnapshot& snapshot, const CoreThreadSnapshot& thread,
-    std::size_t max_frames = 64) {
+    const SnapshotModuleResolver& resolver, std::size_t max_frames = 64) {
   if (max_frames == 0) {
     throw std::invalid_argument(
         "snapshot inspection requires a non-zero frame limit");
@@ -201,9 +231,9 @@ inline SnapshotInspectionTrace build_snapshot_inspection_frames(
   while (result.frames.size() < max_frames) {
     std::optional<EhFrameCursor> caller;
     try {
-      const auto module =
-          resolve_snapshot_module_address(snapshot, current.instruction_pointer);
-      const EhFrame cfi(module.module_path);
+      const auto module = resolve_snapshot_module_address(
+          snapshot, current.instruction_pointer, resolver);
+      const EhFrame cfi(module.backing_path);
       if (!cfi.available()) {
         result.stop_reason = result.frames.size() == 1
                                  ? CfiUnwindStopReason::NoFrameInfo
@@ -222,8 +252,8 @@ inline SnapshotInspectionTrace build_snapshot_inspection_frames(
         result.stop_reason = CfiUnwindStopReason::InvalidFrameState;
         return result;
       }
-      static_cast<void>(
-          resolve_snapshot_module_address(snapshot, caller->instruction_pointer));
+      static_cast<void>(resolve_snapshot_module_address(
+          snapshot, caller->instruction_pointer, resolver));
     } catch (const std::exception&) {
       result.stop_reason = CfiUnwindStopReason::InvalidFrameState;
       return result;
@@ -239,13 +269,29 @@ inline SnapshotInspectionTrace build_snapshot_inspection_frames(
 }
 
 inline SnapshotInspectionTrace build_snapshot_inspection_frames(
+    const CoreSnapshot& snapshot, const CoreThreadSnapshot& thread,
+    std::size_t max_frames = 64) {
+  return build_snapshot_inspection_frames(snapshot, thread,
+                                          identity_snapshot_module_resolver(), max_frames);
+}
+
+inline SnapshotInspectionTrace build_snapshot_inspection_frames(
+    const CoreSnapshot& snapshot, const SnapshotModuleResolver& resolver,
+    std::size_t max_frames = 64) {
+  return build_snapshot_inspection_frames(snapshot, snapshot.crashed_thread(), resolver,
+                                          max_frames);
+}
+
+inline SnapshotInspectionTrace build_snapshot_inspection_frames(
     const CoreSnapshot& snapshot, std::size_t max_frames = 64) {
-  return build_snapshot_inspection_frames(snapshot, snapshot.crashed_thread(), max_frames);
+  return build_snapshot_inspection_frames(snapshot, snapshot.crashed_thread(),
+                                          identity_snapshot_module_resolver(), max_frames);
 }
 
 inline CfiBacktrace unwind_eh_frame(const CoreSnapshot& snapshot,
+                                    const SnapshotModuleResolver& resolver,
                                     std::size_t max_frames = 64) {
-  const auto inspection = build_snapshot_inspection_frames(snapshot, max_frames);
+  const auto inspection = build_snapshot_inspection_frames(snapshot, resolver, max_frames);
   CfiBacktrace result{{}, inspection.stop_reason};
   result.frames.reserve(inspection.frames.size());
   for (const auto& frame : inspection.frames) {
@@ -253,6 +299,11 @@ inline CfiBacktrace unwind_eh_frame(const CoreSnapshot& snapshot,
         CfiStackFrame{frame.runtime_pc, frame.stack_pointer, frame.frame_pointer});
   }
   return result;
+}
+
+inline CfiBacktrace unwind_eh_frame(const CoreSnapshot& snapshot,
+                                    std::size_t max_frames = 64) {
+  return unwind_eh_frame(snapshot, identity_snapshot_module_resolver(), max_frames);
 }
 
 }  // namespace mdbg

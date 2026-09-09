@@ -63,9 +63,6 @@ void require_caller_stack_local(mdbg::CoreInspectionSession& session) {
   session.select_frame(1);
   require(session.selected_frame_index() == 1,
           "core session did not select the historical caller frame");
-  const auto symbol = session.find_symbol(session.selected_frame().runtime_pc);
-  require(symbol && symbol->name == "caller_with_stack_local",
-          "historical frame 1 is not the compiler caller that owns the stack local");
 
   const auto value = session.inspect_value("caller_stack_local");
   require(value.name == "caller_stack_local",

@@ -30,6 +30,7 @@ volatile double signal_core_fp_seed = 1234.5;
 static const double signal_core_handler_fp_marker = -4321.25;
 volatile sig_atomic_t signal_core_interrupted_ready = 0;
 volatile sig_atomic_t signal_core_main_tid = 0;
+volatile sig_atomic_t signal_core_loop_exit = 0;
 
 __attribute__((noinline)) void signal_core_crash_from_handler(void) {
   __asm__ volatile(
@@ -85,18 +86,20 @@ __attribute__((noinline, noreturn)) void signal_core_interrupted_application(
       signal_core_value_seed ^ UINT64_C(0xa5a55a5ac3c33c3c);
   double interrupted_fp_local = signal_core_fp_seed;
   signal_core_interrupted_ready = 1;
-  for (;;) {
-    __asm__ volatile(
-        ".globl signal_core_interrupted_probe\n"
-        "signal_core_interrupted_probe:\n"
-        "pause\n"
-        ".globl signal_core_interrupted_probe_end\n"
-        "signal_core_interrupted_probe_end:\n"
-        : "+D"(interrupted_pair.first), "+S"(interrupted_pair.second),
-          "+r"(interrupted_register_local), "+x"(interrupted_fp_local)
-        :
-        : "memory");
+  __asm__ volatile(".globl signal_core_interrupted_probe\n"
+                   "signal_core_interrupted_probe:\n"
+                   ::: "memory");
+  while (!signal_core_loop_exit) {
+    __asm__ volatile("pause"
+                     : "+D"(interrupted_pair.first), "+S"(interrupted_pair.second),
+                       "+r"(interrupted_register_local), "+x"(interrupted_fp_local)
+                     :
+                     : "memory");
   }
+  __asm__ volatile(".globl signal_core_interrupted_probe_end\n"
+                   "signal_core_interrupted_probe_end:\n"
+                   ::: "memory");
+  _Exit(92);
 }
 
 int main(void) {

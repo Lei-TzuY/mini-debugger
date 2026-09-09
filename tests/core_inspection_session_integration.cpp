@@ -5,6 +5,7 @@
 #include <cerrno>
 #include <chrono>
 #include <csignal>
+#include <cstddef>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
@@ -12,6 +13,7 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <vector>
 
 namespace {
 
@@ -29,6 +31,72 @@ std::string temp_path() {
   ::close(fd);
   ::unlink(pattern);
   return pattern;
+}
+
+std::vector<std::byte> read_file_bytes(const std::string& path) {
+  std::ifstream input(path, std::ios::binary);
+  if (!input) throw std::runtime_error("failed to open core file: " + path);
+  input.seekg(0, std::ios::end);
+  const auto length = input.tellg();
+  if (length < 0) throw std::runtime_error("failed to determine core file size");
+  input.seekg(0, std::ios::beg);
+  std::vector<std::byte> bytes(static_cast<std::size_t>(length));
+  if (!bytes.empty()) {
+    input.read(reinterpret_cast<char*>(bytes.data()), length);
+    if (!input) throw std::runtime_error("failed to read core file");
+  }
+  return bytes;
+}
+
+std::string write_variant(const std::vector<std::byte>& bytes) {
+  char pattern[] = "/tmp/mdbg-core-session-variant-XXXXXX";
+  const int fd = ::mkstemp(pattern);
+  if (fd == -1) throw std::runtime_error("mkstemp failed for core-session variant");
+  ::close(fd);
+  std::ofstream output(pattern, std::ios::binary | std::ios::trunc);
+  output.write(reinterpret_cast<const char*>(bytes.data()),
+               static_cast<std::streamsize>(bytes.size()));
+  if (!output) throw std::runtime_error("failed to write core-session variant");
+  return pattern;
+}
+
+std::vector<std::byte> replace_all_ascii(std::vector<std::byte> bytes,
+                                         const std::string& from,
+                                         const std::string& to) {
+  require(!from.empty() && from.size() == to.size(),
+          "core module replacement must preserve non-empty width");
+  std::size_t replacements = 0;
+  for (std::size_t offset = 0; offset + from.size() <= bytes.size(); ++offset) {
+    bool match = true;
+    for (std::size_t index = 0; index < from.size(); ++index) {
+      if (std::to_integer<unsigned char>(bytes[offset + index]) !=
+          static_cast<unsigned char>(from[index])) {
+        match = false;
+        break;
+      }
+    }
+    if (!match) continue;
+    for (std::size_t index = 0; index < to.size(); ++index) {
+      bytes[offset + index] = static_cast<std::byte>(static_cast<unsigned char>(to[index]));
+    }
+    ++replacements;
+    offset += from.size() - 1;
+  }
+  require(replacements != 0, "real core did not contain the fixture module path");
+  return bytes;
+}
+
+std::string unavailable_peer_path(const std::string& path) {
+  auto candidate = path;
+  for (std::size_t offset = candidate.size(); offset > 0; --offset) {
+    const auto index = offset - 1;
+    if (candidate[index] == '/') continue;
+    const char original = candidate[index];
+    candidate[index] = original == 'x' ? 'y' : 'x';
+    if (!std::filesystem::exists(candidate)) return candidate;
+    candidate[index] = original;
+  }
+  throw std::runtime_error("could not derive unavailable same-width module path");
 }
 
 struct GeneratedCore {
@@ -80,7 +148,9 @@ GeneratedCore generate_core(const std::string& fixture) {
   return GeneratedCore{core_path, child, static_cast<pid_t>(sibling)};
 }
 
-std::string run_core_cli(const std::string& cli, const GeneratedCore& core) {
+std::string run_core_cli(const std::string& cli, const GeneratedCore& core,
+                         const std::string& recorded_module = {},
+                         const std::string& local_module = {}) {
   int input_pipe[2];
   int output_pipe[2];
   if (::pipe(input_pipe) != 0 || ::pipe(output_pipe) != 0) {
@@ -97,7 +167,12 @@ std::string run_core_cli(const std::string& cli, const GeneratedCore& core) {
     ::close(input_pipe[1]);
     ::close(output_pipe[0]);
     ::close(output_pipe[1]);
-    ::execl(cli.c_str(), cli.c_str(), core.path.c_str(), nullptr);
+    if (!recorded_module.empty()) {
+      ::execl(cli.c_str(), cli.c_str(), "--substitute-module-path",
+              recorded_module.c_str(), local_module.c_str(), core.path.c_str(), nullptr);
+    } else {
+      ::execl(cli.c_str(), cli.c_str(), core.path.c_str(), nullptr);
+    }
     _exit(127);
   }
 
@@ -145,44 +220,68 @@ std::string run_core_cli(const std::string& cli, const GeneratedCore& core) {
   return output;
 }
 
+void require_core_session_output(const std::string& output,
+                                 const GeneratedCore& core,
+                                 const std::string& recorded_module) {
+  require(output.find("core signal 11 tid " + std::to_string(core.crash_tid)) !=
+              std::string::npos,
+          "core session did not report immutable crash identity");
+  require(output.find("* tid " + std::to_string(core.crash_tid) + " crash") !=
+              std::string::npos,
+          "core thread catalogue did not mark the selected crash thread");
+  require(output.find("tid " + std::to_string(core.sibling_tid)) != std::string::npos,
+          "core thread catalogue lost the real sibling thread");
+  require(output.find("selected thread " + std::to_string(core.sibling_tid)) !=
+              std::string::npos,
+          "core session did not select the immutable sibling thread");
+  require(output.find("selected thread " + std::to_string(core.crash_tid)) !=
+              std::string::npos,
+          "core session did not restore the immutable crash thread");
+  require(output.find("#0 0x") != std::string::npos &&
+              output.find("#1 0x") != std::string::npos,
+          "core session backtrace did not expose crash and caller frames");
+  require(output.find(recorded_module + "!" + kExpectedCaller) != std::string::npos,
+          "core session caller frame lost recorded module-qualified ownership");
+  require(output.find("selected frame 1") != std::string::npos,
+          "core session did not select the recovered caller frame");
+  require(output.find(recorded_module + "!transformed = " + std::string(kExpectedValue)) !=
+              std::string::npos,
+          "core session did not evaluate the historical caller source value");
+  require(output.find("unsupported in core session: continue") != std::string::npos,
+          "core session exposed a live execution command");
+  require(output.find("error: core thread TID is unavailable") != std::string::npos,
+          "core session did not reject an unavailable immutable thread");
+  require(output.find("error: core frame index is out of range") != std::string::npos,
+          "core session did not reject invalid immutable frame selection");
+}
+
 void test_core_session(const std::string& fixture, const std::string& cli) {
   const auto core = generate_core(fixture);
+  std::string relocated_path;
   try {
     const auto output = run_core_cli(cli, core);
-    require(output.find("core signal 11 tid " + std::to_string(core.crash_tid)) !=
+    require_core_session_output(output, core, fixture);
+
+    const auto unavailable = unavailable_peer_path(fixture);
+    relocated_path = write_variant(
+        replace_all_ascii(read_file_bytes(core.path), fixture, unavailable));
+    const GeneratedCore relocated{relocated_path, core.crash_tid, core.sibling_tid};
+
+    const auto unavailable_output = run_core_cli(cli, relocated);
+    require(unavailable_output.find("backtrace stopped: invalid-frame-state") !=
                 std::string::npos,
-            "core session did not report immutable crash identity");
-    require(output.find("* tid " + std::to_string(core.crash_tid) + " crash") !=
-                std::string::npos,
-            "core thread catalogue did not mark the selected crash thread");
-    require(output.find("tid " + std::to_string(core.sibling_tid)) != std::string::npos,
-            "core thread catalogue lost the real sibling thread");
-    require(output.find("selected thread " + std::to_string(core.sibling_tid)) !=
-                std::string::npos,
-            "core session did not select the immutable sibling thread");
-    require(output.find("selected thread " + std::to_string(core.crash_tid)) !=
-                std::string::npos,
-            "core session did not restore the immutable crash thread");
-    require(output.find("#0 0x") != std::string::npos &&
-                output.find("#1 0x") != std::string::npos,
-            "core session backtrace did not expose crash and caller frames");
-    require(output.find(fixture + "!" + kExpectedCaller) != std::string::npos,
-            "core session caller frame lost module-qualified symbol ownership");
-    require(output.find("selected frame 1") != std::string::npos,
-            "core session did not select the recovered caller frame");
-    require(output.find("!transformed = " + std::string(kExpectedValue)) !=
-                std::string::npos,
-            "core session did not evaluate the historical caller source value");
-    require(output.find("unsupported in core session: continue") != std::string::npos,
-            "core session exposed a live execution command");
-    require(output.find("error: core thread TID is unavailable") != std::string::npos,
-            "core session did not reject an unavailable immutable thread");
-    require(output.find("error: core frame index is out of range") != std::string::npos,
-            "core session did not reject invalid immutable frame selection");
+            "relocated core unexpectedly recovered caller frames without a module mapping");
+    require(unavailable_output.find(kExpectedValue) == std::string::npos,
+            "relocated core unexpectedly evaluated caller value without a module mapping");
+
+    const auto mapped_output = run_core_cli(cli, relocated, unavailable, fixture);
+    require_core_session_output(mapped_output, relocated, unavailable);
   } catch (...) {
+    if (!relocated_path.empty()) std::remove(relocated_path.c_str());
     std::remove(core.path.c_str());
     throw;
   }
+  if (!relocated_path.empty()) std::remove(relocated_path.c_str());
   std::remove(core.path.c_str());
 }
 

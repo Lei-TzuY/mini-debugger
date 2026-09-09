@@ -25,6 +25,13 @@ struct ResolvedSymbol {
   std::uint64_t offset;
 };
 
+struct ElfDebugLink {
+  std::string filename;
+  std::uint32_t crc32;
+};
+
+std::uint32_t gnu_debuglink_crc32(const std::string& path);
+
 class ElfFile {
  public:
   explicit ElfFile(std::string path);
@@ -35,6 +42,9 @@ class ElfFile {
     return zero_offset_load_vaddr_;
   }
   [[nodiscard]] const std::vector<ElfSymbol>& symbols() const noexcept { return symbols_; }
+  [[nodiscard]] const std::optional<ElfDebugLink>& debug_link() const noexcept {
+    return debug_link_;
+  }
   [[nodiscard]] std::optional<ElfSymbol> find_symbol(std::string_view name) const;
   [[nodiscard]] std::optional<ResolvedSymbol> find_symbol_by_virtual_address(
       std::uint64_t address) const;
@@ -50,6 +60,7 @@ class ElfFile {
   std::string path_;
   std::vector<std::byte> bytes_;
   std::vector<ElfSymbol> symbols_;
+  std::optional<ElfDebugLink> debug_link_;
   std::uint16_t elf_type_{0};
   std::uint64_t zero_offset_load_vaddr_{0};
 };

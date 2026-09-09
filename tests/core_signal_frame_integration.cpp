@@ -13,6 +13,13 @@
 
 namespace {
 
+constexpr std::uintptr_t kLinuxX86UcontextMcontextOffset = 0x28;
+constexpr std::uintptr_t kLinuxX86GregRbp = 10;
+constexpr std::uintptr_t kLinuxX86GregRbx = 11;
+constexpr std::uintptr_t kLinuxX86GregRsp = 15;
+constexpr std::uintptr_t kLinuxX86GregRip = 16;
+constexpr std::uintptr_t kGregSize = sizeof(std::uint64_t);
+
 void require(bool condition, const std::string& message) {
   if (!condition) throw std::runtime_error(message);
 }
@@ -46,6 +53,13 @@ std::uintptr_t read_pointer(const mdbg::CoreSnapshot& snapshot,
   return value;
 }
 
+std::uintptr_t read_signal_greg(const mdbg::CoreSnapshot& snapshot,
+                                std::uintptr_t ucontext_address,
+                                std::uintptr_t greg_index) {
+  return read_pointer(snapshot, ucontext_address + kLinuxX86UcontextMcontextOffset +
+                                    greg_index * kGregSize);
+}
+
 bool trace_has_symbol(const mdbg::CoreInspectionSession& session,
                       const std::string& expected) {
   for (const auto& frame : session.trace().frames) {
@@ -74,10 +88,13 @@ void print_evidence(const mdbg::CoreInspectionSession& session,
                     std::uintptr_t ucontext_address,
                     std::uintptr_t saved_rip,
                     std::uintptr_t saved_rsp,
+                    std::uintptr_t saved_rbp,
+                    std::uintptr_t saved_rbx,
                     std::uintptr_t interrupted_begin,
                     std::uintptr_t interrupted_end) {
   std::cout << "signal-frame evidence: ucontext=0x" << std::hex << ucontext_address
             << " saved-rip=0x" << saved_rip << " saved-rsp=0x" << saved_rsp
+            << " saved-rbp=0x" << saved_rbp << " saved-rbx=0x" << saved_rbx
             << " interrupted=[0x" << interrupted_begin << ",0x" << interrupted_end
             << ")" << std::dec
             << " stop-reason=" << static_cast<int>(session.trace().stop_reason)
@@ -123,16 +140,31 @@ int main(int argc, char** argv) {
     const auto saved_rsp = read_pointer(
         snapshot,
         runtime_symbol_address(snapshot, argv[2], "signal_core_saved_rsp"));
+    const auto saved_rbp = read_pointer(
+        snapshot,
+        runtime_symbol_address(snapshot, argv[2], "signal_core_saved_rbp"));
+    const auto saved_rbx = read_pointer(
+        snapshot,
+        runtime_symbol_address(snapshot, argv[2], "signal_core_saved_rbx"));
     require(ucontext_address != 0 && saved_rip != 0 && saved_rsp != 0,
             "kernel-provided signal ucontext oracle was not captured");
+
+    require(read_signal_greg(snapshot, ucontext_address, kLinuxX86GregRip) == saved_rip,
+            "Linux x86-64 signal ucontext RIP slot does not match the kernel oracle");
+    require(read_signal_greg(snapshot, ucontext_address, kLinuxX86GregRsp) == saved_rsp,
+            "Linux x86-64 signal ucontext RSP slot does not match the kernel oracle");
+    require(read_signal_greg(snapshot, ucontext_address, kLinuxX86GregRbp) == saved_rbp,
+            "Linux x86-64 signal ucontext RBP slot does not match the kernel oracle");
+    require(read_signal_greg(snapshot, ucontext_address, kLinuxX86GregRbx) == saved_rbx,
+            "Linux x86-64 signal ucontext RBX slot does not match the kernel oracle");
 
     const auto interrupted_begin = runtime_symbol_address(
         snapshot, argv[2], "signal_core_interrupted_probe");
     const auto interrupted_end = runtime_symbol_address(
         snapshot, argv[2], "signal_core_interrupted_probe_end");
 
-    print_evidence(session, ucontext_address, saved_rip, saved_rsp,
-                   interrupted_begin, interrupted_end);
+    print_evidence(session, ucontext_address, saved_rip, saved_rsp, saved_rbp,
+                   saved_rbx, interrupted_begin, interrupted_end);
 
     require(interrupted_begin < interrupted_end && saved_rip >= interrupted_begin &&
                 saved_rip < interrupted_end,

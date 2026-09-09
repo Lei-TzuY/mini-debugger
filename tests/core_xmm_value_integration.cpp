@@ -57,7 +57,7 @@ std::string shell_quote(const std::string& text) {
 std::string run_core_cli(const std::string& executable,
                          const std::string& core_path) {
   const std::string command =
-      "printf 'frame 1\\nprint caller_stack_local\\nquit\\n' | " +
+      "printf 'bt\\nframe 1\\nlist\\nprint caller_stack_local\\nquit\\n' | " +
       shell_quote(executable) + " " + shell_quote(core_path) + " 2>&1";
   FILE* pipe = ::popen(command.c_str(), "r");
   if (pipe == nullptr) throw std::runtime_error("failed to launch mdbg-core subprocess");
@@ -93,12 +93,26 @@ void require_stack_local(const mdbg::CoreInspectionSession& session) {
           "stack-local lookup did not preserve immutable core-memory provenance");
 }
 
-void require_caller_stack_local(mdbg::CoreInspectionSession& session) {
+std::uintptr_t require_caller_stack_local(mdbg::CoreInspectionSession& session) {
   require(session.trace().frames.size() > 1,
           "genuine core did not recover the historical caller frame");
   session.select_frame(1);
   require(session.selected_frame_index() == 1,
           "core session did not select the historical caller frame");
+
+  const auto& frame = session.selected_frame();
+  const auto resume_pc = frame.runtime_pc;
+  const auto lookup_pc = mdbg::snapshot_frame_lookup_pc(frame);
+  require(lookup_pc + 1 == resume_pc,
+          "historical lookup PC is not the compiler-proven caller call site");
+  require(lookup_pc != resume_pc,
+          "historical lookup PC did not remain distinct from immutable resume PC");
+  const auto symbol = session.find_frame_symbol(frame);
+  require(symbol.has_value() && symbol->name == "caller_with_stack_local",
+          "frame-aware historical symbol lookup did not recover caller ownership");
+  const auto source = session.find_frame_source(frame);
+  require(source.has_value() && source->file.find("xmm_core_value_fixture.c") != std::string::npos,
+          "frame-aware historical source lookup did not recover caller ownership");
 
   const auto value = session.inspect_value("caller_stack_local");
   require(value.name == "caller_stack_local",
@@ -110,6 +124,7 @@ void require_caller_stack_local(mdbg::CoreInspectionSession& session) {
           "caller stack-local lookup did not recover historical stack ownership");
   require(value.storage == mdbg::LocalValueStorage::SnapshotCoreMemory,
           "caller stack-local lookup did not preserve immutable core-memory provenance");
+  return resume_pc;
 }
 
 void require_value_unavailable(const mdbg::CoreInspectionSession& session,
@@ -122,6 +137,17 @@ void require_value_unavailable(const mdbg::CoreInspectionSession& session,
     unavailable = true;
   }
   require(unavailable, context + " unexpectedly revived stale local ownership");
+}
+
+void require_stale_frame_rejected(const mdbg::CoreInspectionSession& session,
+                                  const mdbg::SnapshotInspectionFrameContext& stale) {
+  bool rejected = false;
+  try {
+    (void)session.find_frame_symbol(stale);
+  } catch (const std::exception&) {
+    rejected = true;
+  }
+  require(rejected, "frame-aware lookup accepted a stale frame from another thread selection");
 }
 
 void require_pointer_dereference(const mdbg::CoreInspectionSession& session) {
@@ -216,6 +242,9 @@ int main(int argc, char** argv) {
             "core session did not start on the crashed thread");
     require(session.selected_frame_index() == 0,
             "core session did not start on the current frame");
+    require(mdbg::snapshot_frame_lookup_pc(session.selected_frame()) ==
+                session.selected_frame().runtime_pc,
+            "frame-zero lookup PC was incorrectly normalized");
 
     const auto crash_fp = session.snapshot().floating_point_state(crash_tid);
     const auto sibling_fp = session.snapshot().floating_point_state(sibling_tid);
@@ -231,13 +260,15 @@ int main(int argc, char** argv) {
     require_stack_local(session);
     require_pointer_dereference(session);
     require_aggregate_pointer_dereference(session);
-    require_caller_stack_local(session);
+    const auto caller_resume_pc = require_caller_stack_local(session);
+    const auto stale_caller_frame = session.selected_frame();
 
     session.select_thread(sibling_tid);
     require(session.selected_thread_tid() == sibling_tid,
             "core thread selection did not select the sibling TID");
     require(session.selected_frame_index() == 0,
             "core thread selection did not reset to sibling frame 0");
+    require_stale_frame_rejected(session, stale_caller_frame);
     require_value_unavailable(session, "caller_stack_local",
                               "sibling-thread frame selection");
     require_source_value(session.inspect_value("xmm_value"), kSiblingValue,
@@ -249,13 +280,19 @@ int main(int argc, char** argv) {
             "returning to the crash thread did not reset historical frame selection");
     require_value_unavailable(session, "caller_stack_local",
                               "crash-thread frame-zero selection");
-    require_caller_stack_local(session);
+    const auto recovered_resume_pc = require_caller_stack_local(session);
+    require(recovered_resume_pc == caller_resume_pc,
+            "lookup-PC normalization silently changed immutable unwind sequencing");
 
     const auto core_cli =
         (std::filesystem::path(argv[0]).parent_path() / "mdbg-core").string();
     const auto cli_output = run_core_cli(core_cli, argv[1]);
     require(cli_output.find("selected frame 1") != std::string::npos,
             "mdbg-core did not expose historical frame selection");
+    require(cli_output.find("caller_with_stack_local") != std::string::npos,
+            "mdbg-core did not render frame-aware caller symbol ownership");
+    require(cli_output.find("xmm_core_value_fixture.c") != std::string::npos,
+            "mdbg-core did not render frame-aware caller source ownership");
     require(cli_output.find("caller_stack_local = 0xcafebabedeadbeef") !=
                 std::string::npos,
             "mdbg-core did not render the historical caller stack local");

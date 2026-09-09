@@ -14,11 +14,13 @@
 namespace {
 
 constexpr std::uintptr_t kLinuxX86UcontextMcontextOffset = 0x28;
+constexpr std::uintptr_t kLinuxX86GregR12 = 4;
 constexpr std::uintptr_t kLinuxX86GregRbp = 10;
 constexpr std::uintptr_t kLinuxX86GregRbx = 11;
 constexpr std::uintptr_t kLinuxX86GregRsp = 15;
 constexpr std::uintptr_t kLinuxX86GregRip = 16;
 constexpr std::uintptr_t kGregSize = sizeof(std::uint64_t);
+constexpr std::uint64_t kInterruptedRegisterValue = UINT64_C(0xb5856a1a93a34cbc);
 
 void require(bool condition, const std::string& message) {
   if (!condition) throw std::runtime_error(message);
@@ -98,11 +100,13 @@ void print_evidence(const mdbg::CoreInspectionSession& session,
                     std::uintptr_t saved_rsp,
                     std::uintptr_t saved_rbp,
                     std::uintptr_t saved_rbx,
+                    std::uintptr_t saved_r12,
                     std::uintptr_t interrupted_begin,
                     std::uintptr_t interrupted_end) {
   std::cout << "signal-frame evidence: ucontext=0x" << std::hex << ucontext_address
             << " saved-rip=0x" << saved_rip << " saved-rsp=0x" << saved_rsp
             << " saved-rbp=0x" << saved_rbp << " saved-rbx=0x" << saved_rbx
+            << " saved-r12=0x" << saved_r12
             << " interrupted=[0x" << interrupted_begin << ",0x" << interrupted_end
             << ")" << std::dec
             << " stop-reason=" << static_cast<int>(session.trace().stop_reason)
@@ -158,6 +162,9 @@ int main(int argc, char** argv) {
     const auto saved_rbx = read_pointer(
         snapshot,
         runtime_symbol_address(snapshot, argv[2], "signal_core_saved_rbx"));
+    const auto saved_r12 = read_pointer(
+        snapshot,
+        runtime_symbol_address(snapshot, argv[2], "signal_core_saved_r12"));
     require(ucontext_address != 0 && saved_rip != 0 && saved_rsp != 0,
             "kernel-provided signal ucontext oracle was not captured");
 
@@ -169,6 +176,10 @@ int main(int argc, char** argv) {
             "Linux x86-64 signal ucontext RBP slot does not match the kernel oracle");
     require(read_signal_greg(snapshot, ucontext_address, kLinuxX86GregRbx) == saved_rbx,
             "Linux x86-64 signal ucontext RBX slot does not match the kernel oracle");
+    require(read_signal_greg(snapshot, ucontext_address, kLinuxX86GregR12) == saved_r12,
+            "Linux x86-64 signal ucontext R12 slot does not match the kernel oracle");
+    require(saved_r12 == kInterruptedRegisterValue,
+            "compiler-proven interrupted R12 local does not match the expected value");
 
     const auto interrupted_begin = runtime_symbol_address(
         snapshot, argv[2], "signal_core_interrupted_probe");
@@ -176,7 +187,7 @@ int main(int argc, char** argv) {
         snapshot, argv[2], "signal_core_interrupted_probe_end");
 
     print_evidence(session, ucontext_address, saved_rip, saved_rsp, saved_rbp,
-                   saved_rbx, interrupted_begin, interrupted_end);
+                   saved_rbx, saved_r12, interrupted_begin, interrupted_end);
 
     require(interrupted_begin < interrupted_end && saved_rip >= interrupted_begin &&
                 saved_rip < interrupted_end,
@@ -213,6 +224,14 @@ int main(int argc, char** argv) {
             "signal-restored exact PC does not resolve to the interrupted application probe");
     require(trace_has_symbol(session, "main"),
             "ordinary CFI did not resume beyond the signal-restored application context");
+
+    session.select_frame(restored->index);
+    const auto value = session.inspect_value("interrupted_register_local");
+    require(value.unsigned_value == kInterruptedRegisterValue,
+            "signal-restored register local has the wrong source value");
+    require(session.selected_frame().registers.r12.has_value() &&
+                *session.selected_frame().registers.r12 == saved_r12,
+            "signal-restored frame did not retain kernel-owned R12 state");
 
     std::cout << "genuine signal-frame core integration passed\n";
   } catch (const std::exception& error) {

@@ -13,6 +13,7 @@ namespace {
 constexpr double kCrashValue = 1234.25;
 constexpr double kSiblingValue = 9876.5;
 constexpr std::uint64_t kStackLocalValue = UINT64_C(0x4f3e2d1c0b9a8877);
+constexpr std::uint64_t kCallerStackLocalValue = UINT64_C(0xcafebabedeadbeef);
 constexpr std::uint64_t kPointerPointeeValue = UINT64_C(0x8877665544332211);
 constexpr std::uint64_t kAggregateFirst = UINT64_C(0x0123456789abcdef);
 constexpr std::uint64_t kAggregateSecond = UINT64_C(0xfedcba9876543210);
@@ -54,6 +55,28 @@ void require_stack_local(const mdbg::CoreInspectionSession& session) {
           "stack-local lookup did not recover the genuine core stack value");
   require(value.storage == mdbg::LocalValueStorage::SnapshotCoreMemory,
           "stack-local lookup did not preserve immutable core-memory provenance");
+}
+
+void require_caller_stack_local(mdbg::CoreInspectionSession& session) {
+  require(session.trace().frames.size() > 1,
+          "genuine core did not recover the historical caller frame");
+  session.select_frame(1);
+  require(session.selected_frame_index() == 1,
+          "core session did not select the historical caller frame");
+  const auto symbol = session.find_symbol(session.selected_frame().runtime_pc);
+  require(symbol && symbol->name == "caller_with_stack_local",
+          "historical frame 1 is not the compiler caller that owns the stack local");
+
+  const auto value = session.inspect_value("caller_stack_local");
+  require(value.name == "caller_stack_local",
+          "caller stack-local lookup changed the source name");
+  require(value.kind == mdbg::LocalValueKind::Integer &&
+              value.byte_size == sizeof(std::uint64_t) && !value.is_signed,
+          "caller stack-local lookup lost uint64_t type identity");
+  require(value.raw_value == kCallerStackLocalValue,
+          "caller stack-local lookup did not recover historical stack ownership");
+  require(value.storage == mdbg::LocalValueStorage::SnapshotCoreMemory,
+          "caller stack-local lookup did not preserve immutable core-memory provenance");
 }
 
 void require_pointer_dereference(const mdbg::CoreInspectionSession& session) {
@@ -163,6 +186,7 @@ int main(int argc, char** argv) {
     require_stack_local(session);
     require_pointer_dereference(session);
     require_aggregate_pointer_dereference(session);
+    require_caller_stack_local(session);
 
     session.select_thread(sibling_tid);
     require(session.selected_thread_tid() == sibling_tid,
@@ -172,10 +196,10 @@ int main(int argc, char** argv) {
     require_source_value(session.inspect_value("xmm_value"), kSiblingValue,
                          "sibling-thread frame 0");
 
-    std::cout << "core XMM/stack/pointer source-value integration passed\n";
+    std::cout << "core XMM/stack/pointer/caller source-value integration passed\n";
   } catch (const std::exception& error) {
-    std::cerr << "core XMM/stack/pointer source-value integration failure: " << error.what()
-              << '\n';
+    std::cerr << "core XMM/stack/pointer/caller source-value integration failure: "
+              << error.what() << '\n';
     return 1;
   }
   return 0;

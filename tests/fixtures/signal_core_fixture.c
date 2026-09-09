@@ -90,6 +90,8 @@ __attribute__((noinline, noreturn)) void signal_core_interrupted_application(
         ".globl signal_core_interrupted_probe\n"
         "signal_core_interrupted_probe:\n"
         "pause\n"
+        ".globl signal_core_interrupted_probe_end\n"
+        "signal_core_interrupted_probe_end:\n"
         : "+D"(interrupted_pair.first), "+S"(interrupted_pair.second),
           "+r"(interrupted_register_local), "+x"(interrupted_fp_local)
         :

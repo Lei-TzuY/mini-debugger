@@ -1,9 +1,13 @@
 #include "snapshot/session.hpp"
 
+#include <sys/wait.h>
+
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <iostream>
 #include <stdexcept>
 #include <string>
@@ -35,6 +39,38 @@ std::uint64_t xmm_low_u64(const mdbg::CoreFloatingPointState& state,
   std::uint64_t raw = 0;
   std::memcpy(&raw, state.xmm[index].data(), sizeof(raw));
   return raw;
+}
+
+std::string shell_quote(const std::string& text) {
+  std::string result{"'"};
+  for (const char ch : text) {
+    if (ch == '\'') {
+      result += "'\\''";
+    } else {
+      result += ch;
+    }
+  }
+  result += '\'';
+  return result;
+}
+
+std::string run_core_cli(const std::string& executable,
+                         const std::string& core_path) {
+  const std::string command =
+      "printf 'frame 1\\nprint caller_stack_local\\nquit\\n' | " +
+      shell_quote(executable) + " " + shell_quote(core_path) + " 2>&1";
+  FILE* pipe = ::popen(command.c_str(), "r");
+  if (pipe == nullptr) throw std::runtime_error("failed to launch mdbg-core subprocess");
+
+  std::string output;
+  std::array<char, 512> buffer{};
+  while (std::fgets(buffer.data(), static_cast<int>(buffer.size()), pipe) != nullptr) {
+    output += buffer.data();
+  }
+  const int status = ::pclose(pipe);
+  require(status != -1 && WIFEXITED(status) && WEXITSTATUS(status) == 0,
+          "mdbg-core subprocess did not exit cleanly: " + output);
+  return output;
 }
 
 void require_source_value(const mdbg::LocalScalarValue& value, double expected,
@@ -74,6 +110,18 @@ void require_caller_stack_local(mdbg::CoreInspectionSession& session) {
           "caller stack-local lookup did not recover historical stack ownership");
   require(value.storage == mdbg::LocalValueStorage::SnapshotCoreMemory,
           "caller stack-local lookup did not preserve immutable core-memory provenance");
+}
+
+void require_value_unavailable(const mdbg::CoreInspectionSession& session,
+                               const std::string& name,
+                               const std::string& context) {
+  bool unavailable = false;
+  try {
+    (void)session.inspect_value(name);
+  } catch (const std::exception&) {
+    unavailable = true;
+  }
+  require(unavailable, context + " unexpectedly revived stale local ownership");
 }
 
 void require_pointer_dereference(const mdbg::CoreInspectionSession& session) {
@@ -190,8 +238,29 @@ int main(int argc, char** argv) {
             "core thread selection did not select the sibling TID");
     require(session.selected_frame_index() == 0,
             "core thread selection did not reset to sibling frame 0");
+    require_value_unavailable(session, "caller_stack_local",
+                              "sibling-thread frame selection");
     require_source_value(session.inspect_value("xmm_value"), kSiblingValue,
                          "sibling-thread frame 0");
+
+    session.select_thread(crash_tid);
+    require(session.selected_thread_tid() == crash_tid &&
+                session.selected_frame_index() == 0,
+            "returning to the crash thread did not reset historical frame selection");
+    require_value_unavailable(session, "caller_stack_local",
+                              "crash-thread frame-zero selection");
+    require_caller_stack_local(session);
+
+    const auto core_cli =
+        (std::filesystem::path(argv[0]).parent_path() / "mdbg-core").string();
+    const auto cli_output = run_core_cli(core_cli, argv[1]);
+    require(cli_output.find("selected frame 1") != std::string::npos,
+            "mdbg-core did not expose historical frame selection");
+    require(cli_output.find("caller_stack_local = 0xcafebabedeadbeef") !=
+                std::string::npos,
+            "mdbg-core did not render the historical caller stack local");
+    require(cli_output.find("[value-core]") != std::string::npos,
+            "mdbg-core lost immutable core-memory provenance for caller local");
 
     std::cout << "core XMM/stack/pointer/caller source-value integration passed\n";
   } catch (const std::exception& error) {

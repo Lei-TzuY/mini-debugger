@@ -183,28 +183,9 @@ inline SnapshotInspectionFrameContext make_snapshot_inspection_frame(
   }
   const auto& origin = thread.registers;
   InspectionRegisterState recovered{};
-  if (index == 0) {
-    recovered.rax = origin.rax;
-    recovered.rbx = origin.rbx;
-    recovered.rcx = origin.rcx;
-    recovered.rdx = origin.rdx;
-    recovered.rsi = origin.rsi;
-    recovered.rdi = origin.rdi;
-    recovered.rbp = origin.rbp;
-    recovered.rsp = origin.rsp;
-    recovered.r8 = origin.r8;
-    recovered.r9 = origin.r9;
-    recovered.r10 = origin.r10;
-    recovered.r11 = origin.r11;
-    recovered.r12 = origin.r12;
-    recovered.r13 = origin.r13;
-    recovered.r14 = origin.r14;
-    recovered.r15 = origin.r15;
-  } else {
-    recovered.rbx = cursor.rbx;
-    recovered.rbp = cursor.frame_pointer;
-    recovered.rsp = static_cast<std::uint64_t>(cursor.stack_pointer);
-  }
+  recovered.rbx = cursor.rbx;
+  recovered.rbp = cursor.frame_pointer;
+  recovered.rsp = static_cast<std::uint64_t>(cursor.stack_pointer);
   return SnapshotInspectionFrameContext{
       index,
       &snapshot,

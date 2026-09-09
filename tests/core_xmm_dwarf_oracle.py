@@ -175,8 +175,8 @@ def frame_base_kind(records, function_name):
         raise RuntimeError(f"{function_name}: no DW_AT_frame_base")
     if "DW_OP_call_frame_cfa" in frame_base:
         return "call_frame_cfa"
-    if re.search(r"DW_OP_reg6\s*\(rbp\)", frame_base):
-        return "rbp"
+    if re.search(r"DW_OP_reg7\s*\(rsp\)", frame_base):
+        return "rsp"
     raise RuntimeError(f"{function_name}: unsupported frame base: {frame_base}")
 
 

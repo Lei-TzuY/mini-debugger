@@ -13,6 +13,8 @@ namespace {
 constexpr double kCrashValue = 1234.25;
 constexpr double kSiblingValue = 9876.5;
 constexpr std::uint64_t kPointerPointeeValue = UINT64_C(0x8877665544332211);
+constexpr std::uint64_t kAggregateFirst = UINT64_C(0x0123456789abcdef);
+constexpr std::uint64_t kAggregateSecond = UINT64_C(0xfedcba9876543210);
 
 void require(bool condition, const std::string& message) {
   if (!condition) throw std::runtime_error(message);
@@ -75,6 +77,48 @@ void require_pointer_dereference(const mdbg::CoreInspectionSession& session) {
   }
 }
 
+void require_aggregate_pointer_dereference(const mdbg::CoreInspectionSession& session) {
+  const auto pointer = session.inspect_value("aggregate_pointer");
+  require(pointer.name == "aggregate_pointer",
+          "aggregate pointer lookup returned the wrong source name");
+  require(pointer.kind == mdbg::LocalValueKind::Pointer,
+          "aggregate pointer lost pointer type identity");
+  require(pointer.byte_size == sizeof(std::uintptr_t) && pointer.raw_value != 0,
+          "aggregate pointer did not recover a concrete x86-64 address");
+  require(pointer.pointee_type.has_value(),
+          "aggregate pointer lost bounded pointee metadata");
+  require(pointer.pointee_type->kind == mdbg::LocalValueKind::Structure &&
+              pointer.pointee_type->byte_size == 2 * sizeof(std::uint64_t),
+          "aggregate pointer metadata does not describe the compiler-produced structure");
+
+  const auto dereferenced = session.dereference_value("aggregate_pointer");
+  require(dereferenced.name == "*aggregate_pointer",
+          "aggregate pointer dereference changed the bounded source-value name");
+  require(dereferenced.kind == mdbg::LocalValueKind::Structure &&
+              dereferenced.byte_size == 2 * sizeof(std::uint64_t),
+          "aggregate pointer dereference lost structure type identity");
+  require(dereferenced.members.size() == 2,
+          "aggregate pointer dereference did not reuse the bounded member decoder");
+  require(dereferenced.members[0].name == "first" &&
+              dereferenced.members[0].raw_value == kAggregateFirst &&
+              dereferenced.members[0].byte_size == sizeof(std::uint64_t) &&
+              !dereferenced.members[0].is_signed,
+          "aggregate pointer first member was not recovered exactly");
+  require(dereferenced.members[1].name == "second" &&
+              dereferenced.members[1].raw_value == kAggregateSecond &&
+              dereferenced.members[1].byte_size == sizeof(std::uint64_t) &&
+              !dereferenced.members[1].is_signed,
+          "aggregate pointer second member was not recovered exactly");
+  require(dereferenced.storage == mdbg::LocalValueStorage::SnapshotCoreMemory ||
+              dereferenced.storage == mdbg::LocalValueStorage::SnapshotRuntimeArtifact,
+          "aggregate pointer dereference bypassed snapshot-memory provenance");
+  if (dereferenced.storage == mdbg::LocalValueStorage::SnapshotRuntimeArtifact) {
+    require(!dereferenced.storage_module_path.empty() &&
+                !dereferenced.storage_file_path.empty(),
+            "artifact-backed aggregate dereference lost runtime-artifact provenance");
+  }
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -104,6 +148,7 @@ int main(int argc, char** argv) {
     require_source_value(session.inspect_value("xmm_value"), kCrashValue,
                          "crashed-thread frame 0");
     require_pointer_dereference(session);
+    require_aggregate_pointer_dereference(session);
 
     session.select_thread(sibling_tid);
     require(session.selected_thread_tid() == sibling_tid,

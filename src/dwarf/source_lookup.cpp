@@ -92,13 +92,35 @@ std::optional<LocalPointeeType> resolve_pointer_pointee_type(
       continue;
     }
     if (die.tag != kDwTagPointerType) return std::nullopt;
+    const auto* size = attribute(die, kDwAtByteSize);
+    const auto pointer_size = size == nullptr ? std::size_t{8}
+                                              : static_cast<std::size_t>(size->number);
+    if (pointer_size != 8) {
+      throw std::runtime_error("snapshot pointer type has an unsupported byte size");
+    }
     const auto* pointee = attribute(die, kDwAtType);
     if (pointee == nullptr || pointee->form != kDwFormRef4) {
       throw std::runtime_error("snapshot pointer has no supported DW_FORM_ref4 pointee");
     }
-    const auto integer = resolve_integer_type(dies, pointee->number);
-    return LocalPointeeType{integer.byte_size, integer.is_signed,
-                            LocalValueKind::Integer};
+
+    const auto value_type = resolve_value_type(dies, pointee->number);
+    if (value_type.kind == LocalValueKind::Integer) {
+      return LocalPointeeType{value_type.byte_size, value_type.is_signed,
+                              LocalValueKind::Integer, {}};
+    }
+    if (value_type.kind == LocalValueKind::Structure) {
+      LocalPointeeType result{value_type.byte_size, false,
+                              LocalValueKind::Structure, {}};
+      result.members.reserve(value_type.members.size());
+      for (const auto& member : value_type.members) {
+        result.members.push_back(LocalStructMemberType{
+            member.name, member.offset, member.integer.byte_size,
+            member.integer.is_signed});
+      }
+      return result;
+    }
+    throw std::runtime_error(
+        "snapshot pointer pointee is not a bounded integer or structure type");
   }
   throw std::runtime_error("snapshot pointer type chain is too deep");
 }
@@ -153,7 +175,8 @@ LocalScalarValue materialize_snapshot_xmm_value(
 
 LocalScalarValue materialize_snapshot_memory_value(
     const SnapshotModuleAddress& owner, std::string_view name,
-    const ValueType& value_type, const SnapshotMemoryRead& memory) {
+    const ValueType& value_type, const SnapshotMemoryRead& memory,
+    bool require_owner_match = true) {
   LocalScalarValue result;
   if (value_type.kind == LocalValueKind::Structure) {
     if (value_type.byte_size == 0 || value_type.byte_size > kMaxLocalStructSize ||
@@ -180,7 +203,7 @@ LocalScalarValue materialize_snapshot_memory_value(
   if (memory.provenance == SnapshotMemoryProvenance::Core) {
     result.storage = LocalValueStorage::SnapshotCoreMemory;
   } else {
-    if (memory.module_path != owner.module_path) {
+    if (require_owner_match && memory.module_path != owner.module_path) {
       throw std::logic_error("snapshot local artifact ownership changed during value read");
     }
     result.storage = LocalValueStorage::SnapshotRuntimeArtifact;
@@ -194,9 +217,29 @@ LocalScalarValue materialize_snapshot_memory_value(
 void attach_pointer_metadata(LocalScalarValue& result,
                              const std::optional<LocalPointeeType>& pointee) {
   if (result.kind != LocalValueKind::Pointer) return;
-  if (!pointee || pointee->kind != LocalValueKind::Integer ||
-      pointee->byte_size == 0 || pointee->byte_size > sizeof(std::uint64_t)) {
-    throw std::logic_error("bounded pointer value lost its integer pointee metadata");
+  if (!pointee) {
+    throw std::logic_error("bounded pointer value lost its pointee metadata");
+  }
+  if (pointee->kind == LocalValueKind::Integer) {
+    if (pointee->byte_size == 0 ||
+        pointee->byte_size > sizeof(std::uint64_t) || !pointee->members.empty()) {
+      throw std::logic_error("bounded pointer value has invalid integer pointee metadata");
+    }
+  } else if (pointee->kind == LocalValueKind::Structure) {
+    if (pointee->byte_size == 0 || pointee->byte_size > kMaxLocalStructSize ||
+        pointee->members.size() > kMaxLocalStructMembers) {
+      throw std::logic_error("bounded pointer value has invalid structure pointee metadata");
+    }
+    for (const auto& member : pointee->members) {
+      if (member.byte_size == 0 || member.byte_size > sizeof(std::uint64_t) ||
+          member.offset > pointee->byte_size ||
+          member.byte_size > pointee->byte_size - member.offset) {
+        throw std::logic_error(
+            "bounded pointer value has an out-of-range structure member");
+      }
+    }
+  } else {
+    throw std::logic_error("bounded pointer value has an unsupported pointee kind");
   }
   result.pointee_type = *pointee;
 }
@@ -276,11 +319,15 @@ std::optional<LocalScalarValue> inspect_snapshot_unit(
   }
 
   const auto floating_type = resolve_snapshot_floating_type(dies, type->number);
-  const auto value_type = floating_type ? *floating_type
-                                        : resolve_value_type(dies, type->number);
-  const auto pointee_type = value_type.kind == LocalValueKind::Pointer
-                                ? resolve_pointer_pointee_type(dies, type->number)
-                                : std::optional<LocalPointeeType>{};
+  const auto pointee_type = floating_type
+                                ? std::optional<LocalPointeeType>{}
+                                : resolve_pointer_pointee_type(dies, type->number);
+  const auto value_type = floating_type
+                              ? *floating_type
+                              : pointee_type
+                                    ? ValueType{sizeof(std::uintptr_t), false,
+                                                LocalValueKind::Pointer, {}}
+                                    : resolve_value_type(dies, type->number);
   std::vector<std::byte> location_expression;
   if (location->form == kDwFormExprloc) {
     location_expression = location->expression;
@@ -404,10 +451,8 @@ LocalScalarValue dereference_local_pointer(
   if (pointer.kind != LocalValueKind::Pointer) {
     throw std::runtime_error("local value is not a pointer: " + std::string(name));
   }
-  if (!pointer.pointee_type || pointer.pointee_type->kind != LocalValueKind::Integer ||
-      pointer.pointee_type->byte_size == 0 ||
-      pointer.pointee_type->byte_size > sizeof(std::uint64_t)) {
-    throw std::runtime_error("pointer does not have a bounded integer pointee type");
+  if (!pointer.pointee_type) {
+    throw std::runtime_error("pointer does not have bounded pointee metadata");
   }
   if (pointer.raw_value == 0) {
     throw std::runtime_error("cannot dereference a null core pointer: " + std::string(name));
@@ -416,23 +461,45 @@ LocalScalarValue dereference_local_pointer(
     throw std::runtime_error("core pointer exceeds host address width");
   }
 
+  ValueType value_type{};
+  if (pointer.pointee_type->kind == LocalValueKind::Integer) {
+    if (pointer.pointee_type->byte_size == 0 ||
+        pointer.pointee_type->byte_size > sizeof(std::uint64_t) ||
+        !pointer.pointee_type->members.empty()) {
+      throw std::runtime_error("pointer does not have a bounded integer pointee type");
+    }
+    value_type = ValueType{pointer.pointee_type->byte_size,
+                           pointer.pointee_type->is_signed,
+                           LocalValueKind::Integer, {}};
+  } else if (pointer.pointee_type->kind == LocalValueKind::Structure) {
+    if (pointer.pointee_type->byte_size == 0 ||
+        pointer.pointee_type->byte_size > kMaxLocalStructSize ||
+        pointer.pointee_type->members.size() > kMaxLocalStructMembers) {
+      throw std::runtime_error("pointer does not have a bounded structure pointee type");
+    }
+    value_type = ValueType{pointer.pointee_type->byte_size, false,
+                           LocalValueKind::Structure, {}};
+    value_type.members.reserve(pointer.pointee_type->members.size());
+    for (const auto& member : pointer.pointee_type->members) {
+      if (member.byte_size == 0 || member.byte_size > sizeof(std::uint64_t) ||
+          member.offset > pointer.pointee_type->byte_size ||
+          member.byte_size > pointer.pointee_type->byte_size - member.offset) {
+        throw std::runtime_error("pointer structure member exceeds bounded pointee layout");
+      }
+      value_type.members.push_back(AggregateMemberType{
+          member.name, member.offset,
+          IntegerType{member.byte_size, member.is_signed}});
+    }
+  } else {
+    throw std::runtime_error("pointer pointee kind is unsupported for bounded dereference");
+  }
+
   const auto memory = read_snapshot_memory(
       snapshot, module_paths, static_cast<std::uintptr_t>(pointer.raw_value),
-      pointer.pointee_type->byte_size);
-  LocalScalarValue result{pointer.module_path, "*" + pointer.name,
-                          decode_snapshot_scalar(memory, pointer.pointee_type->byte_size),
-                          pointer.pointee_type->byte_size,
-                          pointer.pointee_type->is_signed,
-                          LocalValueKind::Integer};
-  if (memory.provenance == SnapshotMemoryProvenance::Core) {
-    result.storage = LocalValueStorage::SnapshotCoreMemory;
-  } else {
-    result.storage = LocalValueStorage::SnapshotRuntimeArtifact;
-    result.storage_module_path = memory.module_path;
-    result.storage_file_path = memory.module_file_path;
-    result.storage_file_offset = memory.artifact_file_offset;
-  }
-  return result;
+      value_type.byte_size);
+  const SnapshotModuleAddress owner{pointer.module_path, {}, 0};
+  return materialize_snapshot_memory_value(owner, "*" + pointer.name,
+                                           value_type, memory, false);
 }
 
 LocalIntegerValue inspect_local_integer(const CoreSnapshot& snapshot,

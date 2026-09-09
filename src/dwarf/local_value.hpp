@@ -15,8 +15,13 @@ class SnapshotModulePathResolver;
 struct InspectionFrameContext;
 struct SnapshotInspectionFrameContext;
 
-enum class LocalValueKind { Integer, Pointer, Structure };
-enum class LocalValueStorage { Computed, SnapshotCoreMemory, SnapshotRuntimeArtifact };
+enum class LocalValueKind { Integer, Pointer, Floating, Structure };
+enum class LocalValueStorage {
+  Computed,
+  SnapshotCoreMemory,
+  SnapshotCoreRegister,
+  SnapshotRuntimeArtifact
+};
 
 struct LocalStructMember {
   std::string name;

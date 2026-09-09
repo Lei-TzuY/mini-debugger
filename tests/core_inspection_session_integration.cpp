@@ -219,13 +219,18 @@ void test_relocated_core_module_mapping(const std::string& fixture,
   std::remove(recorded_path.c_str());
 
   try {
-    const auto no_map = run_core_cli_process(cli, {core.path}, "quit\n");
-    require(no_map.exit_code != 0,
-            "relocated core unexpectedly resolved its deleted recorded module path");
+    const std::string inspection = "bt\nframe 1\nprint transformed\nquit\n";
+    const auto no_map = run_core_cli_process(cli, {core.path}, inspection);
+    require(no_map.exit_code == 0,
+            "relocated core session should remain readable without a backing module");
+    require(no_map.output.find(recorded_path + "!" + kExpectedCaller) ==
+                std::string::npos &&
+                no_map.output.find("!transformed = " + std::string(kExpectedValue)) ==
+                    std::string::npos,
+            "relocated core unexpectedly retained module-backed inspection capability");
 
     const auto mapped = run_core_cli_process(
-        cli, {"--module-map", recorded_path, fixture, core.path},
-        "bt\nframe 1\nprint transformed\nquit\n");
+        cli, {"--module-map", recorded_path, fixture, core.path}, inspection);
     require(mapped.exit_code == 0,
             "explicit core module mapping did not restore the read-only session\n" +
                 mapped.output);

@@ -2,15 +2,19 @@
 #include "dwarf/eh_frame.hpp"
 #include "dwarf/local_value.hpp"
 #include "elf/elf.hpp"
+#include "snapshot/session.hpp"
 #include "unwind/cfi.hpp"
 
 #include <poll.h>
+#include <sys/resource.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
 #include <cerrno>
 #include <chrono>
+#include <csignal>
 #include <cstdint>
+#include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -29,6 +33,7 @@ constexpr std::uint64_t kExpectedTransformedLocal = UINT64_C(0x458a30bf63ac1619)
 constexpr std::uint64_t kExpectedOptimizedLocal = UINT64_C(0x1e3c1e781e3c1ef0);
 constexpr std::uint64_t kExpectedArithmeticLocal = UINT64_C(0x10203040506070a5);
 constexpr std::uint64_t kExpectedIndirectLocal = UINT64_C(0x8877665544332211);
+constexpr std::uint64_t kIndirectLocalXor = UINT64_C(0x55aa00ff33cc6699);
 constexpr std::uint64_t kExpectedInlineLocal = UINT64_C(0x02146638cadcae70);
 constexpr const char* kExpectedEntryCliValue = "entry_parameter = 1161981756646125696";
 constexpr const char* kExpectedTransformedCliValue = "transformed = 5010871133972207129";
@@ -38,6 +43,16 @@ constexpr const char* kExpectedInlineCliValue = "inline_local = 1498570817177309
 
 void require(bool condition, const std::string& message) {
   if (!condition) throw std::runtime_error(message);
+}
+
+std::uint64_t decode_u64(const std::vector<std::byte>& bytes) {
+  require(bytes.size() == sizeof(std::uint64_t), "snapshot provenance read is not 8 bytes");
+  std::uint64_t value = 0;
+  for (std::size_t index = 0; index < bytes.size(); ++index) {
+    value |= static_cast<std::uint64_t>(std::to_integer<unsigned>(bytes[index]))
+             << (index * 8U);
+  }
+  return value;
 }
 
 std::uintptr_t entry_value_address(const mdbg::ElfFile& elf, pid_t pid,
@@ -280,6 +295,87 @@ void test_direct_api(const std::string& fixture) {
           "DWARF5 optimized-local fixture did not exit cleanly");
 }
 
+std::string generate_omitted_indirect_core(const std::string& fixture) {
+  const pid_t child = ::fork();
+  if (child == -1) throw std::runtime_error("fork failed for provenance snapshot fixture");
+  if (child == 0) {
+    rlimit core_limit{};
+    if (::getrlimit(RLIMIT_CORE, &core_limit) != 0) _exit(120);
+    core_limit.rlim_cur = core_limit.rlim_max;
+    if (::setrlimit(RLIMIT_CORE, &core_limit) != 0) _exit(121);
+    std::ofstream filter("/proc/self/coredump_filter", std::ios::trunc);
+    if (!filter) _exit(122);
+    filter << "0x1\n";
+    filter.close();
+    if (!filter) _exit(123);
+    ::execl(fixture.c_str(), fixture.c_str(), "--snapshot-crash-indirect", nullptr);
+    _exit(127);
+  }
+
+  const auto core_path = "/tmp/mdbg-core-" + std::to_string(child);
+  std::remove(core_path.c_str());
+  int status = 0;
+  pid_t waited;
+  do {
+    waited = ::waitpid(child, &status, 0);
+  } while (waited == -1 && errno == EINTR);
+  require(waited == child && WIFSIGNALED(status) && WTERMSIG(status) == SIGSEGV,
+          "provenance snapshot fixture did not terminate from deterministic SIGSEGV");
+
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  while (!std::filesystem::exists(core_path) && std::chrono::steady_clock::now() < deadline) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  require(std::filesystem::exists(core_path),
+          "kernel did not produce the provenance snapshot core");
+  return core_path;
+}
+
+void test_snapshot_provenance_local_value(const std::string& fixture) {
+  const auto core_path = generate_omitted_indirect_core(fixture);
+  try {
+    mdbg::CoreInspectionSession session(core_path, 1);
+    const auto& crash_thread = session.snapshot().crashed_thread();
+    require(crash_thread.registers.rdi != 0,
+            "snapshot indirect crash did not preserve RDI pointer ownership");
+
+    const auto first = session.read_memory(
+        static_cast<std::uintptr_t>(crash_thread.registers.rdi), sizeof(std::uint64_t));
+    require(first.provenance == mdbg::SnapshotMemoryProvenance::Core,
+            "first compiler dereference did not come from captured stack bytes");
+    const auto seed_address = decode_u64(first.bytes);
+    require(seed_address != 0, "captured stack pointer did not name indirect seed storage");
+
+    const auto second = session.read_memory(
+        static_cast<std::uintptr_t>(seed_address), sizeof(std::uint64_t));
+    require(second.provenance == mdbg::SnapshotMemoryProvenance::RuntimeArtifact,
+            "second compiler dereference did not require omitted runtime-artifact bytes");
+    require(second.module_path == fixture,
+            "artifact-backed source-value read lost recorded module identity");
+    require(std::filesystem::equivalent(second.module_file_path, fixture),
+            "artifact-backed source-value read resolved the wrong host module");
+    require(decode_u64(second.bytes) == (kExpectedIndirectLocal ^ kIndirectLocalXor),
+            "artifact-backed source-value read returned the wrong seed bytes");
+
+    const auto& frame = session.selected_frame();
+    require(frame.index == 0, "provenance source-value test did not select crash frame zero");
+    require(frame.registers.rdi.has_value() &&
+                *frame.registers.rdi == crash_thread.registers.rdi,
+            "crash-frame PRSTATUS RDI was not exposed to immutable inspection");
+    const auto value = session.inspect_value("snapshot_indirect_local");
+    require(value.name == "snapshot_indirect_local" &&
+                value.raw_value == kExpectedIndirectLocal &&
+                value.byte_size == sizeof(std::uint64_t) && !value.is_signed,
+            "provenance-aware snapshot local evaluation returned the wrong value");
+    require(value.module_path == fixture,
+            "snapshot local evaluation lost recorded module ownership");
+  } catch (...) {
+    std::remove(core_path.c_str());
+    throw;
+  }
+  std::remove(core_path.c_str());
+}
+
 std::string read_until(int fd, const std::string& needle,
                        std::chrono::steady_clock::time_point deadline) {
   std::string output;
@@ -450,6 +546,7 @@ int main(int argc, char** argv) {
     test_missing_entry_snapshot(argv[1]);
     test_caller_register_recovery(argv[1]);
     test_direct_api(argv[1]);
+    test_snapshot_provenance_local_value(argv[1]);
     test_cli(argv[2], argv[1]);
     std::cout << "DWARF5 optimized local integration passed\n";
   } catch (const std::exception& error) {

@@ -74,6 +74,35 @@ std::optional<ValueType> resolve_snapshot_floating_type(
   throw std::runtime_error("snapshot floating type chain is too deep");
 }
 
+std::optional<LocalPointeeType> resolve_pointer_pointee_type(
+    const std::vector<Die>& dies, std::uint64_t type_offset) {
+  for (unsigned depth = 0; depth < 16; ++depth) {
+    const auto index = die_index_by_offset(dies, type_offset);
+    if (!index) {
+      throw std::runtime_error("snapshot pointer type references an unknown DIE");
+    }
+    const auto& die = dies[*index];
+    if (die.tag == kDwTagTypedef || die.tag == kDwTagConstType) {
+      const auto* type = attribute(die, kDwAtType);
+      if (type == nullptr || type->form != kDwFormRef4) {
+        throw std::runtime_error(
+            "snapshot pointer type wrapper does not use DW_FORM_ref4");
+      }
+      type_offset = type->number;
+      continue;
+    }
+    if (die.tag != kDwTagPointerType) return std::nullopt;
+    const auto* pointee = attribute(die, kDwAtType);
+    if (pointee == nullptr || pointee->form != kDwFormRef4) {
+      throw std::runtime_error("snapshot pointer has no supported DW_FORM_ref4 pointee");
+    }
+    const auto integer = resolve_integer_type(dies, pointee->number);
+    return LocalPointeeType{integer.byte_size, integer.is_signed,
+                            LocalValueKind::Integer};
+  }
+  throw std::runtime_error("snapshot pointer type chain is too deep");
+}
+
 std::size_t snapshot_xmm_index(const std::vector<std::byte>& expression) {
   if (expression.size() != 1) {
     throw std::runtime_error(
@@ -162,6 +191,16 @@ LocalScalarValue materialize_snapshot_memory_value(
   return result;
 }
 
+void attach_pointer_metadata(LocalScalarValue& result,
+                             const std::optional<LocalPointeeType>& pointee) {
+  if (result.kind != LocalValueKind::Pointer) return;
+  if (!pointee || pointee->kind != LocalValueKind::Integer ||
+      pointee->byte_size == 0 || pointee->byte_size > sizeof(std::uint64_t)) {
+    throw std::logic_error("bounded pointer value lost its integer pointee metadata");
+  }
+  result.pointee_type = *pointee;
+}
+
 std::optional<LocalScalarValue> inspect_snapshot_unit(
     const DebugSections& sections, const CoreSnapshot& snapshot,
     const SnapshotInspectionFrameContext& frame,
@@ -239,6 +278,9 @@ std::optional<LocalScalarValue> inspect_snapshot_unit(
   const auto floating_type = resolve_snapshot_floating_type(dies, type->number);
   const auto value_type = floating_type ? *floating_type
                                         : resolve_value_type(dies, type->number);
+  const auto pointee_type = value_type.kind == LocalValueKind::Pointer
+                                ? resolve_pointer_pointee_type(dies, type->number)
+                                : std::optional<LocalPointeeType>{};
   std::vector<std::byte> location_expression;
   if (location->form == kDwFormExprloc) {
     location_expression = location->expression;
@@ -254,12 +296,12 @@ std::optional<LocalScalarValue> inspect_snapshot_unit(
         "snapshot local requires a compiler-proven location form");
   }
 
-  if (frame.index == 0) {
+  const auto opcode = std::to_integer<std::uint8_t>(location_expression.front());
+  if (frame.index == 0 && opcode == kSnapshotDwOpXmm0) {
     return materialize_snapshot_xmm_value(snapshot, frame, owner, name,
                                           value_type, location_expression);
   }
 
-  const auto opcode = std::to_integer<std::uint8_t>(location_expression.front());
   if (opcode == kDwOpBreg3) {
     if (value_type.kind == LocalValueKind::Structure ||
         value_type.kind == LocalValueKind::Floating) {
@@ -273,12 +315,18 @@ std::optional<LocalScalarValue> inspect_snapshot_unit(
     const auto raw = truncate_integer(
         evaluate_breg3_xor_stack_value(location_expression, *frame.registers.rbx),
         value_type.byte_size);
-    return LocalScalarValue{owner.module_path, std::string(name), raw,
+    LocalScalarValue result{owner.module_path, std::string(name), raw,
                             value_type.byte_size, value_type.is_signed,
                             value_type.kind};
+    attach_pointer_metadata(result, pointee_type);
+    return result;
   }
 
   if (opcode != kDwOpAddr) {
+    if (frame.index == 0) {
+      throw std::runtime_error(
+          "snapshot frame-zero local requires compiler-proven XMM0 or DW_OP_addr ownership");
+    }
     throw std::runtime_error(
         "snapshot caller local requires a compiler-proven DW_OP_breg3 scalar or DW_OP_addr memory form");
   }
@@ -306,7 +354,9 @@ std::optional<LocalScalarValue> inspect_snapshot_unit(
   const auto memory = read_snapshot_memory(
       snapshot, module_paths, static_cast<std::uintptr_t>(runtime_address_u64),
       value_type.byte_size);
-  return materialize_snapshot_memory_value(owner, name, value_type, memory);
+  auto result = materialize_snapshot_memory_value(owner, name, value_type, memory);
+  attach_pointer_metadata(result, pointee_type);
+  return result;
 }
 
 }  // namespace
@@ -345,6 +395,44 @@ LocalScalarValue inspect_local_value(const CoreSnapshot& snapshot,
                                      const SnapshotInspectionFrameContext& frame,
                                      std::string_view name) {
   return inspect_local_value(snapshot, frame, name, identity_snapshot_module_paths());
+}
+
+LocalScalarValue dereference_local_pointer(
+    const CoreSnapshot& snapshot, const SnapshotInspectionFrameContext& frame,
+    std::string_view name, const SnapshotModulePathResolver& module_paths) {
+  const auto pointer = inspect_local_value(snapshot, frame, name, module_paths);
+  if (pointer.kind != LocalValueKind::Pointer) {
+    throw std::runtime_error("local value is not a pointer: " + std::string(name));
+  }
+  if (!pointer.pointee_type || pointer.pointee_type->kind != LocalValueKind::Integer ||
+      pointer.pointee_type->byte_size == 0 ||
+      pointer.pointee_type->byte_size > sizeof(std::uint64_t)) {
+    throw std::runtime_error("pointer does not have a bounded integer pointee type");
+  }
+  if (pointer.raw_value == 0) {
+    throw std::runtime_error("cannot dereference a null core pointer: " + std::string(name));
+  }
+  if (pointer.raw_value > std::numeric_limits<std::uintptr_t>::max()) {
+    throw std::runtime_error("core pointer exceeds host address width");
+  }
+
+  const auto memory = read_snapshot_memory(
+      snapshot, module_paths, static_cast<std::uintptr_t>(pointer.raw_value),
+      pointer.pointee_type->byte_size);
+  LocalScalarValue result{pointer.module_path, "*" + pointer.name,
+                          decode_snapshot_scalar(memory, pointer.pointee_type->byte_size),
+                          pointer.pointee_type->byte_size,
+                          pointer.pointee_type->is_signed,
+                          LocalValueKind::Integer};
+  if (memory.provenance == SnapshotMemoryProvenance::Core) {
+    result.storage = LocalValueStorage::SnapshotCoreMemory;
+  } else {
+    result.storage = LocalValueStorage::SnapshotRuntimeArtifact;
+    result.storage_module_path = memory.module_path;
+    result.storage_file_path = memory.module_file_path;
+    result.storage_file_offset = memory.artifact_file_offset;
+  }
+  return result;
 }
 
 LocalIntegerValue inspect_local_integer(const CoreSnapshot& snapshot,

@@ -96,14 +96,24 @@ class CoreInspectionSession {
 
   [[nodiscard]] LocalScalarValue inspect_value(std::string_view name) const {
     const auto& frame = selected_frame();
+    validate_selected_frame(frame);
+    return inspect_local_value(snapshot_, frame, name, module_paths_);
+  }
+
+  [[nodiscard]] LocalScalarValue dereference_value(std::string_view name) const {
+    const auto& frame = selected_frame();
+    validate_selected_frame(frame);
+    return dereference_local_pointer(snapshot_, frame, name, module_paths_);
+  }
+
+ private:
+  void validate_selected_frame(const SnapshotInspectionFrameContext& frame) const {
     validate_snapshot_inspection_frame(snapshot_, frame);
     if (frame.thread_tid != selected_thread_tid_) {
       throw std::logic_error("selected core frame belongs to a different thread");
     }
-    return inspect_local_value(snapshot_, frame, name, module_paths_);
   }
 
- private:
   void validate_trace() const {
     if (trace_.frames.empty()) {
       throw std::runtime_error("core inspection produced no snapshot frames");

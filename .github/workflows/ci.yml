@@ -81,9 +81,10 @@ jobs:
             test -n "$core"
             sibling=$(cat "$ready")
             ./build/core_xmm_value_integration "$core" "$sibling"
-            output=$(printf 'print xmm_value\nthread %s\nprint xmm_value\nquit\n' "$sibling" | \
+            output=$(printf 'print xmm_value\nderef scalar_pointer\nthread %s\nprint xmm_value\nquit\n' "$sibling" | \
               ./build/mdbg-core "$core")
             printf '%s\n' "$output"
             printf '%s\n' "$output" | grep -F 'xmm_value = 1234.25'
+            printf '%s\n' "$output" | grep -F '*scalar_pointer = 0x8877665544332211'
             printf '%s\n' "$output" | grep -F 'xmm_value = 9876.5'
           done

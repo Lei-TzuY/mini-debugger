@@ -123,8 +123,7 @@ LocalScalarValue inspect_local_value(const CoreSnapshot& snapshot,
   if (owner.module_path != frame.module_path) {
     throw std::logic_error("snapshot inspection frame module ownership changed");
   }
-  const ElfFile module(owner.module_file_path);
-  const auto sections = read_debug_sections(module.path());
+  const auto sections = read_debug_sections(module_paths.resolve_debug_file(owner.module_path));
 
   std::size_t unit = 0;
   while (unit < sections.info.size()) {

@@ -2,6 +2,7 @@
 
 #include "dwarf/local_value.hpp"
 #include "snapshot/inspection.hpp"
+#include "snapshot/module_path.hpp"
 
 #include <cstddef>
 #include <stdexcept>
@@ -14,10 +15,14 @@ namespace mdbg {
 class CoreInspectionSession {
  public:
   explicit CoreInspectionSession(std::string core_path, std::size_t max_frames = 64)
-      : snapshot_(std::move(core_path)), max_frames_(max_frames),
-        selected_thread_tid_(snapshot_.crashed_tid()),
+      : CoreInspectionSession(std::move(core_path), SnapshotModulePathResolver{}, max_frames) {}
+
+  CoreInspectionSession(std::string core_path, SnapshotModulePathResolver module_paths,
+                        std::size_t max_frames = 64)
+      : snapshot_(std::move(core_path)), module_paths_(std::move(module_paths)),
+        max_frames_(max_frames), selected_thread_tid_(snapshot_.crashed_tid()),
         trace_(build_snapshot_inspection_frames(snapshot_, snapshot_.crashed_thread(),
-                                                max_frames_)) {
+                                                max_frames_, module_paths_)) {
     validate_trace();
   }
 
@@ -38,9 +43,20 @@ class CoreInspectionSession {
     return trace_.frames.at(selected_frame_);
   }
 
+  [[nodiscard]] std::optional<SnapshotResolvedSymbol> find_symbol(
+      std::uintptr_t runtime_pc) const {
+    return find_snapshot_symbol_by_runtime_address(snapshot_, runtime_pc, module_paths_);
+  }
+
+  [[nodiscard]] std::optional<SnapshotResolvedSource> find_source(
+      std::uintptr_t runtime_pc) const {
+    return find_snapshot_source_by_runtime_address(snapshot_, runtime_pc, module_paths_);
+  }
+
   void select_thread(pid_t tid) {
     const auto& thread = snapshot_.thread(tid);
-    auto next_trace = build_snapshot_inspection_frames(snapshot_, thread, max_frames_);
+    auto next_trace =
+        build_snapshot_inspection_frames(snapshot_, thread, max_frames_, module_paths_);
     if (next_trace.frames.empty()) {
       throw std::runtime_error("core thread inspection produced no snapshot frames");
     }
@@ -67,7 +83,7 @@ class CoreInspectionSession {
     if (frame.thread_tid != selected_thread_tid_) {
       throw std::logic_error("selected core frame belongs to a different thread");
     }
-    return inspect_local_value(snapshot_, frame, name);
+    return inspect_local_value(snapshot_, frame, name, module_paths_);
   }
 
  private:
@@ -82,6 +98,7 @@ class CoreInspectionSession {
   }
 
   CoreSnapshot snapshot_;
+  SnapshotModulePathResolver module_paths_;
   std::size_t max_frames_{64};
   pid_t selected_thread_tid_{-1};
   SnapshotInspectionTrace trace_;

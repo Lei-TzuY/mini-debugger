@@ -116,6 +116,16 @@ __attribute__((noinline)) uint64_t inspect_indirect_local(uint64_t** ptr) {
                    "indirect_local_probe:\n"
                    "nop\n"
                    :
+                   : "r"(ptr));
+  return indirect_local;
+}
+
+__attribute__((noinline)) uint64_t inspect_snapshot_indirect_local(uint64_t** ptr) {
+  const uint64_t snapshot_indirect_local = **ptr ^ INDIRECT_LOCAL_XOR;
+  __asm__ volatile(".globl snapshot_indirect_local_probe\n"
+                   "snapshot_indirect_local_probe:\n"
+                   "nop\n"
+                   :
                    : "D"(ptr)
                    : "memory");
   if (snapshot_indirect_crash_enabled) {
@@ -125,7 +135,7 @@ __attribute__((noinline)) uint64_t inspect_indirect_local(uint64_t** ptr) {
                      : "D"(ptr)
                      : "rax", "memory");
   }
-  return indirect_local;
+  return snapshot_indirect_local;
 }
 
 static __attribute__((always_inline)) inline uint64_t inspect_inlined_local(
@@ -161,7 +171,7 @@ int main(int argc, char** argv) {
   }
   if (indirect_snapshot) {
     uint64_t* snapshot_indirect_ptr = &indirect_seed;
-    (void)inspect_indirect_local(&snapshot_indirect_ptr);
+    (void)inspect_snapshot_indirect_local(&snapshot_indirect_ptr);
     return 8;
   }
   if (inspect_indirect_local(&indirect_ptr) != INDIRECT_LOCAL_EXPECTED) return 5;

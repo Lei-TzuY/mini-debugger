@@ -203,7 +203,7 @@ std::string run_core_cli(const std::string& cli, const std::string& core_path) {
   }
   ::close(input_pipe[0]);
   ::close(output_pipe[1]);
-  const std::string script = "crash\nquit\n";
+  const std::string script = "crash\nprocess\nquit\n";
   std::size_t offset = 0;
   while (offset < script.size()) {
     const auto count = ::write(input_pipe[1], script.data() + offset,
@@ -231,7 +231,7 @@ std::string run_core_cli(const std::string& cli, const std::string& core_path) {
     waited = ::waitpid(child, &status, 0);
   } while (waited == -1 && errno == EINTR);
   require(waited == child && WIFEXITED(status) && WEXITSTATUS(status) == 0,
-          "mdbg-core crash command failed");
+          "mdbg-core crash/process commands failed");
   return output;
 }
 
@@ -284,6 +284,29 @@ void test_real_siginfo(const std::string& fixture, const std::string& cli) {
     require(!process_command.empty(),
             "kernel NT_PRPSINFO did not preserve bounded process command text");
 
+    const auto& immutable_process = snapshot.process_info();
+    require(immutable_process.has_value(),
+            "CoreSnapshot did not expose genuine NT_PRPSINFO process identity");
+    require(immutable_process->pid == process.pr_pid &&
+                immutable_process->parent_pid == process.pr_ppid &&
+                immutable_process->process_group_id == process.pr_pgrp &&
+                immutable_process->session_id == process.pr_sid,
+            "CoreSnapshot changed kernel-recorded process relationships");
+    require(immutable_process->file_name == process_name &&
+                immutable_process->command == process_command,
+            "CoreSnapshot changed bounded kernel-recorded process text");
+    require(session.process_info().has_value() &&
+                session.process_info()->pid == recorded_pid,
+            "core inspection session did not expose immutable process identity");
+
+    const auto expected_process =
+        std::string("process pid ") + std::to_string(process.pr_pid) + " parent " +
+        std::to_string(process.pr_ppid) + " pgrp " + std::to_string(process.pr_pgrp) +
+        " sid " + std::to_string(process.pr_sid) + " file " + process_name + " command " +
+        process_command;
+    require(output.find(expected_process) != std::string::npos,
+            "mdbg-core did not render kernel-recorded process identity");
+
     auto contradictory = original;
     siginfo_t info{};
     std::memcpy(&info, contradictory.data() + note.desc_offset, sizeof(info));
@@ -299,6 +322,34 @@ void test_real_siginfo(const std::string& fixture, const std::string& cli) {
                 sizeof(malformed_header));
     expect_core_failure(malformed, "malformed NT_SIGINFO descriptor size");
 
+    auto process_contradiction = original;
+    elf_prpsinfo contradictory_process = process;
+    contradictory_process.pr_pid = process.pr_pid == 1 ? 2 : 1;
+    std::memcpy(process_contradiction.data() + process_note.desc_offset,
+                &contradictory_process, sizeof(contradictory_process));
+    expect_core_failure(process_contradiction,
+                        "NT_PRPSINFO PID outside NT_PRSTATUS thread catalogue");
+
+    auto process_malformed = original;
+    Elf64_Nhdr malformed_process_header = process_note.header;
+    malformed_process_header.n_descsz = sizeof(elf_prpsinfo) - 1;
+    std::memcpy(process_malformed.data() + process_note.header_offset,
+                &malformed_process_header, sizeof(malformed_process_header));
+    expect_core_failure(process_malformed, "malformed NT_PRPSINFO descriptor size");
+
+    auto process_absent = original;
+    Elf64_Nhdr absent_process_header = process_note.header;
+    absent_process_header.n_type = 0x7ffffffdU;
+    std::memcpy(process_absent.data() + process_note.header_offset,
+                &absent_process_header, sizeof(absent_process_header));
+    const auto process_absent_path = write_variant(process_absent);
+    const mdbg::CoreSnapshot process_absent_snapshot(process_absent_path);
+    require(!process_absent_snapshot.process_info().has_value(),
+            "core without NT_PRPSINFO fabricated process identity");
+    require(process_absent_snapshot.crash_info().has_value(),
+            "core without NT_PRPSINFO lost independent NT_SIGINFO evidence");
+    std::remove(process_absent_path.c_str());
+
     auto absent = original;
     Elf64_Nhdr absent_header = note.header;
     absent_header.n_type = 0x7ffffffeU;
@@ -310,6 +361,8 @@ void test_real_siginfo(const std::string& fixture, const std::string& cli) {
             "core without NT_SIGINFO fabricated crash metadata");
     require(absent_snapshot.signal_number() == SIGSEGV,
             "core without NT_SIGINFO lost NT_PRSTATUS signal evidence");
+    require(absent_snapshot.process_info().has_value(),
+            "removing NT_SIGINFO also removed independent process identity");
     std::remove(absent_path.c_str());
   } catch (...) {
     std::remove(core_path.c_str());

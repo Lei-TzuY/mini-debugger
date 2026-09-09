@@ -3,6 +3,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
@@ -162,6 +163,24 @@ void print_selected_source_context(const mdbg::CoreInspectionSession& session,
   }
 }
 
+void print_floating_value(const mdbg::LocalScalarValue& value) {
+  if (value.byte_size == sizeof(float)) {
+    const auto bits = static_cast<std::uint32_t>(value.raw_value);
+    float decoded = 0.0F;
+    std::memcpy(&decoded, &bits, sizeof(decoded));
+    std::cout << std::setprecision(std::numeric_limits<float>::max_digits10) << decoded;
+    return;
+  }
+  if (value.byte_size == sizeof(double)) {
+    const auto bits = value.raw_value;
+    double decoded = 0.0;
+    std::memcpy(&decoded, &bits, sizeof(decoded));
+    std::cout << std::setprecision(std::numeric_limits<double>::max_digits10) << decoded;
+    return;
+  }
+  throw std::logic_error("floating local value has an unsupported scalar width");
+}
+
 void print_value(const mdbg::LocalScalarValue& value) {
   std::cout << value.module_path << '!' << value.name << " = ";
   if (value.kind == mdbg::LocalValueKind::Structure) {
@@ -172,11 +191,18 @@ void print_value(const mdbg::LocalScalarValue& value) {
                 << value.members[index].raw_value << std::dec;
     }
     std::cout << " }";
+  } else if (value.kind == mdbg::LocalValueKind::Floating) {
+    print_floating_value(value);
   } else {
     std::cout << "0x" << std::hex << value.raw_value << std::dec;
   }
-  std::cout << " [" << value.byte_size << "-byte "
-            << (value.is_signed ? "signed" : "unsigned") << ']';
+  std::cout << " [" << value.byte_size << "-byte ";
+  if (value.kind == mdbg::LocalValueKind::Floating) {
+    std::cout << "floating";
+  } else {
+    std::cout << (value.is_signed ? "signed" : "unsigned");
+  }
+  std::cout << ']';
   if (value.storage == mdbg::LocalValueStorage::SnapshotCoreMemory) {
     std::cout << " [value-core]";
   } else if (value.storage == mdbg::LocalValueStorage::SnapshotRuntimeArtifact) {

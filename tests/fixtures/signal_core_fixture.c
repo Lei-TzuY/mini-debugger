@@ -9,14 +9,6 @@
 #include <ucontext.h>
 #include <unistd.h>
 
-struct SignalRegisterPair {
-  uint64_t first;
-  uint64_t second;
-};
-
-#define SIGNAL_PAIR_FIRST UINT64_C(0x1122334455667788)
-#define SIGNAL_PAIR_SECOND UINT64_C(0x99aabbccddeeff00)
-
 volatile uintptr_t signal_core_ucontext_address = 0;
 volatile uintptr_t signal_core_saved_rip = 0;
 volatile uintptr_t signal_core_saved_rsp = 0;
@@ -30,7 +22,6 @@ volatile double signal_core_fp_seed = 1234.5;
 static const double signal_core_handler_fp_marker = -4321.25;
 volatile sig_atomic_t signal_core_interrupted_ready = 0;
 volatile sig_atomic_t signal_core_main_tid = 0;
-volatile sig_atomic_t signal_core_loop_exit = 0;
 
 __attribute__((noinline)) void signal_core_crash_from_handler(void) {
   __asm__ volatile(
@@ -80,26 +71,22 @@ static void* signal_sender(void* argument) {
   return NULL;
 }
 
-__attribute__((noinline, noreturn)) void signal_core_interrupted_application(
-    struct SignalRegisterPair interrupted_pair) {
+__attribute__((noinline, noreturn)) void signal_core_interrupted_application(void) {
   register uint64_t interrupted_register_local __asm__("r12") =
       signal_core_value_seed ^ UINT64_C(0xa5a55a5ac3c33c3c);
   double interrupted_fp_local = signal_core_fp_seed;
   signal_core_interrupted_ready = 1;
-  __asm__ volatile(".globl signal_core_interrupted_probe\n"
-                   "signal_core_interrupted_probe:\n"
-                   ::: "memory");
-  while (!signal_core_loop_exit) {
-    __asm__ volatile("pause"
-                     : "+D"(interrupted_pair.first), "+S"(interrupted_pair.second),
-                       "+r"(interrupted_register_local), "+x"(interrupted_fp_local)
-                     :
-                     : "memory");
-  }
-  __asm__ volatile(".globl signal_core_interrupted_probe_end\n"
-                   "signal_core_interrupted_probe_end:\n"
-                   ::: "memory");
-  _Exit(92);
+  __asm__ volatile(
+      ".globl signal_core_interrupted_probe\n"
+      "signal_core_interrupted_probe:\n"
+      "pause\n"
+      "jmp signal_core_interrupted_probe\n"
+      ".globl signal_core_interrupted_probe_end\n"
+      "signal_core_interrupted_probe_end:\n"
+      : "+r"(interrupted_register_local), "+x"(interrupted_fp_local)
+      :
+      : "memory");
+  __builtin_unreachable();
 }
 
 int main(void) {
@@ -114,7 +101,5 @@ int main(void) {
 
   pthread_t sender;
   if (pthread_create(&sender, NULL, signal_sender, NULL) != 0) return 3;
-  const struct SignalRegisterPair interrupted_pair = {SIGNAL_PAIR_FIRST,
-                                                       SIGNAL_PAIR_SECOND};
-  signal_core_interrupted_application(interrupted_pair);
+  signal_core_interrupted_application();
 }

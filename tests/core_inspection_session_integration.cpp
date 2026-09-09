@@ -136,7 +136,7 @@ struct GeneratedCore {
   pid_t sibling_tid;
 };
 
-GeneratedCore generate_core(const std::string& fixture) {
+GeneratedCore generate_core(const std::string& fixture, bool omit_file_backed = false) {
   const auto ready_path = temp_path();
   const pid_t child = ::fork();
   if (child == -1) throw std::runtime_error("fork failed for core-session fixture");
@@ -145,6 +145,13 @@ GeneratedCore generate_core(const std::string& fixture) {
     if (::getrlimit(RLIMIT_CORE, &core_limit) != 0) _exit(120);
     core_limit.rlim_cur = core_limit.rlim_max;
     if (::setrlimit(RLIMIT_CORE, &core_limit) != 0) _exit(121);
+    if (omit_file_backed) {
+      std::ofstream filter("/proc/self/coredump_filter", std::ios::trunc);
+      if (!filter) _exit(122);
+      filter << "0x1\n";
+      filter.close();
+      if (!filter) _exit(123);
+    }
     ::execl(fixture.c_str(), fixture.c_str(), "--snapshot-crash-threaded",
             ready_path.c_str(), nullptr);
     _exit(127);
@@ -301,6 +308,79 @@ std::string run_core_cli(const std::string& cli, const GeneratedCore& core,
   return output;
 }
 
+std::uintptr_t first_frame_address(const std::string& output) {
+  const auto marker = output.find("#0 0x");
+  if (marker == std::string::npos) {
+    throw std::runtime_error("core CLI did not print the initial frame address");
+  }
+  const auto begin = marker + 5;
+  std::size_t consumed = 0;
+  const auto value = std::stoull(output.substr(begin), &consumed, 16);
+  if (consumed == 0) throw std::runtime_error("core CLI printed an invalid frame address");
+  return static_cast<std::uintptr_t>(value);
+}
+
+std::string run_omitted_memory_cli(const std::string& cli, const GeneratedCore& core) {
+  int input_pipe[2];
+  int output_pipe[2];
+  if (::pipe(input_pipe) != 0 || ::pipe(output_pipe) != 0) {
+    throw std::runtime_error("failed to create omitted-memory CLI pipes");
+  }
+  const pid_t child = ::fork();
+  if (child == -1) throw std::runtime_error("fork failed for omitted-memory CLI");
+  if (child == 0) {
+    ::dup2(input_pipe[0], STDIN_FILENO);
+    ::dup2(output_pipe[1], STDOUT_FILENO);
+    ::dup2(output_pipe[1], STDERR_FILENO);
+    ::close(input_pipe[0]);
+    ::close(input_pipe[1]);
+    ::close(output_pipe[0]);
+    ::close(output_pipe[1]);
+    ::execl(cli.c_str(), cli.c_str(), core.path.c_str(), nullptr);
+    _exit(127);
+  }
+  ::close(input_pipe[0]);
+  ::close(output_pipe[1]);
+
+  std::string output;
+  while (output.find("core> ") == std::string::npos) {
+    char buffer[1024];
+    const auto count = ::read(output_pipe[0], buffer, sizeof(buffer));
+    if (count == -1 && errno == EINTR) continue;
+    if (count <= 0) throw std::runtime_error("mdbg-core exited before initial prompt");
+    output.append(buffer, static_cast<std::size_t>(count));
+  }
+  const auto address = first_frame_address(output);
+  const std::string script = "x " + std::to_string(address) + " 1\nquit\n";
+  std::size_t offset = 0;
+  while (offset < script.size()) {
+    const auto count = ::write(input_pipe[1], script.data() + offset, script.size() - offset);
+    if (count == -1 && errno == EINTR) continue;
+    if (count <= 0) throw std::runtime_error("failed to write omitted-memory command");
+    offset += static_cast<std::size_t>(count);
+  }
+  ::close(input_pipe[1]);
+
+  for (;;) {
+    char buffer[1024];
+    const auto count = ::read(output_pipe[0], buffer, sizeof(buffer));
+    if (count == -1 && errno == EINTR) continue;
+    if (count < 0) throw std::runtime_error("failed to read omitted-memory CLI output");
+    if (count == 0) break;
+    output.append(buffer, static_cast<std::size_t>(count));
+  }
+  ::close(output_pipe[0]);
+
+  int status = 0;
+  pid_t waited;
+  do {
+    waited = ::waitpid(child, &status, 0);
+  } while (waited == -1 && errno == EINTR);
+  require(waited == child && WIFEXITED(status) && WEXITSTATUS(status) == 0,
+          "mdbg-core omitted-memory session did not exit cleanly");
+  return output;
+}
+
 void require_core_session_output(const std::string& output,
                                  const GeneratedCore& core,
                                  const std::string& recorded_module) {
@@ -393,6 +473,23 @@ void test_separate_debug_file(const std::string& fixture, const std::string& cli
   std::filesystem::remove_all(artifacts.directory);
 }
 
+void test_omitted_file_backed_memory(const std::string& fixture,
+                                     const std::string& cli) {
+  const auto core = generate_core(fixture, true);
+  try {
+    const auto output = run_omitted_memory_cli(cli, core);
+    require(output.find("artifact:") != std::string::npos,
+            "omitted file-backed core memory was not reconstructed from owned artifact; output: " +
+                output);
+    require(output.find(fixture) != std::string::npos,
+            "artifact-backed memory output lost recorded module ownership");
+  } catch (...) {
+    std::remove(core.path.c_str());
+    throw;
+  }
+  std::remove(core.path.c_str());
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -403,6 +500,7 @@ int main(int argc, char** argv) {
   try {
     test_core_session(argv[1], argv[2]);
     test_separate_debug_file(argv[1], argv[2]);
+    test_omitted_file_backed_memory(argv[1], argv[2]);
     std::cout << "core inspection session integration passed\n";
   } catch (const std::exception& error) {
     std::cerr << "core inspection session failure: " << error.what() << '\n';

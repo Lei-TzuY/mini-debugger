@@ -12,6 +12,8 @@
 volatile uintptr_t signal_core_ucontext_address = 0;
 volatile uintptr_t signal_core_saved_rip = 0;
 volatile uintptr_t signal_core_saved_rsp = 0;
+volatile uintptr_t signal_core_saved_rbp = 0;
+volatile uintptr_t signal_core_saved_rbx = 0;
 volatile sig_atomic_t signal_core_interrupted_ready = 0;
 volatile sig_atomic_t signal_core_main_tid = 0;
 
@@ -33,6 +35,8 @@ __attribute__((noinline)) void signal_core_handler(int signal_number, siginfo_t*
   signal_core_ucontext_address = (uintptr_t)raw_context;
   signal_core_saved_rip = (uintptr_t)context->uc_mcontext.gregs[REG_RIP];
   signal_core_saved_rsp = (uintptr_t)context->uc_mcontext.gregs[REG_RSP];
+  signal_core_saved_rbp = (uintptr_t)context->uc_mcontext.gregs[REG_RBP];
+  signal_core_saved_rbx = (uintptr_t)context->uc_mcontext.gregs[REG_RBX];
   __asm__ volatile(".globl signal_core_handler_probe\n"
                    "signal_core_handler_probe:\n"
                    ::: "memory");

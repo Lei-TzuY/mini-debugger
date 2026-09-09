@@ -10,6 +10,10 @@ ET_CORE = 4
 EM_X86_64 = 62
 NT_PRSTATUS = 1
 NT_FPREGSET = 2
+NT_PRPSINFO = 3
+NT_AUXV = 6
+NT_SIGINFO = 0x53494749
+NT_FILE = 0x46494c45
 NT_X86_XSTATE = 0x202
 
 
@@ -30,6 +34,7 @@ def main(path):
         raise SystemExit('unexpected program-header size')
 
     notes = []
+    all_core = []
     for index in range(e_phnum):
         ph = struct.unpack_from(ELF64_PHDR, data, e_phoff + index * e_phentsize)
         p_type, p_offset, p_filesz = ph[0], ph[2], ph[5]
@@ -44,10 +49,18 @@ def main(path):
             cursor += align4(namesz)
             desc_offset = cursor
             cursor += align4(descsz)
-            if name == 'CORE' and n_type in (NT_PRSTATUS, NT_FPREGSET, NT_X86_XSTATE):
-                notes.append((n_type, descsz, desc_offset))
+            if name == 'CORE':
+                all_core.append((n_type, descsz, desc_offset))
+                if n_type in (NT_PRSTATUS, NT_FPREGSET, NT_X86_XSTATE):
+                    notes.append((n_type, descsz, desc_offset))
 
-    labels = {NT_PRSTATUS: 'PRSTATUS', NT_FPREGSET: 'FPREGSET', NT_X86_XSTATE: 'XSTATE'}
+    labels = {
+        NT_PRSTATUS: 'PRSTATUS', NT_FPREGSET: 'FPREGSET', NT_PRPSINFO: 'PRPSINFO',
+        NT_AUXV: 'AUXV', NT_SIGINFO: 'SIGINFO', NT_FILE: 'FILE',
+        NT_X86_XSTATE: 'XSTATE'
+    }
+    full = ', '.join(f'{labels.get(t, hex(t))}:{size}' for t, size, _ in all_core)
+    print('PHASE16_ALL_CORE_NOTES=' + full)
     summary = ', '.join(f'{labels[t]}:{size}' for t, size, _ in notes)
     print('PHASE16_CORE_NOTE_EVIDENCE=' + summary)
     pr = sum(1 for t, _, _ in notes if t == NT_PRSTATUS)
@@ -58,8 +71,6 @@ def main(path):
         raise SystemExit('no NT_PRSTATUS evidence')
     if fp == 0 and xs == 0:
         raise SystemExit('no extended thread-state note evidence')
-    # Evidence-only gate: fail intentionally so the run log records the genuine kernel shape
-    # before production support is chosen. This file/workflow is removed before the PR.
     raise SystemExit(86)
 
 

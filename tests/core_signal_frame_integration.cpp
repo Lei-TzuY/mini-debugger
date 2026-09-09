@@ -61,10 +61,14 @@ bool trace_has_symbol(const mdbg::CoreInspectionSession& session,
 void print_evidence(const mdbg::CoreInspectionSession& session,
                     std::uintptr_t ucontext_address,
                     std::uintptr_t saved_rip,
-                    std::uintptr_t saved_rsp) {
+                    std::uintptr_t saved_rsp,
+                    std::uintptr_t interrupted_begin,
+                    std::uintptr_t interrupted_end) {
   std::cout << "signal-frame evidence: ucontext=0x" << std::hex << ucontext_address
             << " saved-rip=0x" << saved_rip << " saved-rsp=0x" << saved_rsp
-            << std::dec << " stop-reason=" << static_cast<int>(session.trace().stop_reason)
+            << " interrupted=[0x" << interrupted_begin << ",0x" << interrupted_end
+            << ")" << std::dec
+            << " stop-reason=" << static_cast<int>(session.trace().stop_reason)
             << '\n';
 
   for (const auto& frame : session.trace().frames) {
@@ -110,17 +114,22 @@ int main(int argc, char** argv) {
     require(ucontext_address != 0 && saved_rip != 0 && saved_rsp != 0,
             "kernel-provided signal ucontext oracle was not captured");
 
-    const auto interrupted = session.find_symbol(saved_rip);
-    require(interrupted.has_value() &&
-                interrupted->name == "signal_core_interrupted_application",
-            "saved signal RIP is not owned by the interrupted application frame");
+    const auto interrupted_begin = runtime_symbol_address(
+        snapshot, argv[2], "signal_core_interrupted_probe");
+    const auto interrupted_end = runtime_symbol_address(
+        snapshot, argv[2], "signal_core_interrupted_probe_end");
+
+    print_evidence(session, ucontext_address, saved_rip, saved_rsp,
+                   interrupted_begin, interrupted_end);
+
+    require(interrupted_begin < interrupted_end && saved_rip >= interrupted_begin &&
+                saved_rip < interrupted_end,
+            "saved signal RIP is outside the explicit interrupted application probe range");
 
     require(trace_has_symbol(session, "signal_core_crash_from_handler"),
             "ordinary core unwind lost the signal-handler crash frame");
     require(trace_has_symbol(session, "signal_core_handler"),
             "ordinary core unwind lost the signal handler frame");
-
-    print_evidence(session, ucontext_address, saved_rip, saved_rsp);
 
     require(trace_has_symbol(session, "signal_core_interrupted_application"),
             "ordinary CFI did not cross the genuine signal frame to the interrupted application context");

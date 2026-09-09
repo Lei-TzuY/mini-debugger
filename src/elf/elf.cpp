@@ -310,7 +310,9 @@ void CoreSnapshot::parse() {
     }
   }
 
-  if (!has_registers_) throw std::runtime_error("ELF core lacks NT_PRSTATUS registers");
+  if (!has_registers_ || threads_.empty()) {
+    throw std::runtime_error("ELF core lacks NT_PRSTATUS registers");
+  }
   if (load_segments_.empty()) throw std::runtime_error("ELF core lacks PT_LOAD memory");
   if (file_mappings_.empty()) throw std::runtime_error("ELF core lacks NT_FILE mappings");
   if (!mapping_for_address(static_cast<std::uintptr_t>(registers_.rip))) {
@@ -345,11 +347,24 @@ void CoreSnapshot::parse_notes(std::uint64_t offset, std::uint64_t size) {
       }
       const auto status = read_struct<elf_prstatus>(bytes_, static_cast<std::size_t>(desc_offset));
       static_assert(sizeof(status.pr_reg) == sizeof(user_regs_struct));
-      if (!has_registers_) {
-        std::memcpy(&registers_, status.pr_reg, sizeof(registers_));
+      if (status.pr_pid <= 0) throw std::runtime_error("NT_PRSTATUS has invalid TID");
+      const auto duplicate = std::find_if(threads_.begin(), threads_.end(), [&](const auto& thread) {
+        return thread.tid == status.pr_pid;
+      });
+      if (duplicate != threads_.end()) {
+        throw std::runtime_error("ELF core contains duplicate NT_PRSTATUS TID");
+      }
+      user_regs_struct thread_registers{};
+      std::memcpy(&thread_registers, status.pr_reg, sizeof(thread_registers));
+      const int thread_signal =
+          status.pr_cursig != 0 ? status.pr_cursig : status.pr_info.si_signo;
+      const bool is_crashed = threads_.empty();
+      threads_.push_back(
+          CoreThreadSnapshot{status.pr_pid, thread_signal, thread_registers, is_crashed});
+      if (is_crashed) {
+        registers_ = thread_registers;
         crashed_tid_ = status.pr_pid;
-        signal_number_ = status.pr_cursig != 0 ? status.pr_cursig : status.pr_info.si_signo;
-        if (crashed_tid_ <= 0) throw std::runtime_error("NT_PRSTATUS has invalid TID");
+        signal_number_ = thread_signal;
         has_registers_ = true;
       }
       continue;
@@ -417,6 +432,13 @@ void CoreSnapshot::parse_notes(std::uint64_t offset, std::uint64_t size) {
               if (left.start != right.start) return left.start < right.start;
               return left.end < right.end;
             });
+}
+
+const CoreThreadSnapshot& CoreSnapshot::thread(pid_t tid) const {
+  const auto found = std::find_if(threads_.begin(), threads_.end(),
+                                  [&](const auto& thread) { return thread.tid == tid; });
+  if (found == threads_.end()) throw std::out_of_range("core thread TID is unavailable");
+  return *found;
 }
 
 std::vector<std::byte> CoreSnapshot::read_memory(std::uintptr_t address,

@@ -7,6 +7,7 @@
 #include <csignal>
 #include <cstdio>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <stdexcept>
 #include <string>
@@ -21,7 +22,23 @@ void require(bool condition, const std::string& message) {
   if (!condition) throw std::runtime_error(message);
 }
 
-std::string generate_core(const std::string& fixture) {
+std::string temp_path() {
+  char pattern[] = "/tmp/mdbg-core-thread-ready-XXXXXX";
+  const int fd = ::mkstemp(pattern);
+  if (fd == -1) throw std::runtime_error("mkstemp failed for core thread fixture");
+  ::close(fd);
+  ::unlink(pattern);
+  return pattern;
+}
+
+struct GeneratedCore {
+  std::string path;
+  pid_t crash_tid;
+  pid_t sibling_tid;
+};
+
+GeneratedCore generate_core(const std::string& fixture) {
+  const auto ready_path = temp_path();
   const pid_t child = ::fork();
   if (child == -1) throw std::runtime_error("fork failed for core-session fixture");
   if (child == 0) {
@@ -29,7 +46,8 @@ std::string generate_core(const std::string& fixture) {
     if (::getrlimit(RLIMIT_CORE, &core_limit) != 0) _exit(120);
     core_limit.rlim_cur = core_limit.rlim_max;
     if (::setrlimit(RLIMIT_CORE, &core_limit) != 0) _exit(121);
-    ::execl(fixture.c_str(), fixture.c_str(), "--snapshot-crash", nullptr);
+    ::execl(fixture.c_str(), fixture.c_str(), "--snapshot-crash-threaded",
+            ready_path.c_str(), nullptr);
     _exit(127);
   }
 
@@ -44,15 +62,25 @@ std::string generate_core(const std::string& fixture) {
           "core-session fixture did not terminate from deterministic SIGSEGV");
 
   const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
-  while (!std::filesystem::exists(core_path) && std::chrono::steady_clock::now() < deadline) {
+  while ((!std::filesystem::exists(core_path) || !std::filesystem::exists(ready_path)) &&
+         std::chrono::steady_clock::now() < deadline) {
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
   }
   require(std::filesystem::exists(core_path),
           "kernel did not produce the core-session snapshot");
-  return core_path;
+  require(std::filesystem::exists(ready_path),
+          "threaded core fixture did not publish its sibling TID");
+
+  std::ifstream ready(ready_path);
+  long sibling = -1;
+  ready >> sibling;
+  std::remove(ready_path.c_str());
+  require(ready && sibling > 0 && sibling != child,
+          "threaded core fixture published an invalid sibling TID");
+  return GeneratedCore{core_path, child, static_cast<pid_t>(sibling)};
 }
 
-std::string run_core_cli(const std::string& cli, const std::string& core_path) {
+std::string run_core_cli(const std::string& cli, const GeneratedCore& core) {
   int input_pipe[2];
   int output_pipe[2];
   if (::pipe(input_pipe) != 0 || ::pipe(output_pipe) != 0) {
@@ -69,17 +97,22 @@ std::string run_core_cli(const std::string& cli, const std::string& core_path) {
     ::close(input_pipe[1]);
     ::close(output_pipe[0]);
     ::close(output_pipe[1]);
-    ::execl(cli.c_str(), cli.c_str(), core_path.c_str(), nullptr);
+    ::execl(cli.c_str(), cli.c_str(), core.path.c_str(), nullptr);
     _exit(127);
   }
 
   ::close(input_pipe[0]);
   ::close(output_pipe[1]);
   const std::string script =
+      "threads\n"
+      "thread " + std::to_string(core.sibling_tid) + "\n"
+      "bt\n"
+      "thread " + std::to_string(core.crash_tid) + "\n"
       "bt\n"
       "frame 1\n"
       "print transformed\n"
       "continue\n"
+      "thread 999999999\n"
       "frame 999\n"
       "quit\n";
   std::size_t offset = 0;
@@ -113,11 +146,23 @@ std::string run_core_cli(const std::string& cli, const std::string& core_path) {
 }
 
 void test_core_session(const std::string& fixture, const std::string& cli) {
-  const auto core_path = generate_core(fixture);
+  const auto core = generate_core(fixture);
   try {
-    const auto output = run_core_cli(cli, core_path);
-    require(output.find("core signal 11 tid ") != std::string::npos,
+    const auto output = run_core_cli(cli, core);
+    require(output.find("core signal 11 tid " + std::to_string(core.crash_tid)) !=
+                std::string::npos,
             "core session did not report immutable crash identity");
+    require(output.find("* tid " + std::to_string(core.crash_tid) + " crash") !=
+                std::string::npos,
+            "core thread catalogue did not mark the selected crash thread");
+    require(output.find("tid " + std::to_string(core.sibling_tid)) != std::string::npos,
+            "core thread catalogue lost the real sibling thread");
+    require(output.find("selected thread " + std::to_string(core.sibling_tid)) !=
+                std::string::npos,
+            "core session did not select the immutable sibling thread");
+    require(output.find("selected thread " + std::to_string(core.crash_tid)) !=
+                std::string::npos,
+            "core session did not restore the immutable crash thread");
     require(output.find("#0 0x") != std::string::npos &&
                 output.find("#1 0x") != std::string::npos,
             "core session backtrace did not expose crash and caller frames");
@@ -130,13 +175,15 @@ void test_core_session(const std::string& fixture, const std::string& cli) {
             "core session did not evaluate the historical caller source value");
     require(output.find("unsupported in core session: continue") != std::string::npos,
             "core session exposed a live execution command");
+    require(output.find("error: core thread TID is unavailable") != std::string::npos,
+            "core session did not reject an unavailable immutable thread");
     require(output.find("error: core frame index is out of range") != std::string::npos,
             "core session did not reject invalid immutable frame selection");
   } catch (...) {
-    std::remove(core_path.c_str());
+    std::remove(core.path.c_str());
     throw;
   }
-  std::remove(core_path.c_str());
+  std::remove(core.path.c_str());
 }
 
 }  // namespace

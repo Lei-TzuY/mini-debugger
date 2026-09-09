@@ -18,9 +18,11 @@
 #include <fstream>
 #include <iostream>
 #include <optional>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -142,6 +144,11 @@ struct AuxvEvidence {
   std::uint64_t program_header_count;
   std::uint64_t page_size;
   std::optional<std::uint64_t> interpreter_base;
+  std::vector<std::pair<std::uint64_t, std::uint64_t>> entries;
+  std::size_t entry_offset;
+  std::size_t phdr_offset;
+  std::optional<std::size_t> base_offset;
+  std::size_t null_offset;
 };
 
 AuxvEvidence parse_auxv_evidence(const std::vector<std::byte>& bytes,
@@ -160,42 +167,61 @@ AuxvEvidence parse_auxv_evidence(const std::vector<std::byte>& bytes,
   std::optional<std::uint64_t> phnum;
   std::optional<std::uint64_t> page_size;
   std::optional<std::uint64_t> base;
-  bool saw_null = false;
+  std::optional<std::size_t> entry_offset;
+  std::optional<std::size_t> phdr_offset;
+  std::optional<std::size_t> base_offset;
+  std::optional<std::size_t> null_offset;
+  std::vector<std::pair<std::uint64_t, std::uint64_t>> entries;
   const auto count = note.header.n_descsz / sizeof(Elf64_auxv_t);
   for (std::size_t index = 0; index < count; ++index) {
+    const auto offset = note.desc_offset + index * sizeof(Elf64_auxv_t);
     Elf64_auxv_t value{};
-    std::memcpy(&value,
-                bytes.data() + note.desc_offset + index * sizeof(Elf64_auxv_t),
-                sizeof(value));
+    std::memcpy(&value, bytes.data() + offset, sizeof(value));
     if (value.a_type == AT_NULL) {
-      saw_null = true;
+      null_offset = offset;
       break;
     }
+    entries.emplace_back(value.a_type, value.a_un.a_val);
     auto assign_once = [&](std::optional<std::uint64_t>& target, const char* label) {
       require(!target.has_value(), std::string("genuine NT_AUXV duplicated ") + label);
       target = value.a_un.a_val;
     };
     switch (value.a_type) {
-      case AT_ENTRY: assign_once(entry, "AT_ENTRY"); break;
-      case AT_PHDR: assign_once(phdr, "AT_PHDR"); break;
-      case AT_PHNUM: assign_once(phnum, "AT_PHNUM"); break;
-      case AT_PAGESZ: assign_once(page_size, "AT_PAGESZ"); break;
-      case AT_BASE: assign_once(base, "AT_BASE"); break;
-      default: break;
+      case AT_ENTRY:
+        assign_once(entry, "AT_ENTRY");
+        entry_offset = offset;
+        break;
+      case AT_PHDR:
+        assign_once(phdr, "AT_PHDR");
+        phdr_offset = offset;
+        break;
+      case AT_PHNUM:
+        assign_once(phnum, "AT_PHNUM");
+        break;
+      case AT_PAGESZ:
+        assign_once(page_size, "AT_PAGESZ");
+        break;
+      case AT_BASE:
+        assign_once(base, "AT_BASE");
+        base_offset = offset;
+        break;
+      default:
+        break;
     }
   }
 
-  require(saw_null, "genuine NT_AUXV did not terminate with AT_NULL");
-  require(entry.has_value() && *entry != 0,
+  require(null_offset.has_value(), "genuine NT_AUXV did not terminate with AT_NULL");
+  require(entry.has_value() && *entry != 0 && entry_offset.has_value(),
           "genuine NT_AUXV did not provide a nonzero AT_ENTRY");
-  require(phdr.has_value() && *phdr != 0,
+  require(phdr.has_value() && *phdr != 0 && phdr_offset.has_value(),
           "genuine NT_AUXV did not provide a nonzero AT_PHDR");
   require(phnum.has_value() && *phnum != 0,
           "genuine NT_AUXV did not provide a nonzero AT_PHNUM");
   require(page_size.has_value() && *page_size != 0 &&
               (*page_size & (*page_size - 1)) == 0,
           "genuine NT_AUXV did not provide a power-of-two AT_PAGESZ");
-  return AuxvEvidence{*entry, *phdr, *phnum, *page_size, base};
+  return AuxvEvidence{*entry, *phdr, *phnum, *page_size, base, std::move(entries),
+                      *entry_offset, *phdr_offset, base_offset, *null_offset};
 }
 
 std::string generate_core(const std::string& fixture, pid_t* recorded_pid = nullptr) {
@@ -245,6 +271,20 @@ void expect_core_failure(const std::vector<std::byte>& bytes,
   require(failed, context + " was accepted");
 }
 
+void expect_startup_failure(const std::vector<std::byte>& bytes,
+                            const std::string& context) {
+  const auto path = write_variant(bytes);
+  bool failed = false;
+  try {
+    const mdbg::CoreInspectionSession session(path);
+    (void)session.startup_info();
+  } catch (const std::exception&) {
+    failed = true;
+  }
+  std::remove(path.c_str());
+  require(failed, context + " was accepted");
+}
+
 std::string run_core_cli(const std::string& cli, const std::string& core_path) {
   int input_pipe[2];
   int output_pipe[2];
@@ -266,7 +306,7 @@ std::string run_core_cli(const std::string& cli, const std::string& core_path) {
   }
   ::close(input_pipe[0]);
   ::close(output_pipe[1]);
-  const std::string script = "crash\nprocess\nquit\n";
+  const std::string script = "crash\nprocess\nstartup\nquit\n";
   std::size_t offset = 0;
   while (offset < script.size()) {
     const auto count = ::write(input_pipe[1], script.data() + offset,
@@ -294,7 +334,7 @@ std::string run_core_cli(const std::string& cli, const std::string& core_path) {
     waited = ::waitpid(child, &status, 0);
   } while (waited == -1 && errno == EINTR);
   require(waited == child && WIFEXITED(status) && WEXITSTATUS(status) == 0,
-          "mdbg-core crash/process commands failed");
+          "mdbg-core crash/process/startup commands failed");
   return output;
 }
 
@@ -314,24 +354,13 @@ void test_real_siginfo(const std::string& fixture, const std::string& cli) {
     require(crash->fault_address.has_value() && *crash->fault_address == 0,
             "deterministic null write did not record si_addr=0");
 
-    const mdbg::CoreInspectionSession session(core_path);
-    require(session.crash_info().has_value() &&
-                session.crash_info()->signal_number == SIGSEGV,
-            "core inspection session did not expose immutable crash metadata");
-
-    const auto output = run_core_cli(cli, core_path);
-    const auto expected = std::string("crash signal ") + std::to_string(SIGSEGV) +
-                          " code " + std::to_string(SEGV_MAPERR) + " address 0x0";
-    require(output.find(expected) != std::string::npos,
-            "mdbg-core did not render kernel-recorded crash metadata");
-
     const auto original = read_file_bytes(core_path);
     const auto note = find_core_note(original, NT_SIGINFO, "CORE/NT_SIGINFO");
     require(note.header.n_descsz == sizeof(siginfo_t),
             "genuine x86-64 Linux NT_SIGINFO size is outside the bounded contract");
-
     const auto auxv_note = find_core_note(original, NT_AUXV, "CORE/NT_AUXV");
     const auto auxv = parse_auxv_evidence(original, auxv_note);
+
     const auto entry_mapping = snapshot.mapping_for_address(auxv.entry_point);
     require(entry_mapping.has_value(),
             "genuine AT_ENTRY is not owned by any NT_FILE mapping");
@@ -344,6 +373,43 @@ void test_real_siginfo(const std::string& fixture, const std::string& cli) {
     require(std::filesystem::weakly_canonical(phdr_mapping->path) ==
                 std::filesystem::weakly_canonical(fixture),
             "genuine AT_PHDR is not owned by the crashed executable mapping");
+
+    const mdbg::CoreInspectionSession session(core_path);
+    require(session.crash_info().has_value() &&
+                session.crash_info()->signal_number == SIGSEGV,
+            "core inspection session did not expose immutable crash metadata");
+    const auto& startup = session.startup_info();
+    require(startup.has_value(),
+            "core inspection session did not expose genuine NT_AUXV startup metadata");
+    require(startup->entry_point == std::optional<std::uint64_t>{auxv.entry_point} &&
+                startup->program_headers == std::optional<std::uint64_t>{auxv.program_headers} &&
+                startup->program_header_count ==
+                    std::optional<std::uint64_t>{auxv.program_header_count} &&
+                startup->page_size == std::optional<std::uint64_t>{auxv.page_size} &&
+                startup->interpreter_base == auxv.interpreter_base,
+            "core inspection session changed kernel-recorded startup metadata");
+    require(startup->entries.size() == auxv.entries.size(),
+            "core startup consumer did not preserve every non-null AUXV entry");
+    for (std::size_t index = 0; index < auxv.entries.size(); ++index) {
+      require(startup->entries[index].type == auxv.entries[index].first &&
+                  startup->entries[index].value == auxv.entries[index].second,
+              "core startup consumer changed an unknown or recognized AUXV entry");
+    }
+
+    const auto output = run_core_cli(cli, core_path);
+    const auto expected = std::string("crash signal ") + std::to_string(SIGSEGV) +
+                          " code " + std::to_string(SEGV_MAPERR) + " address 0x0";
+    require(output.find(expected) != std::string::npos,
+            "mdbg-core did not render kernel-recorded crash metadata");
+    std::ostringstream expected_startup;
+    expected_startup << "startup entry 0x" << std::hex << auxv.entry_point << " phdr 0x"
+                     << auxv.program_headers << std::dec << " phnum "
+                     << auxv.program_header_count << " pagesz " << auxv.page_size;
+    if (auxv.interpreter_base) {
+      expected_startup << " base 0x" << std::hex << *auxv.interpreter_base << std::dec;
+    }
+    require(output.find(expected_startup.str()) != std::string::npos,
+            "mdbg-core did not render kernel-recorded startup metadata");
 
     const auto process_note =
         find_core_note(original, NT_PRPSINFO, "CORE/NT_PRPSINFO");
@@ -384,6 +450,56 @@ void test_real_siginfo(const std::string& fixture, const std::string& cli) {
         process_command;
     require(output.find(expected_process) != std::string::npos,
             "mdbg-core did not render kernel-recorded process identity");
+
+    auto auxv_duplicate = original;
+    Elf64_auxv_t duplicate_entry{};
+    std::memcpy(&duplicate_entry, auxv_duplicate.data() + auxv.phdr_offset,
+                sizeof(duplicate_entry));
+    duplicate_entry.a_type = AT_ENTRY;
+    std::memcpy(auxv_duplicate.data() + auxv.phdr_offset, &duplicate_entry,
+                sizeof(duplicate_entry));
+    expect_startup_failure(auxv_duplicate, "duplicate recognized NT_AUXV key");
+
+    auto auxv_no_null = original;
+    Elf64_auxv_t missing_null{};
+    std::memcpy(&missing_null, auxv_no_null.data() + auxv.null_offset,
+                sizeof(missing_null));
+    missing_null.a_type = 0x7ffffffbU;
+    missing_null.a_un.a_val = 0;
+    std::memcpy(auxv_no_null.data() + auxv.null_offset, &missing_null,
+                sizeof(missing_null));
+    expect_startup_failure(auxv_no_null, "NT_AUXV without AT_NULL terminator");
+
+    auto auxv_bad_entry = original;
+    Elf64_auxv_t bad_entry{};
+    std::memcpy(&bad_entry, auxv_bad_entry.data() + auxv.entry_offset, sizeof(bad_entry));
+    bad_entry.a_un.a_val = 1;
+    std::memcpy(auxv_bad_entry.data() + auxv.entry_offset, &bad_entry, sizeof(bad_entry));
+    expect_startup_failure(auxv_bad_entry, "NT_AUXV AT_ENTRY outside NT_FILE ownership");
+
+    if (auxv.base_offset) {
+      auto auxv_bad_base = original;
+      Elf64_auxv_t bad_base{};
+      std::memcpy(&bad_base, auxv_bad_base.data() + *auxv.base_offset, sizeof(bad_base));
+      bad_base.a_un.a_val = 1;
+      std::memcpy(auxv_bad_base.data() + *auxv.base_offset, &bad_base, sizeof(bad_base));
+      expect_startup_failure(auxv_bad_base, "NT_AUXV AT_BASE outside NT_FILE ownership");
+    }
+
+    auto auxv_absent = original;
+    Elf64_Nhdr absent_auxv_header = auxv_note.header;
+    absent_auxv_header.n_type = 0x7ffffffcU;
+    std::memcpy(auxv_absent.data() + auxv_note.header_offset,
+                &absent_auxv_header, sizeof(absent_auxv_header));
+    const auto auxv_absent_path = write_variant(auxv_absent);
+    const mdbg::CoreInspectionSession auxv_absent_session(auxv_absent_path);
+    require(!auxv_absent_session.startup_info().has_value(),
+            "core without NT_AUXV fabricated startup metadata");
+    require(auxv_absent_session.crash_info().has_value(),
+            "core without NT_AUXV lost independent crash metadata");
+    require(auxv_absent_session.process_info().has_value(),
+            "core without NT_AUXV lost independent process identity");
+    std::remove(auxv_absent_path.c_str());
 
     auto contradictory = original;
     siginfo_t info{};

@@ -1,104 +1,11 @@
 #include "dwarf/source_lookup_impl.inc"
 #include "snapshot/inspection.hpp"
-#include "snapshot/memory.hpp"
 
 namespace mdbg {
 namespace {
 
-std::uint64_t read_snapshot_integer(
-    const CoreSnapshot& snapshot, const SnapshotModulePathResolver& module_paths,
-    std::uint64_t address, std::size_t byte_size) {
-  const auto read = read_snapshot_memory(
-      snapshot, module_paths, static_cast<std::uintptr_t>(address), byte_size);
-  if (read.bytes.size() != byte_size) {
-    throw std::runtime_error("short snapshot local-value memory read");
-  }
-  return decode_integer(read.bytes, 0, byte_size);
-}
-
-std::uint64_t evaluate_snapshot_breg5_stack_value(
-    const std::vector<std::byte>& expression,
-    const SnapshotInspectionFrameContext& frame, const CoreSnapshot& snapshot,
-    const SnapshotModulePathResolver& module_paths) {
-  if (expression.empty() ||
-      std::to_integer<std::uint8_t>(expression.front()) != kDwOpBreg5) {
-    throw std::runtime_error(
-        "snapshot local value is not the compiler-proven DW_OP_breg5 form");
-  }
-  if (!frame.registers.rdi) {
-    throw std::runtime_error(
-        "snapshot crash-frame DW_OP_breg5 requires captured historical RDI");
-  }
-
-  std::size_t cursor = 1;
-  const auto offset =
-      read_sleb(expression, cursor, expression.size(), "snapshot DW_OP_breg5 offset");
-  if (cursor >= expression.size()) {
-    throw std::runtime_error(
-        "snapshot DW_OP_breg5 value is missing a compiler-proven operation");
-  }
-
-  const auto next = std::to_integer<std::uint8_t>(expression[cursor]);
-  if (next == kDwOpStackValue) {
-    ++cursor;
-    if (cursor != expression.size()) {
-      throw std::runtime_error(
-          "unsupported trailing operations after snapshot DW_OP_breg5 value");
-    }
-    return add_signed(*frame.registers.rdi, offset, "snapshot DW_OP_breg5 value");
-  }
-
-  if (next != kDwOpDeref || offset != 0) {
-    throw std::runtime_error(
-        "snapshot DW_OP_breg5 value is not the compiler-proven stack/dereference form");
-  }
-
-  auto value = add_signed(*frame.registers.rdi, offset,
-                          "snapshot DW_OP_breg5 dereference address");
-  std::size_t dereference_count = 0;
-  while (cursor < expression.size() &&
-         std::to_integer<std::uint8_t>(expression[cursor]) == kDwOpDeref) {
-    if (dereference_count >= 2) {
-      throw std::runtime_error(
-          "snapshot DW_OP_breg5 dereference chain exceeds the compiler-proven two-level bound");
-    }
-    ++cursor;
-    value = read_snapshot_integer(snapshot, module_paths, value, sizeof(std::uint64_t));
-    ++dereference_count;
-  }
-  if (dereference_count == 0) {
-    throw std::runtime_error("snapshot DW_OP_breg5 value is missing DW_OP_deref");
-  }
-  if (cursor >= expression.size() ||
-      std::to_integer<std::uint8_t>(expression[cursor]) != kDwOpConstu) {
-    throw std::runtime_error(
-        "snapshot DW_OP_breg5 dereference value requires the compiler-proven DW_OP_constu");
-  }
-  ++cursor;
-  const auto constant =
-      read_uleb(expression, cursor, expression.size(), "snapshot DW_OP_constu value");
-  if (cursor >= expression.size() ||
-      std::to_integer<std::uint8_t>(expression[cursor]) != kDwOpXor) {
-    throw std::runtime_error(
-        "snapshot DW_OP_breg5 dereference value requires the compiler-proven DW_OP_xor");
-  }
-  ++cursor;
-  if (cursor >= expression.size() ||
-      std::to_integer<std::uint8_t>(expression[cursor]) != kDwOpStackValue) {
-    throw std::runtime_error(
-        "snapshot DW_OP_breg5 dereference value requires the compiler-proven trailing DW_OP_stack_value");
-  }
-  ++cursor;
-  if (cursor != expression.size()) {
-    throw std::runtime_error(
-        "unsupported trailing operations after snapshot DW_OP_breg5 dereference value");
-  }
-  return value ^ constant;
-}
-
-std::optional<LocalScalarValue> inspect_snapshot_unit(
+std::optional<LocalScalarValue> inspect_snapshot_caller_breg3_unit(
     const DebugSections& sections, const SnapshotInspectionFrameContext& frame,
-    const CoreSnapshot& snapshot, const SnapshotModulePathResolver& module_paths,
     std::string_view recorded_module_path, std::uint64_t virtual_pc,
     std::string_view name, std::size_t unit_start, std::size_t& next_unit) {
   std::uint16_t unit_version = 0;
@@ -180,27 +87,8 @@ std::optional<LocalScalarValue> inspect_snapshot_unit(
     throw std::runtime_error("local value has no supported DW_AT_location form");
   }
 
-  if (value_type.kind == LocalValueKind::Structure || location_expression.empty()) {
-    throw std::runtime_error(
-        "snapshot local requires a compiler-proven scalar location expression");
-  }
-
-  const auto first = std::to_integer<std::uint8_t>(location_expression.front());
-  if (frame.index == 0) {
-    if (first != kDwOpBreg5) {
-      throw std::runtime_error(
-          "snapshot crash-frame local requires the compiler-proven DW_OP_breg5 scalar form");
-    }
-    const auto raw = truncate_integer(
-        evaluate_snapshot_breg5_stack_value(
-            location_expression, frame, snapshot, module_paths),
-        value_type.byte_size);
-    return LocalScalarValue{std::string(recorded_module_path), std::string(name), raw,
-                            value_type.byte_size, value_type.is_signed,
-                            value_type.kind};
-  }
-
-  if (first != kDwOpBreg3) {
+  if (value_type.kind == LocalValueKind::Structure || location_expression.empty() ||
+      std::to_integer<std::uint8_t>(location_expression.front()) != kDwOpBreg3) {
     throw std::runtime_error(
         "snapshot caller local requires the existing compiler-proven DW_OP_breg3 scalar form");
   }
@@ -225,6 +113,10 @@ LocalScalarValue inspect_local_value(const CoreSnapshot& snapshot,
                                      const SnapshotModulePathResolver& module_paths) {
   if (name.empty()) throw std::invalid_argument("local variable name must not be empty");
   validate_snapshot_inspection_frame(snapshot, frame);
+  if (frame.index == 0) {
+    throw std::invalid_argument(
+        "snapshot caller local-value inspection requires a recovered caller frame");
+  }
 
   const auto owner =
       resolve_snapshot_module_address(snapshot, frame.runtime_pc, module_paths);
@@ -236,9 +128,8 @@ LocalScalarValue inspect_local_value(const CoreSnapshot& snapshot,
   std::size_t unit = 0;
   while (unit < sections.info.size()) {
     std::size_t next = unit;
-    const auto result = inspect_snapshot_unit(
-        sections, frame, snapshot, module_paths, owner.module_path,
-        owner.virtual_address, name, unit, next);
+    const auto result = inspect_snapshot_caller_breg3_unit(
+        sections, frame, owner.module_path, owner.virtual_address, name, unit, next);
     if (result) return *result;
     if (next <= unit) {
       throw std::runtime_error("DWARF parser did not advance to the next unit");

@@ -39,26 +39,32 @@ def parse_dies(text):
     return records
 
 
-def find_variable_location(records, function_name):
+def find_subprogram(records, function_name):
     for index, record in enumerate(records):
         if record["tag"] != "DW_TAG_subprogram":
             continue
-        if clean_name(record["attrs"].get("name", "")) != function_name:
-            continue
-        depth = record["depth"]
-        for child in records[index + 1 :]:
-            if child["depth"] <= depth:
-                break
-            if child["tag"] != "DW_TAG_variable":
-                continue
-            if clean_name(child["attrs"].get("name", "")) != "xmm_value":
-                continue
-            location = child["attrs"].get("location")
-            if not location:
-                raise RuntimeError(f"{function_name}: xmm_value has no DW_AT_location")
-            return location
-        raise RuntimeError(f"{function_name}: xmm_value DIE not found")
+        if clean_name(record["attrs"].get("name", "")) == function_name:
+            return index, record
     raise RuntimeError(f"{function_name}: subprogram DIE not found")
+
+
+def find_variable_location(records, function_name, variable_name):
+    index, record = find_subprogram(records, function_name)
+    depth = record["depth"]
+    for child in records[index + 1 :]:
+        if child["depth"] <= depth:
+            break
+        if child["tag"] != "DW_TAG_variable":
+            continue
+        if clean_name(child["attrs"].get("name", "")) != variable_name:
+            continue
+        location = child["attrs"].get("location")
+        if not location:
+            raise RuntimeError(
+                f"{function_name}: {variable_name} has no DW_AT_location"
+            )
+        return location
+    raise RuntimeError(f"{function_name}: {variable_name} DIE not found")
 
 
 def symbol_addresses(path):
@@ -102,7 +108,7 @@ def list_xmm(location, loc_text, probe):
         raise RuntimeError(f"location-list offset 0x{wanted:x} was not emitted by readelf")
 
     range_re = re.compile(
-        r"([0-9a-fA-F]{16})\s+([0-9a-fA-F]{16})\s+"
+        r"([0-9a-fA-F]{8,16})\s+([0-9a-fA-F]{8,16})\s+"
         r"\(DW_OP_reg(\d+) \(xmm(\d+)\)\)"
     )
     for line in lines[start:]:
@@ -121,11 +127,64 @@ def list_xmm(location, loc_text, probe):
     raise RuntimeError(f"probe 0x{probe:x} is not covered by an XMM DWARF location")
 
 
+def direct_fbreg(location):
+    match = re.search(r"DW_OP_fbreg:\s*(-?\d+)", location)
+    if not match:
+        return None
+    return int(match.group(1))
+
+
+def list_fbreg(location, loc_text, probe):
+    offset_match = re.search(r"0x([0-9a-fA-F]+)\s+\(location list\)", location)
+    if not offset_match:
+        raise RuntimeError(f"unsupported stack-local DW_AT_location: {location}")
+    wanted = int(offset_match.group(1), 16)
+    lines = loc_text.splitlines()
+    start = None
+    offset_re = re.compile(r"^\s*([0-9a-fA-F]{8})\b")
+    for index, line in enumerate(lines):
+        match = offset_re.match(line)
+        if match and int(match.group(1), 16) == wanted:
+            start = index
+            break
+    if start is None:
+        raise RuntimeError(f"stack-local location-list offset 0x{wanted:x} was not emitted")
+
+    range_re = re.compile(
+        r"([0-9a-fA-F]{8,16})\s+([0-9a-fA-F]{8,16}).*"
+        r"\(DW_OP_fbreg:\s*(-?\d+)\)"
+    )
+    for line in lines[start:]:
+        if "<End of list>" in line:
+            break
+        match = range_re.search(line)
+        if not match:
+            continue
+        begin = int(match.group(1), 16)
+        end = int(match.group(2), 16)
+        offset = int(match.group(3))
+        if begin <= probe < end:
+            return offset, begin, end
+    raise RuntimeError(f"probe 0x{probe:x} is not covered by a DW_OP_fbreg location")
+
+
+def frame_base_kind(records, function_name):
+    _, record = find_subprogram(records, function_name)
+    frame_base = record["attrs"].get("frame_base")
+    if not frame_base:
+        raise RuntimeError(f"{function_name}: no DW_AT_frame_base")
+    if "DW_OP_call_frame_cfa" in frame_base:
+        return "call_frame_cfa"
+    if re.search(r"DW_OP_reg6\s*\(rbp\)", frame_base):
+        return "rbp"
+    raise RuntimeError(f"{function_name}: unsupported frame base: {frame_base}")
+
+
 def verify(function_name, probe_name, loc_text, records, symbols):
     if probe_name not in symbols:
         raise RuntimeError(f"missing probe symbol: {probe_name}")
     probe = symbols[probe_name]
-    location = find_variable_location(records, function_name)
+    location = find_variable_location(records, function_name, "xmm_value")
     direct = direct_xmm(location)
     if direct is not None:
         reg, xmm = direct
@@ -138,6 +197,26 @@ def verify(function_name, probe_name, loc_text, records, symbols):
     )
 
 
+def verify_stack_local(function_name, probe_name, loc_text, records, symbols):
+    if probe_name not in symbols:
+        raise RuntimeError(f"missing probe symbol: {probe_name}")
+    probe = symbols[probe_name]
+    location = find_variable_location(records, function_name, "stack_local")
+    base = frame_base_kind(records, function_name)
+    direct = direct_fbreg(location)
+    if direct is not None:
+        print(
+            f"{function_name}: stack_local probe=0x{probe:x} direct "
+            f"DW_OP_fbreg {direct} frame_base={base}"
+        )
+        return
+    offset, begin, end = list_fbreg(location, loc_text, probe)
+    print(
+        f"{function_name}: stack_local probe=0x{probe:x} "
+        f"range=[0x{begin:x},0x{end:x}) DW_OP_fbreg {offset} frame_base={base}"
+    )
+
+
 def main():
     if len(sys.argv) != 2:
         raise SystemExit("usage: core_xmm_dwarf_oracle.py <fixture>")
@@ -147,6 +226,7 @@ def main():
     records = parse_dies(info)
     symbols = symbol_addresses(path)
     verify("crash_with_xmm", "snapshot_xmm_crash_probe", loc, records, symbols)
+    verify_stack_local("crash_with_xmm", "snapshot_xmm_crash_probe", loc, records, symbols)
     verify("sibling_hold_xmm", "snapshot_xmm_sibling_probe", loc, records, symbols)
 
 

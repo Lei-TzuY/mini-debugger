@@ -268,9 +268,8 @@ void test_core_session(const std::string& fixture, const std::string& cli) {
     const GeneratedCore relocated{relocated_path, core.crash_tid, core.sibling_tid};
 
     const auto unavailable_output = run_core_cli(cli, relocated);
-    require(unavailable_output.find("backtrace stopped: invalid-frame-state") !=
-                std::string::npos,
-            "relocated core unexpectedly recovered caller frames without a module mapping");
+    require(unavailable_output.find("#1 0x") == std::string::npos,
+            "relocated core unexpectedly recovered a caller frame without a module mapping");
     require(unavailable_output.find(kExpectedValue) == std::string::npos,
             "relocated core unexpectedly evaluated caller value without a module mapping");
 

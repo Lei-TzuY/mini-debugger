@@ -1,5 +1,7 @@
 #pragma once
 
+#include "elf/core_fpregset.hpp"
+
 #include <sys/types.h>
 #include <sys/user.h>
 
@@ -104,6 +106,10 @@ class CoreSnapshot {
     return threads_.front();
   }
   [[nodiscard]] const CoreThreadSnapshot& thread(pid_t tid) const;
+  [[nodiscard]] std::optional<CoreFloatingPointState> floating_point_state(pid_t tid) const {
+    (void)thread(tid);
+    return read_core_floating_point_state(path_, tid);
+  }
   [[nodiscard]] const std::vector<CoreFileMapping>& file_mappings() const noexcept {
     return file_mappings_;
   }

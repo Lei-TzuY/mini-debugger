@@ -9,6 +9,7 @@
 #include "unwind/cfi.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
@@ -190,7 +191,8 @@ inline SnapshotInspectionFrameContext make_snapshot_inspection_frame(
     const CoreSnapshot& snapshot, const CoreThreadSnapshot& thread,
     std::size_t index, const EhFrameCursor& cursor,
     SnapshotFramePcOwnership pc_ownership,
-    std::optional<std::uint64_t> restored_r12 = std::nullopt) {
+    std::optional<std::uint64_t> restored_r12 = std::nullopt,
+    std::optional<std::array<std::byte, 16>> restored_xmm0 = std::nullopt) {
   const auto& owned = snapshot.thread(thread.tid);
   if (&owned != &thread) {
     throw std::logic_error("snapshot thread context belongs to a different owner");
@@ -201,6 +203,7 @@ inline SnapshotInspectionFrameContext make_snapshot_inspection_frame(
   recovered.rbp = cursor.frame_pointer;
   recovered.rsp = static_cast<std::uint64_t>(cursor.stack_pointer);
   recovered.r12 = restored_r12;
+  recovered.xmm0 = restored_xmm0;
   return SnapshotInspectionFrameContext{
       index,
       &snapshot,
@@ -250,6 +253,7 @@ inline SnapshotInspectionTrace build_snapshot_inspection_frames(
   while (result.frames.size() < max_frames) {
     std::optional<EhFrameCursor> caller;
     std::optional<std::uint64_t> caller_r12;
+    std::optional<std::array<std::byte, 16>> caller_xmm0;
     auto caller_pc_ownership = SnapshotFramePcOwnership::ReturnAddress;
     try {
       const auto module = resolve_snapshot_module_address(
@@ -268,6 +272,7 @@ inline SnapshotInspectionTrace build_snapshot_inspection_frames(
             recover_linux_x86_signal_frame(snapshot, current.stack_pointer);
         caller = signal.cursor;
         caller_r12 = signal.r12;
+        caller_xmm0 = signal.xmm0;
         caller_pc_ownership = SnapshotFramePcOwnership::ExactInstruction;
       } else {
         caller = cfi.caller_frame(read_memory, module.virtual_address, current);
@@ -293,7 +298,7 @@ inline SnapshotInspectionTrace build_snapshot_inspection_frames(
 
     result.frames.push_back(make_snapshot_inspection_frame(
         snapshot, thread, result.frames.size(), *caller, caller_pc_ownership,
-        caller_r12));
+        caller_r12, caller_xmm0));
     current = *caller;
   }
 

@@ -100,6 +100,9 @@ jobs:
           "$CXX" -std=c++17 -Wall -Wextra -Wpedantic -Werror -Isrc \
             tests/core_signal_frame_integration.cpp build/libmdbg_core.a -pthread \
             -o build/core_signal_frame_integration
+          "$CXX" -std=c++17 -Wall -Wextra -Wpedantic -Werror -Isrc \
+            tests/core_signal_fpstate_integration.cpp build/libmdbg_core.a -pthread \
+            -o build/core_signal_fpstate_integration
 
           signal_failures=0
           for fixture in build/signal_core_fixture_pie build/signal_core_fixture_nopie; do
@@ -116,9 +119,11 @@ jobs:
             test -n "$core"
             set +e
             ./build/core_signal_frame_integration "$core" "$fixture"
-            status=$?
+            frame_status=$?
+            ./build/core_signal_fpstate_integration "$core" "$fixture"
+            fp_status=$?
             set -e
-            if [ "$status" -ne 0 ]; then
+            if [ "$frame_status" -ne 0 ] || [ "$fp_status" -ne 0 ]; then
               signal_failures=1
               continue
             fi

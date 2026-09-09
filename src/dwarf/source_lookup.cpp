@@ -213,28 +213,35 @@ LocalScalarValue materialize_snapshot_xmm_value(
     const CoreSnapshot& snapshot, const SnapshotInspectionFrameContext& frame,
     const SnapshotModuleAddress& owner, std::string_view name,
     const ValueType& value_type, const std::vector<std::byte>& expression) {
-  if (frame.index != 0) {
-    throw std::logic_error("snapshot XMM register ownership is only defined for frame 0");
-  }
   if (value_type.kind != LocalValueKind::Floating ||
       (value_type.byte_size != 4 && value_type.byte_size != 8)) {
     throw std::runtime_error(
         "snapshot XMM register location requires a bounded floating scalar type");
   }
   const auto index = snapshot_xmm_index(expression);
-  const auto floating = snapshot.floating_point_state(frame.thread_tid);
-  if (!floating) {
-    throw std::runtime_error(
-        "selected core thread has no NT_FPREGSET state for XMM source recovery");
-  }
-  if (index >= floating->xmm.size()) {
-    throw std::runtime_error("snapshot XMM register number is outside the FPREGSET model");
+  std::array<std::byte, 16> xmm{};
+  if (frame.index == 0) {
+    const auto floating = snapshot.floating_point_state(frame.thread_tid);
+    if (!floating) {
+      throw std::runtime_error(
+          "selected core thread has no NT_FPREGSET state for XMM source recovery");
+    }
+    if (index >= floating->xmm.size()) {
+      throw std::runtime_error("snapshot XMM register number is outside the FPREGSET model");
+    }
+    xmm = floating->xmm[index];
+  } else {
+    if (index != 0 || !frame.registers.xmm0) {
+      throw std::runtime_error(
+          "historical snapshot frame has no restored XMM0 ownership");
+    }
+    xmm = *frame.registers.xmm0;
   }
 
   std::uint64_t raw = 0;
   for (std::size_t byte = 0; byte < value_type.byte_size; ++byte) {
     raw |= static_cast<std::uint64_t>(
-               std::to_integer<unsigned int>(floating->xmm[index][byte]))
+               std::to_integer<unsigned int>(xmm[byte]))
            << (byte * 8U);
   }
   LocalScalarValue result{owner.module_path, std::string(name), raw,
@@ -415,7 +422,7 @@ std::optional<LocalScalarValue> inspect_snapshot_unit(
   }
 
   const auto opcode = std::to_integer<std::uint8_t>(location_expression.front());
-  if (frame.index == 0 && opcode == kSnapshotDwOpXmm0) {
+  if (opcode == kSnapshotDwOpXmm0) {
     return materialize_snapshot_xmm_value(snapshot, frame, owner, name,
                                           value_type, location_expression);
   }
@@ -490,7 +497,7 @@ std::optional<LocalScalarValue> inspect_snapshot_unit(
           "snapshot frame-zero local requires compiler-proven XMM0, DW_OP_fbreg, DW_OP_reg12, or DW_OP_addr ownership");
     }
     throw std::runtime_error(
-        "snapshot caller local requires compiler-proven DW_OP_fbreg, DW_OP_breg3, DW_OP_reg12, or DW_OP_addr ownership");
+        "snapshot caller local requires compiler-proven XMM0, DW_OP_fbreg, DW_OP_breg3, DW_OP_reg12, or DW_OP_addr ownership");
   }
   if (value_type.kind != LocalValueKind::Structure &&
       (value_type.byte_size == 0 || value_type.byte_size > sizeof(std::uint64_t))) {
@@ -618,6 +625,13 @@ LocalScalarValue dereference_local_pointer(
   const SnapshotModuleAddress owner{pointer.module_path, {}, 0};
   return materialize_snapshot_memory_value(owner, "*" + pointer.name,
                                            value_type, memory, false);
+}
+
+LocalScalarValue dereference_local_pointer(
+    const CoreSnapshot& snapshot, const SnapshotInspectionFrameContext& frame,
+    std::string_view name) {
+  return dereference_local_pointer(snapshot, frame, name,
+                                   identity_snapshot_module_paths());
 }
 
 LocalIntegerValue inspect_local_integer(const CoreSnapshot& snapshot,

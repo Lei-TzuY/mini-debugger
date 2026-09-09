@@ -41,16 +41,18 @@ __attribute__((noinline, noreturn)) static void crash_with_xmm(void) {
   static struct AggregatePointee aggregate_value = {
       UINT64_C(0x0123456789abcdef), UINT64_C(0xfedcba9876543210)};
   static struct AggregatePointee* aggregate_pointer = &aggregate_value;
+  uint64_t stack_local = UINT64_C(0x4f3e2d1c0b9a8877);
   double xmm_value = 1234.25;
-  __asm__ volatile("" : "+x"(xmm_value)
+  __asm__ volatile("" : "+m"(stack_local), "+x"(xmm_value)
                    : "m"(scalar_pointer), "m"(pointee_value),
-                     "m"(aggregate_pointer), "m"(aggregate_value));
+                     "m"(aggregate_pointer), "m"(aggregate_value)
+                   : "memory");
   __asm__ volatile(
       ".globl snapshot_xmm_crash_probe\n"
       "snapshot_xmm_crash_probe:\n"
       "movl $0, (%%rax)\n"
       : "+x"(xmm_value)
-      : "a"(0), "m"(scalar_pointer), "m"(pointee_value),
+      : "a"(0), "m"(stack_local), "m"(scalar_pointer), "m"(pointee_value),
         "m"(aggregate_pointer), "m"(aggregate_value)
       : "memory");
   __builtin_unreachable();

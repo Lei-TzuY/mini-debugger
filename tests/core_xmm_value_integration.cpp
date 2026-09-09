@@ -12,6 +12,7 @@ namespace {
 
 constexpr double kCrashValue = 1234.25;
 constexpr double kSiblingValue = 9876.5;
+constexpr std::uint64_t kStackLocalValue = UINT64_C(0x4f3e2d1c0b9a8877);
 constexpr std::uint64_t kPointerPointeeValue = UINT64_C(0x8877665544332211);
 constexpr std::uint64_t kAggregateFirst = UINT64_C(0x0123456789abcdef);
 constexpr std::uint64_t kAggregateSecond = UINT64_C(0xfedcba9876543210);
@@ -41,6 +42,18 @@ void require_source_value(const mdbg::LocalScalarValue& value, double expected,
   require(value.byte_size == sizeof(double), context + " changed the double width");
   require(value.raw_value == raw_bits(expected),
           context + " did not recover the compiler-owned XMM value");
+}
+
+void require_stack_local(const mdbg::CoreInspectionSession& session) {
+  const auto value = session.inspect_value("stack_local");
+  require(value.name == "stack_local", "stack-local lookup changed the source name");
+  require(value.kind == mdbg::LocalValueKind::Integer &&
+              value.byte_size == sizeof(std::uint64_t) && !value.is_signed,
+          "stack-local lookup lost uint64_t type identity");
+  require(value.raw_value == kStackLocalValue,
+          "stack-local lookup did not recover the genuine core stack value");
+  require(value.storage == mdbg::LocalValueStorage::SnapshotCoreMemory,
+          "stack-local lookup did not preserve immutable core-memory provenance");
 }
 
 void require_pointer_dereference(const mdbg::CoreInspectionSession& session) {
@@ -147,6 +160,7 @@ int main(int argc, char** argv) {
 
     require_source_value(session.inspect_value("xmm_value"), kCrashValue,
                          "crashed-thread frame 0");
+    require_stack_local(session);
     require_pointer_dereference(session);
     require_aggregate_pointer_dereference(session);
 
@@ -158,9 +172,10 @@ int main(int argc, char** argv) {
     require_source_value(session.inspect_value("xmm_value"), kSiblingValue,
                          "sibling-thread frame 0");
 
-    std::cout << "core XMM/pointer source-value integration passed\n";
+    std::cout << "core XMM/stack/pointer source-value integration passed\n";
   } catch (const std::exception& error) {
-    std::cerr << "core XMM/pointer source-value integration failure: " << error.what() << '\n';
+    std::cerr << "core XMM/stack/pointer source-value integration failure: " << error.what()
+              << '\n';
     return 1;
   }
   return 0;

@@ -7,6 +7,8 @@ namespace {
 
 constexpr std::uint8_t kDwOpAddr = 0x03;
 constexpr std::uint64_t kSnapshotDwAteFloat = 0x04;
+constexpr std::uint8_t kSnapshotDwOpRsp =
+    static_cast<std::uint8_t>(kDwOpReg0 + 7U);
 constexpr std::uint8_t kSnapshotDwOpXmm0 =
     static_cast<std::uint8_t>(kDwOpReg0 + 17U);
 
@@ -38,6 +40,72 @@ std::uint64_t decode_snapshot_scalar(const SnapshotMemoryRead& memory,
            << (index * 8U);
   }
   return raw;
+}
+
+std::int64_t decode_snapshot_fbreg_offset(
+    const std::vector<std::byte>& expression) {
+  if (expression.empty() ||
+      std::to_integer<std::uint8_t>(expression.front()) != kDwOpFbreg) {
+    throw std::runtime_error(
+        "snapshot stack local requires one compiler-proven DW_OP_fbreg expression");
+  }
+  std::size_t cursor = 1;
+  const auto offset =
+      read_sleb(expression, cursor, expression.size(), "snapshot DW_OP_fbreg offset");
+  if (cursor != expression.size()) {
+    throw std::runtime_error(
+        "snapshot DW_OP_fbreg does not support trailing operations");
+  }
+  return offset;
+}
+
+std::uint64_t snapshot_frame_base(
+    const std::vector<Die>& dies, std::size_t subprogram,
+    const CoreSnapshot& snapshot, const SnapshotInspectionFrameContext& frame,
+    const SnapshotModulePathResolver& module_paths,
+    const SnapshotModuleAddress& owner) {
+  if (frame.index != 0) {
+    throw std::runtime_error(
+        "snapshot DW_OP_fbreg is currently bounded to compiler-proven frame zero");
+  }
+  const auto* frame_base = attribute(dies[subprogram], kDwAtFrameBase);
+  if (frame_base == nullptr || frame_base->form != kDwFormExprloc ||
+      frame_base->expression.size() != 1) {
+    throw std::runtime_error(
+        "snapshot DW_OP_fbreg requires one compiler-proven DW_AT_frame_base operation");
+  }
+
+  const auto op =
+      std::to_integer<std::uint8_t>(frame_base->expression.front());
+  if (op == kSnapshotDwOpRsp) {
+    if (!frame.registers.rsp) {
+      throw std::runtime_error(
+          "snapshot DW_OP_reg7 frame base requires immutable RSP ownership");
+    }
+    return *frame.registers.rsp;
+  }
+  if (op != kDwOpCallFrameCfa) {
+    throw std::runtime_error(
+        "snapshot DW_OP_fbreg has an unsupported DW_AT_frame_base operation");
+  }
+
+  const EhFrame cfi(owner.module_file_path);
+  if (!cfi.available()) {
+    throw std::runtime_error(
+        "snapshot DW_OP_call_frame_cfa requires owner .eh_frame");
+  }
+  const CfiMemoryReader read_memory =
+      [&snapshot, &module_paths](std::uintptr_t address, std::size_t length) {
+        return read_snapshot_memory(snapshot, module_paths, address, length).bytes;
+      };
+  const EhFrameCursor current{frame.runtime_pc, frame.stack_pointer,
+                              frame.frame_pointer, frame.registers.rbx};
+  const auto caller = cfi.caller_frame(read_memory, owner.virtual_address, current);
+  if (!caller) {
+    throw std::runtime_error(
+        "snapshot CFI did not cover compiler-proven DW_OP_call_frame_cfa");
+  }
+  return caller->stack_pointer;
 }
 
 std::optional<ValueType> resolve_snapshot_floating_type(
@@ -349,6 +417,27 @@ std::optional<LocalScalarValue> inspect_snapshot_unit(
                                           value_type, location_expression);
   }
 
+  if (frame.index == 0 && opcode == kDwOpFbreg) {
+    if (value_type.kind != LocalValueKind::Integer || value_type.byte_size == 0 ||
+        value_type.byte_size > sizeof(std::uint64_t)) {
+      throw std::runtime_error(
+          "snapshot DW_OP_fbreg currently requires the compiler-proven bounded integer local");
+    }
+    const auto base = snapshot_frame_base(
+        dies, *subprogram, snapshot, frame, module_paths, owner);
+    const auto runtime_address = add_signed(
+        base, decode_snapshot_fbreg_offset(location_expression),
+        "snapshot DW_OP_fbreg runtime address");
+    if (runtime_address > std::numeric_limits<std::uintptr_t>::max()) {
+      throw std::overflow_error(
+          "snapshot DW_OP_fbreg address exceeds runtime address width");
+    }
+    const auto memory = read_snapshot_memory(
+        snapshot, module_paths, static_cast<std::uintptr_t>(runtime_address),
+        value_type.byte_size);
+    return materialize_snapshot_memory_value(owner, name, value_type, memory);
+  }
+
   if (opcode == kDwOpBreg3) {
     if (value_type.kind == LocalValueKind::Structure ||
         value_type.kind == LocalValueKind::Floating) {
@@ -372,7 +461,7 @@ std::optional<LocalScalarValue> inspect_snapshot_unit(
   if (opcode != kDwOpAddr) {
     if (frame.index == 0) {
       throw std::runtime_error(
-          "snapshot frame-zero local requires compiler-proven XMM0 or DW_OP_addr ownership");
+          "snapshot frame-zero local requires compiler-proven XMM0, DW_OP_fbreg, or DW_OP_addr ownership");
     }
     throw std::runtime_error(
         "snapshot caller local requires a compiler-proven DW_OP_breg3 scalar or DW_OP_addr memory form");

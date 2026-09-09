@@ -20,6 +20,7 @@ volatile uint64_t parameter_seed = UINT64_C(0x1122334455667788);
 volatile uint64_t inline_seed = INLINE_LOCAL_EXPECTED;
 uint64_t indirect_seed = INDIRECT_LOCAL_EXPECTED ^ INDIRECT_LOCAL_XOR;
 uint64_t* indirect_ptr = &indirect_seed;
+const uint64_t snapshot_file_seed = INDIRECT_LOCAL_EXPECTED ^ INDIRECT_LOCAL_XOR;
 static volatile int snapshot_crash_enabled = 0;
 static volatile int snapshot_indirect_crash_enabled = 0;
 static volatile int snapshot_sibling_ready = 0;
@@ -120,7 +121,8 @@ __attribute__((noinline)) uint64_t inspect_indirect_local(uint64_t** ptr) {
   return indirect_local;
 }
 
-__attribute__((noinline)) uint64_t inspect_snapshot_indirect_local(uint64_t** ptr) {
+__attribute__((noinline)) uint64_t inspect_snapshot_indirect_local(
+    const volatile uint64_t** ptr) {
   const uint64_t snapshot_indirect_local = **ptr ^ INDIRECT_LOCAL_XOR;
   __asm__ volatile(".globl snapshot_indirect_local_probe\n"
                    "snapshot_indirect_local_probe:\n"
@@ -170,7 +172,7 @@ int main(int argc, char** argv) {
     return 4;
   }
   if (indirect_snapshot) {
-    uint64_t* snapshot_indirect_ptr = &indirect_seed;
+    const volatile uint64_t* snapshot_indirect_ptr = &snapshot_file_seed;
     (void)inspect_snapshot_indirect_local(&snapshot_indirect_ptr);
     return 8;
   }

@@ -42,6 +42,77 @@ std::string temp_directory() {
   return path;
 }
 
+std::string temp_source_directory() {
+  char pattern[] = "/tmp/mdbg-core-source-XXXXXX";
+  char* path = ::mkdtemp(pattern);
+  if (path == nullptr) throw std::runtime_error("mkdtemp failed for relocated source fixture");
+  return path;
+}
+
+std::filesystem::path formal_parameter_source_path() {
+  auto integration_path = std::filesystem::path(__FILE__);
+  if (!integration_path.is_absolute()) {
+    const auto from_source_parent =
+        (std::filesystem::current_path().parent_path() / integration_path).lexically_normal();
+    if (std::filesystem::is_regular_file(from_source_parent)) {
+      integration_path = from_source_parent;
+    } else {
+      integration_path = std::filesystem::absolute(integration_path).lexically_normal();
+    }
+  }
+  const auto source =
+      (integration_path.parent_path() / "fixtures" / "formal_parameter_fixture.c")
+          .lexically_normal();
+  require(std::filesystem::is_regular_file(source),
+          "could not locate formal-parameter fixture source for relocation");
+  return source;
+}
+
+class RelocatedSourceTree {
+ public:
+  explicit RelocatedSourceTree(std::filesystem::path source)
+      : source_(std::move(source)), relocation_root_(temp_source_directory()),
+        relocated_(std::filesystem::path(relocation_root_) / source_.filename()),
+        hidden_(source_.parent_path() /
+                (source_.filename().string() + ".mdbg-hidden-" + std::to_string(::getpid()))) {
+    std::filesystem::copy_file(source_, relocated_,
+                               std::filesystem::copy_options::overwrite_existing);
+    try {
+      std::filesystem::rename(source_, hidden_);
+      hidden_active_ = true;
+    } catch (...) {
+      std::error_code error;
+      std::filesystem::remove_all(relocation_root_, error);
+      throw;
+    }
+  }
+
+  RelocatedSourceTree(const RelocatedSourceTree&) = delete;
+  RelocatedSourceTree& operator=(const RelocatedSourceTree&) = delete;
+
+  ~RelocatedSourceTree() {
+    std::error_code error;
+    if (hidden_active_ && std::filesystem::exists(hidden_)) {
+      std::filesystem::rename(hidden_, source_, error);
+    }
+    error.clear();
+    std::filesystem::remove_all(relocation_root_, error);
+  }
+
+  [[nodiscard]] std::string recorded_prefix() const {
+    return source_.parent_path().string();
+  }
+
+  [[nodiscard]] const std::string& local_prefix() const { return relocation_root_; }
+
+ private:
+  std::filesystem::path source_;
+  std::string relocation_root_;
+  std::filesystem::path relocated_;
+  std::filesystem::path hidden_;
+  bool hidden_active_{false};
+};
+
 void run_command(const std::vector<std::string>& arguments) {
   require(!arguments.empty(), "tool command must not be empty");
   const pid_t child = ::fork();
@@ -226,7 +297,9 @@ std::string run_core_cli(const std::string& cli, const GeneratedCore& core,
                          const std::string& recorded_module = {},
                          const std::string& local_module = {},
                          const std::string& debug_module = {},
-                         const std::string& debug_file = {}) {
+                         const std::string& debug_file = {},
+                         const std::string& recorded_source = {},
+                         const std::string& local_source = {}) {
   int input_pipe[2];
   int output_pipe[2];
   if (::pipe(input_pipe) != 0 || ::pipe(output_pipe) != 0) {
@@ -254,6 +327,11 @@ std::string run_core_cli(const std::string& cli, const GeneratedCore& core,
       arguments.push_back("--debug-file");
       arguments.push_back(debug_module);
       arguments.push_back(debug_file);
+    }
+    if (!recorded_source.empty()) {
+      arguments.push_back("--substitute-source-path");
+      arguments.push_back(recorded_source);
+      arguments.push_back(local_source);
     }
     arguments.push_back(core.path);
     std::vector<char*> argv;
@@ -429,6 +507,27 @@ void test_core_session(const std::string& fixture, const std::string& cli) {
   try {
     const auto output = run_core_cli(cli, core);
     require_core_session_output(output, core, fixture);
+
+    {
+      RelocatedSourceTree relocated_source(formal_parameter_source_path());
+      const auto unavailable_source_output = run_core_cli(cli, core);
+      require(unavailable_source_output.find("source unavailable:") != std::string::npos,
+              "relocated source tree unexpectedly remained readable without mapping");
+      require(unavailable_source_output.find(kExpectedSourceContext) == std::string::npos,
+              "relocated source text leaked through the recorded source path");
+      require(unavailable_source_output.find(fixture + "!" + kExpectedCaller) !=
+                  std::string::npos,
+              "source relocation changed immutable module/frame ownership");
+
+      const auto mapped_source_output =
+          run_core_cli(cli, core, {}, {}, {}, {}, relocated_source.recorded_prefix(),
+                       relocated_source.local_prefix());
+      require(mapped_source_output.find(kExpectedSourceContext) != std::string::npos,
+              "explicit core source-path substitution did not recover relocated source text");
+      require(mapped_source_output.find(fixture + "!" + kExpectedCaller) !=
+                  std::string::npos,
+              "source-path substitution changed immutable module/frame ownership");
+    }
 
     const auto unavailable = unavailable_peer_path(fixture);
     relocated_path = write_variant(

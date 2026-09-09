@@ -10,6 +10,11 @@
 
 namespace mdbg {
 
+struct LinuxX86SignalFrameRecovery {
+  EhFrameCursor cursor;
+  std::uint64_t r12;
+};
+
 inline std::uint64_t read_linux_x86_signal_slot(const CoreSnapshot& snapshot,
                                                 std::uintptr_t ucontext_address,
                                                 std::uintptr_t greg_index) {
@@ -25,13 +30,15 @@ inline std::uint64_t read_linux_x86_signal_slot(const CoreSnapshot& snapshot,
   return value;
 }
 
-inline EhFrameCursor recover_linux_x86_signal_frame(const CoreSnapshot& snapshot,
-                                                    std::uintptr_t ucontext_address) {
+inline LinuxX86SignalFrameRecovery recover_linux_x86_signal_frame(
+    const CoreSnapshot& snapshot, std::uintptr_t ucontext_address) {
+  constexpr std::uintptr_t kR12 = 4;
   constexpr std::uintptr_t kRbp = 10;
   constexpr std::uintptr_t kRbx = 11;
   constexpr std::uintptr_t kRsp = 15;
   constexpr std::uintptr_t kRip = 16;
 
+  const auto r12 = read_linux_x86_signal_slot(snapshot, ucontext_address, kR12);
   const auto rip = read_linux_x86_signal_slot(snapshot, ucontext_address, kRip);
   const auto rsp = read_linux_x86_signal_slot(snapshot, ucontext_address, kRsp);
   const auto rbp = read_linux_x86_signal_slot(snapshot, ucontext_address, kRbp);
@@ -44,10 +51,12 @@ inline EhFrameCursor recover_linux_x86_signal_frame(const CoreSnapshot& snapshot
         "Linux x86-64 signal context is outside the evidence-proven same-stack layout");
   }
 
-  return EhFrameCursor{static_cast<std::uintptr_t>(rip),
-                       static_cast<std::uintptr_t>(rsp),
-                       std::optional<std::uintptr_t>{static_cast<std::uintptr_t>(rbp)},
-                       std::optional<std::uint64_t>{rbx}};
+  return LinuxX86SignalFrameRecovery{
+      EhFrameCursor{static_cast<std::uintptr_t>(rip),
+                    static_cast<std::uintptr_t>(rsp),
+                    std::optional<std::uintptr_t>{static_cast<std::uintptr_t>(rbp)},
+                    std::optional<std::uint64_t>{rbx}},
+      r12};
 }
 
 }  // namespace mdbg

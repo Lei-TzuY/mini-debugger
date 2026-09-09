@@ -7,6 +7,7 @@
 #include <csignal>
 #include <cstddef>
 #include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -19,6 +20,7 @@ namespace {
 
 constexpr const char* kExpectedCaller = "inspect_entry_parameter";
 constexpr const char* kExpectedValue = "0x458a30bf63ac1619";
+constexpr const char* kArtifactExpectedValue = "0x6a5b4c3d2e1f9081";
 
 void require(bool condition, const std::string& message) {
   if (!condition) throw std::runtime_error(message);
@@ -38,6 +40,15 @@ std::string temp_directory() {
   char* path = ::mkdtemp(pattern);
   if (path == nullptr) throw std::runtime_error("mkdtemp failed for debuglink fixture");
   return path;
+}
+
+std::string temp_executable_path() {
+  char pattern[] = "/tmp/mdbg-snapshot-artifact-XXXXXX";
+  const int fd = ::mkstemp(pattern);
+  if (fd == -1) throw std::runtime_error("mkstemp failed for artifact fixture");
+  ::close(fd);
+  ::unlink(pattern);
+  return pattern;
 }
 
 void run_command(const std::vector<std::string>& arguments) {
@@ -62,6 +73,34 @@ void run_command(const std::vector<std::string>& arguments) {
   } while (waited == -1 && errno == EINTR);
   require(waited == child && WIFEXITED(status) && WEXITSTATUS(status) == 0,
           "tool command failed: " + arguments.front());
+}
+
+std::string compile_artifact_fixture(const std::string& reference_fixture) {
+  auto source = std::filesystem::path(__FILE__).parent_path() / "fixtures" /
+                "snapshot_artifact_value_fixture.c";
+  if (!std::filesystem::exists(source)) {
+    source = std::filesystem::path("..") / "tests" / "fixtures" /
+             "snapshot_artifact_value_fixture.c";
+  }
+  require(std::filesystem::exists(source), "artifact snapshot source fixture is unavailable");
+
+  const auto output = temp_executable_path();
+  const char* configured_cc = std::getenv("CC");
+  const std::string compiler =
+      configured_cc != nullptr && *configured_cc != '\0' ? configured_cc : "cc";
+  std::vector<std::string> arguments{compiler, source.string(), "-std=c11", "-O1", "-g",
+                                     "-gdwarf-4"};
+  if (reference_fixture.find("nopie") != std::string::npos) {
+    arguments.push_back("-fno-pie");
+    arguments.push_back("-no-pie");
+  } else {
+    arguments.push_back("-fPIE");
+    arguments.push_back("-pie");
+  }
+  arguments.push_back("-o");
+  arguments.push_back(output);
+  run_command(arguments);
+  return output;
 }
 
 std::vector<std::byte> read_file_bytes(const std::string& path) {
@@ -186,6 +225,56 @@ GeneratedCore generate_core(const std::string& fixture, bool omit_file_backed = 
   return GeneratedCore{core_path, child, static_cast<pid_t>(sibling)};
 }
 
+struct ArtifactCore {
+  std::string path;
+  std::uintptr_t seed_address;
+};
+
+ArtifactCore generate_artifact_core(const std::string& fixture) {
+  const auto ready_path = temp_path();
+  const pid_t child = ::fork();
+  if (child == -1) throw std::runtime_error("fork failed for artifact core fixture");
+  if (child == 0) {
+    rlimit core_limit{};
+    if (::getrlimit(RLIMIT_CORE, &core_limit) != 0) _exit(124);
+    core_limit.rlim_cur = core_limit.rlim_max;
+    if (::setrlimit(RLIMIT_CORE, &core_limit) != 0) _exit(125);
+    std::ofstream filter("/proc/self/coredump_filter", std::ios::trunc);
+    if (!filter) _exit(126);
+    filter << "0x1\n";
+    filter.close();
+    if (!filter) _exit(127);
+    ::execl(fixture.c_str(), fixture.c_str(), ready_path.c_str(), nullptr);
+    _exit(128);
+  }
+
+  const auto core_path = "/tmp/mdbg-core-" + std::to_string(child);
+  std::remove(core_path.c_str());
+  int status = 0;
+  pid_t waited;
+  do {
+    waited = ::waitpid(child, &status, 0);
+  } while (waited == -1 && errno == EINTR);
+  require(waited == child && WIFSIGNALED(status) && WTERMSIG(status) == SIGSEGV,
+          "artifact core fixture did not terminate from deterministic SIGSEGV");
+
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  while ((!std::filesystem::exists(core_path) || !std::filesystem::exists(ready_path)) &&
+         std::chrono::steady_clock::now() < deadline) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  require(std::filesystem::exists(core_path), "kernel did not produce artifact core snapshot");
+  require(std::filesystem::exists(ready_path), "artifact fixture did not publish seed address");
+
+  std::ifstream ready(ready_path);
+  std::string address_text;
+  ready >> address_text;
+  std::remove(ready_path.c_str());
+  require(ready && !address_text.empty(), "artifact fixture published invalid seed address");
+  return ArtifactCore{core_path,
+                      static_cast<std::uintptr_t>(std::stoull(address_text, nullptr, 0))};
+}
+
 struct DebugArtifacts {
   std::string directory;
   std::string runtime_module;
@@ -305,6 +394,60 @@ std::string run_core_cli(const std::string& cli, const GeneratedCore& core,
   } while (waited == -1 && errno == EINTR);
   require(waited == child && WIFEXITED(status) && WEXITSTATUS(status) == 0,
           "mdbg-core did not exit cleanly; output: " + output);
+  return output;
+}
+
+std::string run_artifact_value_cli(const std::string& cli, const ArtifactCore& core) {
+  int input_pipe[2];
+  int output_pipe[2];
+  if (::pipe(input_pipe) != 0 || ::pipe(output_pipe) != 0) {
+    throw std::runtime_error("failed to create artifact-value CLI pipes");
+  }
+  const pid_t child = ::fork();
+  if (child == -1) throw std::runtime_error("fork failed for artifact-value CLI");
+  if (child == 0) {
+    ::dup2(input_pipe[0], STDIN_FILENO);
+    ::dup2(output_pipe[1], STDOUT_FILENO);
+    ::dup2(output_pipe[1], STDERR_FILENO);
+    ::close(input_pipe[0]);
+    ::close(input_pipe[1]);
+    ::close(output_pipe[0]);
+    ::close(output_pipe[1]);
+    ::execl(cli.c_str(), cli.c_str(), core.path.c_str(), nullptr);
+    _exit(127);
+  }
+  ::close(input_pipe[0]);
+  ::close(output_pipe[1]);
+
+  const std::string script = "x " + std::to_string(core.seed_address) +
+                             " 8\nprint artifact_local\nquit\n";
+  std::size_t offset = 0;
+  while (offset < script.size()) {
+    const auto count = ::write(input_pipe[1], script.data() + offset, script.size() - offset);
+    if (count == -1 && errno == EINTR) continue;
+    if (count <= 0) throw std::runtime_error("failed to write artifact-value commands");
+    offset += static_cast<std::size_t>(count);
+  }
+  ::close(input_pipe[1]);
+
+  std::string output;
+  char buffer[1024];
+  for (;;) {
+    const auto count = ::read(output_pipe[0], buffer, sizeof(buffer));
+    if (count == -1 && errno == EINTR) continue;
+    if (count < 0) throw std::runtime_error("failed to read artifact-value CLI output");
+    if (count == 0) break;
+    output.append(buffer, static_cast<std::size_t>(count));
+  }
+  ::close(output_pipe[0]);
+
+  int status = 0;
+  pid_t waited;
+  do {
+    waited = ::waitpid(child, &status, 0);
+  } while (waited == -1 && errno == EINTR);
+  require(waited == child && WIFEXITED(status) && WEXITSTATUS(status) == 0,
+          "mdbg-core artifact-value session did not exit cleanly; output: " + output);
   return output;
 }
 
@@ -490,6 +633,30 @@ void test_omitted_file_backed_memory(const std::string& fixture,
   std::remove(core.path.c_str());
 }
 
+void test_artifact_backed_source_value(const std::string& reference_fixture,
+                                       const std::string& cli) {
+  const auto runtime_fixture = compile_artifact_fixture(reference_fixture);
+  ArtifactCore core{};
+  try {
+    core = generate_artifact_core(runtime_fixture);
+    const auto output = run_artifact_value_cli(cli, core);
+    require(output.find("artifact:") != std::string::npos,
+            "artifact source-value seed was not omitted from the real core; output: " + output);
+    require(output.find(runtime_fixture) != std::string::npos,
+            "artifact source-value memory lost immutable runtime-module ownership");
+    require(output.find(runtime_fixture + "!artifact_local = " +
+                        std::string(kArtifactExpectedValue)) != std::string::npos,
+            "artifact-backed source value was not evaluated through snapshot memory provider; output: " +
+                output);
+  } catch (...) {
+    if (!core.path.empty()) std::remove(core.path.c_str());
+    std::remove(runtime_fixture.c_str());
+    throw;
+  }
+  if (!core.path.empty()) std::remove(core.path.c_str());
+  std::remove(runtime_fixture.c_str());
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -501,6 +668,7 @@ int main(int argc, char** argv) {
     test_core_session(argv[1], argv[2]);
     test_separate_debug_file(argv[1], argv[2]);
     test_omitted_file_backed_memory(argv[1], argv[2]);
+    test_artifact_backed_source_value(argv[1], argv[2]);
     std::cout << "core inspection session integration passed\n";
   } catch (const std::exception& error) {
     std::cerr << "core inspection session failure: " << error.what() << '\n';

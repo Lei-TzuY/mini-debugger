@@ -48,6 +48,53 @@ def find_subprogram(records, function_name):
     raise RuntimeError(f"{function_name}: subprogram DIE not found")
 
 
+def numeric_attr(value, context):
+    matches = re.findall(r"0x([0-9a-fA-F]+)", value)
+    if not matches:
+        raise RuntimeError(f"{context}: numeric DWARF attribute is unavailable: {value}")
+    return int(matches[-1], 16)
+
+
+def subprogram_range(records, function_name):
+    _, record = find_subprogram(records, function_name)
+    low_text = record["attrs"].get("low_pc")
+    high_text = record["attrs"].get("high_pc")
+    if not low_text or not high_text:
+        raise RuntimeError(f"{function_name}: low_pc/high_pc is unavailable")
+    low = numeric_attr(low_text, f"{function_name}: low_pc")
+    high_raw = numeric_attr(high_text, f"{function_name}: high_pc")
+    high = low + high_raw if high_raw <= low else high_raw
+    if high <= low:
+        raise RuntimeError(f"{function_name}: invalid subprogram range")
+    return low, high
+
+
+def verify_historical_return_boundary(records, symbols):
+    probe_name = "snapshot_caller_resume_probe"
+    if probe_name not in symbols:
+        raise RuntimeError(f"missing probe symbol: {probe_name}")
+    resume_pc = symbols[probe_name]
+    if resume_pc == 0:
+        raise RuntimeError("historical resume probe unexpectedly resolved to zero")
+    low, high = subprogram_range(records, "caller_with_stack_local")
+    lookup_pc = resume_pc - 1
+    if resume_pc != high:
+        raise RuntimeError(
+            "caller return-PC evidence is not on the subprogram boundary: "
+            f"resume=0x{resume_pc:x} range=[0x{low:x},0x{high:x})"
+        )
+    if not (low <= lookup_pc < high):
+        raise RuntimeError(
+            "historical lookup candidate is not owned by the caller subprogram: "
+            f"lookup=0x{lookup_pc:x} range=[0x{low:x},0x{high:x})"
+        )
+    print(
+        "caller_with_stack_local: genuine return boundary "
+        f"resume=0x{resume_pc:x} lookup=0x{lookup_pc:x} "
+        f"range=[0x{low:x},0x{high:x})"
+    )
+
+
 def find_variable_location(records, function_name, variable_name):
     index, record = find_subprogram(records, function_name)
     depth = record["depth"]
@@ -197,10 +244,15 @@ def verify(function_name, probe_name, loc_text, records, symbols):
     )
 
 
-def verify_stack_local(function_name, variable_name, probe_name, loc_text, records, symbols):
+def verify_stack_local(
+    function_name, variable_name, probe_name, loc_text, records, symbols, probe_adjust=0
+):
     if probe_name not in symbols:
         raise RuntimeError(f"missing probe symbol: {probe_name}")
-    probe = symbols[probe_name]
+    raw_probe = symbols[probe_name]
+    probe = raw_probe + probe_adjust
+    if probe < 0:
+        raise RuntimeError(f"{probe_name}: adjusted probe underflow")
     location = find_variable_location(records, function_name, variable_name)
     base = frame_base_kind(records, function_name)
     direct = direct_fbreg(location)
@@ -229,6 +281,7 @@ def main():
     verify_stack_local(
         "crash_with_xmm", "stack_local", "snapshot_xmm_crash_probe", loc, records, symbols
     )
+    verify_historical_return_boundary(records, symbols)
     verify_stack_local(
         "caller_with_stack_local",
         "caller_stack_local",
@@ -236,6 +289,7 @@ def main():
         loc,
         records,
         symbols,
+        probe_adjust=-1,
     )
     verify("sibling_hold_xmm", "snapshot_xmm_sibling_probe", loc, records, symbols)
 

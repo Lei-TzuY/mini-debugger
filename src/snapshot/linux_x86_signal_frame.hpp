@@ -3,9 +3,11 @@
 #include "dwarf/eh_frame.hpp"
 #include "elf/elf.hpp"
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <stdexcept>
 
 namespace mdbg {
@@ -13,6 +15,7 @@ namespace mdbg {
 struct LinuxX86SignalFrameRecovery {
   EhFrameCursor cursor;
   std::uint64_t r12;
+  std::array<std::byte, 16> xmm0;
 };
 
 inline std::uint64_t read_linux_x86_signal_slot(const CoreSnapshot& snapshot,
@@ -28,6 +31,51 @@ inline std::uint64_t read_linux_x86_signal_slot(const CoreSnapshot& snapshot,
   std::uint64_t value = 0;
   std::memcpy(&value, bytes.data(), sizeof(value));
   return value;
+}
+
+inline std::array<std::byte, 16> read_linux_x86_signal_xmm0(
+    const CoreSnapshot& snapshot, std::uintptr_t ucontext_address,
+    std::uintptr_t restored_rsp) {
+  constexpr std::uintptr_t kMcontextOffset = 0x28;
+  constexpr std::uintptr_t kGregCount = 23;
+  constexpr std::uintptr_t kFpregsPointerOffset =
+      kMcontextOffset + kGregCount * sizeof(std::uint64_t);
+  constexpr std::uintptr_t kFxsaveXmm0Offset = 160;
+  constexpr std::size_t kXmmSize = 16;
+
+  if (ucontext_address > std::numeric_limits<std::uintptr_t>::max() -
+                             kFpregsPointerOffset) {
+    throw std::overflow_error("Linux x86-64 signal fpregs pointer address overflows");
+  }
+  const auto pointer_bytes =
+      snapshot.read_memory(ucontext_address + kFpregsPointerOffset,
+                           sizeof(std::uint64_t));
+  if (pointer_bytes.size() != sizeof(std::uint64_t)) {
+    throw std::runtime_error("Linux x86-64 signal fpregs pointer is truncated");
+  }
+  std::uint64_t fpstate_u64 = 0;
+  std::memcpy(&fpstate_u64, pointer_bytes.data(), sizeof(fpstate_u64));
+  if (fpstate_u64 == 0 ||
+      fpstate_u64 > std::numeric_limits<std::uintptr_t>::max()) {
+    throw std::runtime_error("Linux x86-64 signal fpregs pointer is invalid");
+  }
+  const auto fpstate_address = static_cast<std::uintptr_t>(fpstate_u64);
+  if (fpstate_address <= ucontext_address || fpstate_address >= restored_rsp) {
+    throw std::runtime_error(
+        "Linux x86-64 signal fpstate is outside the evidence-proven same-stack layout");
+  }
+  if (fpstate_address > std::numeric_limits<std::uintptr_t>::max() -
+                            kFxsaveXmm0Offset) {
+    throw std::overflow_error("Linux x86-64 signal XMM0 address overflows");
+  }
+  const auto bytes =
+      snapshot.read_memory(fpstate_address + kFxsaveXmm0Offset, kXmmSize);
+  if (bytes.size() != kXmmSize) {
+    throw std::runtime_error("Linux x86-64 signal XMM0 state is truncated");
+  }
+  std::array<std::byte, kXmmSize> xmm0{};
+  std::copy(bytes.begin(), bytes.end(), xmm0.begin());
+  return xmm0;
 }
 
 inline LinuxX86SignalFrameRecovery recover_linux_x86_signal_frame(
@@ -50,13 +98,16 @@ inline LinuxX86SignalFrameRecovery recover_linux_x86_signal_frame(
     throw std::runtime_error(
         "Linux x86-64 signal context is outside the evidence-proven same-stack layout");
   }
+  const auto restored_rsp = static_cast<std::uintptr_t>(rsp);
+  const auto xmm0 =
+      read_linux_x86_signal_xmm0(snapshot, ucontext_address, restored_rsp);
 
   return LinuxX86SignalFrameRecovery{
-      EhFrameCursor{static_cast<std::uintptr_t>(rip),
-                    static_cast<std::uintptr_t>(rsp),
+      EhFrameCursor{static_cast<std::uintptr_t>(rip), restored_rsp,
                     std::optional<std::uintptr_t>{static_cast<std::uintptr_t>(rbp)},
                     std::optional<std::uint64_t>{rbx}},
-      r12};
+      r12,
+      xmm0};
 }
 
 }  // namespace mdbg

@@ -3,6 +3,7 @@
 
 #include <elf.h>
 #include <signal.h>
+#include <sys/procfs.h>
 #include <sys/resource.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -81,7 +82,8 @@ std::string note_owner(const std::vector<std::byte>& bytes, std::size_t offset,
   return owner;
 }
 
-NoteRef find_siginfo_note(const std::vector<std::byte>& bytes) {
+NoteRef find_core_note(const std::vector<std::byte>& bytes, std::uint32_t type,
+                       const char* label) {
   require(bytes.size() >= sizeof(Elf64_Ehdr), "core is smaller than ELF header");
   Elf64_Ehdr ehdr{};
   std::memcpy(&ehdr, bytes.data(), sizeof(ehdr));
@@ -117,17 +119,26 @@ NoteRef find_siginfo_note(const std::vector<std::byte>& bytes) {
       const auto desc_size = align4(note.n_descsz);
       require(desc_size <= note_end - cursor, "truncated core note payload in test");
       cursor += desc_size;
-      if (owner == "CORE" && note.n_type == NT_SIGINFO) {
+      if (owner == "CORE" && note.n_type == type) {
         return NoteRef{header_offset, desc_offset, note};
       }
     }
   }
-  throw std::runtime_error("genuine Linux core did not contain CORE/NT_SIGINFO");
+  throw std::runtime_error(std::string("genuine Linux core did not contain ") + label);
 }
 
-std::string generate_core(const std::string& fixture) {
+std::string bounded_text(const char* data, std::size_t size) {
+  std::size_t length = 0;
+  while (length < size && data[length] != '\0') ++length;
+  std::string result(data, length);
+  while (!result.empty() && result.back() == ' ') result.pop_back();
+  return result;
+}
+
+std::string generate_core(const std::string& fixture, pid_t* recorded_pid = nullptr) {
   const pid_t child = ::fork();
   if (child == -1) throw std::runtime_error("fork failed for siginfo core fixture");
+  if (recorded_pid != nullptr) *recorded_pid = child;
   if (child == 0) {
     rlimit core_limit{};
     if (::getrlimit(RLIMIT_CORE, &core_limit) != 0) _exit(120);
@@ -225,7 +236,8 @@ std::string run_core_cli(const std::string& cli, const std::string& core_path) {
 }
 
 void test_real_siginfo(const std::string& fixture, const std::string& cli) {
-  const auto core_path = generate_core(fixture);
+  pid_t recorded_pid = -1;
+  const auto core_path = generate_core(fixture, &recorded_pid);
   try {
     const mdbg::CoreSnapshot snapshot(core_path);
     const auto& crash = snapshot.crash_info();
@@ -251,9 +263,25 @@ void test_real_siginfo(const std::string& fixture, const std::string& cli) {
             "mdbg-core did not render kernel-recorded crash metadata");
 
     const auto original = read_file_bytes(core_path);
-    const auto note = find_siginfo_note(original);
+    const auto note = find_core_note(original, NT_SIGINFO, "CORE/NT_SIGINFO");
     require(note.header.n_descsz == sizeof(siginfo_t),
             "genuine x86-64 Linux NT_SIGINFO size is outside the bounded contract");
+
+    const auto process_note =
+        find_core_note(original, NT_PRPSINFO, "CORE/NT_PRPSINFO");
+    require(process_note.header.n_descsz == sizeof(elf_prpsinfo),
+            "genuine x86-64 Linux NT_PRPSINFO size is outside the bounded contract");
+    elf_prpsinfo process{};
+    std::memcpy(&process, original.data() + process_note.desc_offset, sizeof(process));
+    require(process.pr_pid == recorded_pid,
+            "kernel NT_PRPSINFO did not preserve the crashed process PID");
+    require(process.pr_ppid == ::getpid(),
+            "kernel NT_PRPSINFO did not preserve the parent process PID");
+    require(!bounded_text(process.pr_fname, sizeof(process.pr_fname)).empty(),
+            "kernel NT_PRPSINFO did not preserve a process filename");
+    require(bounded_text(process.pr_psargs, sizeof(process.pr_psargs)).find("--snapshot-crash") !=
+                std::string::npos,
+            "kernel NT_PRPSINFO did not preserve the controlled crash command text");
 
     auto contradictory = original;
     siginfo_t info{};

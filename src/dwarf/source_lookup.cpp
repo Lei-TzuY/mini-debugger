@@ -6,6 +6,7 @@ namespace {
 
 std::optional<LocalScalarValue> inspect_snapshot_caller_breg3_unit(
     const DebugSections& sections, const ElfFile& module,
+    std::string_view recorded_module_path,
     const SnapshotInspectionFrameContext& frame, std::uint64_t virtual_pc,
     std::string_view name, std::size_t unit_start, std::size_t& next_unit) {
   std::uint16_t unit_version = 0;
@@ -100,7 +101,7 @@ std::optional<LocalScalarValue> inspect_snapshot_caller_breg3_unit(
   const auto raw = truncate_integer(
       evaluate_breg3_xor_stack_value(location_expression, *frame.registers.rbx),
       value_type.byte_size);
-  return LocalScalarValue{module.path(), std::string(name), raw,
+  return LocalScalarValue{std::string(recorded_module_path), std::string(name), raw,
                           value_type.byte_size, value_type.is_signed,
                           value_type.kind};
 }
@@ -109,6 +110,7 @@ std::optional<LocalScalarValue> inspect_snapshot_caller_breg3_unit(
 
 LocalScalarValue inspect_local_value(const CoreSnapshot& snapshot,
                                      const SnapshotInspectionFrameContext& frame,
+                                     const SnapshotModuleResolver& resolver,
                                      std::string_view name) {
   if (name.empty()) throw std::invalid_argument("local variable name must not be empty");
   validate_snapshot_inspection_frame(snapshot, frame);
@@ -117,18 +119,18 @@ LocalScalarValue inspect_local_value(const CoreSnapshot& snapshot,
         "snapshot caller local-value inspection requires a recovered caller frame");
   }
 
-  const auto owner = resolve_snapshot_module_address(snapshot, frame.runtime_pc);
+  const auto owner = resolve_snapshot_module_address(snapshot, frame.runtime_pc, resolver);
   if (owner.module_path != frame.module_path) {
     throw std::logic_error("snapshot inspection frame module ownership changed");
   }
-  const ElfFile module(owner.module_path);
+  const ElfFile module(owner.backing_path);
   const auto sections = read_debug_sections(module.path());
 
   std::size_t unit = 0;
   while (unit < sections.info.size()) {
     std::size_t next = unit;
     const auto result = inspect_snapshot_caller_breg3_unit(
-        sections, module, frame, owner.virtual_address, name, unit, next);
+        sections, module, owner.module_path, frame, owner.virtual_address, name, unit, next);
     if (result) return *result;
     if (next <= unit) {
       throw std::runtime_error("DWARF parser did not advance to the next unit");
@@ -139,14 +141,27 @@ LocalScalarValue inspect_local_value(const CoreSnapshot& snapshot,
       "snapshot inspection-frame PC is not covered by a supported DWARF4/5 subprogram");
 }
 
+LocalScalarValue inspect_local_value(const CoreSnapshot& snapshot,
+                                     const SnapshotInspectionFrameContext& frame,
+                                     std::string_view name) {
+  return inspect_local_value(snapshot, frame, identity_snapshot_module_resolver(), name);
+}
+
 LocalIntegerValue inspect_local_integer(const CoreSnapshot& snapshot,
                                         const SnapshotInspectionFrameContext& frame,
+                                        const SnapshotModuleResolver& resolver,
                                         std::string_view name) {
-  auto value = inspect_local_value(snapshot, frame, name);
+  auto value = inspect_local_value(snapshot, frame, resolver, name);
   if (value.kind != LocalValueKind::Integer) {
     throw std::runtime_error("local value is not an integer scalar: " + std::string(name));
   }
   return value;
+}
+
+LocalIntegerValue inspect_local_integer(const CoreSnapshot& snapshot,
+                                        const SnapshotInspectionFrameContext& frame,
+                                        std::string_view name) {
+  return inspect_local_integer(snapshot, frame, identity_snapshot_module_resolver(), name);
 }
 
 }  // namespace mdbg

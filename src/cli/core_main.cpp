@@ -1,7 +1,9 @@
 #include "snapshot/session.hpp"
+#include "source/source_path.hpp"
 
 #include <cstddef>
 #include <cstdint>
+#include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <limits>
@@ -11,6 +13,8 @@
 #include <utility>
 
 namespace {
+
+constexpr std::uint64_t kSourceContextRadius = 4;
 
 void print_frame(const mdbg::CoreInspectionSession& session,
                  const mdbg::SnapshotInspectionFrameContext& frame) {
@@ -51,6 +55,61 @@ void print_threads(const mdbg::CoreInspectionSession& session) {
     if (thread.is_crashed) std::cout << " crash";
     std::cout << " signal " << thread.signal_number << " rip 0x" << std::hex
               << thread.registers.rip << std::dec << '\n';
+  }
+}
+
+void print_source_excerpt(const mdbg::SourcePathResolver& source_paths,
+                          const std::string& file, std::uint64_t line,
+                          const std::string& module_path) {
+  const auto path = source_paths.resolve(file, module_path);
+  if (!path) {
+    std::cout << "source unavailable: " << file << '\n';
+    return;
+  }
+
+  std::ifstream input(*path);
+  if (!input) {
+    std::cout << "source unavailable: " << path->string() << '\n';
+    return;
+  }
+
+  const auto first = line > kSourceContextRadius ? line - kSourceContextRadius : 1;
+  const auto maximum = std::numeric_limits<std::uint64_t>::max();
+  const auto last = line > maximum - kSourceContextRadius
+                        ? maximum
+                        : line + kSourceContextRadius;
+
+  std::string text;
+  std::uint64_t current = 0;
+  bool found_current = false;
+  while (current < last && std::getline(input, text)) {
+    ++current;
+    if (current < first) continue;
+    const bool active = current == line;
+    if (active) found_current = true;
+    std::cout << (active ? "=> " : "   ") << std::setw(5) << current << " | " << text << '\n';
+  }
+
+  if (!found_current) {
+    std::cout << "source unavailable: " << path->string() << ':' << line
+              << " is outside the file\n";
+  }
+}
+
+void print_selected_source_context(const mdbg::CoreInspectionSession& session,
+                                   const mdbg::SourcePathResolver& source_paths) {
+  const auto& frame = session.selected_frame();
+  try {
+    if (const auto source = session.find_source(frame.runtime_pc)) {
+      std::cout << source->module_path << '!' << source->file << ':' << source->line;
+      if (source->column != 0) std::cout << ':' << source->column;
+      std::cout << '\n';
+      print_source_excerpt(source_paths, source->file, source->line, source->module_path);
+      return;
+    }
+    std::cout << "no source location for selected frame\n";
+  } catch (const std::exception& error) {
+    std::cout << "source unavailable: " << error.what() << '\n';
   }
 }
 
@@ -135,6 +194,7 @@ void print_help() {
                "  thread <tid>         select an immutable core thread\n"
                "  bt | backtrace       show immutable snapshot frames\n"
                "  frame <index>        select an immutable snapshot frame\n"
+               "  list | l             show source context for the selected frame\n"
                "  print <name> | p <name>  inspect a source value in the selected frame\n"
                "  x <address> <length> inspect immutable snapshot memory\n"
                "  help                 show this help\n"
@@ -143,6 +203,7 @@ void print_help() {
 
 int run_session(const std::string& core_path, mdbg::SnapshotModulePathResolver module_paths) {
   mdbg::CoreInspectionSession session(core_path, std::move(module_paths));
+  mdbg::SourcePathResolver source_paths;
   std::cout << "core signal " << session.snapshot().signal_number() << " tid "
             << session.snapshot().crashed_tid() << " frames " << session.trace().frames.size()
             << '\n';
@@ -197,6 +258,12 @@ int run_session(const std::string& core_path, mdbg::SnapshotModulePathResolver m
         session.select_frame(index);
         std::cout << "selected frame " << index << '\n';
         print_frame(session, session.selected_frame());
+        continue;
+      }
+      if (command == "list" || command == "l") {
+        std::string extra;
+        if (input >> extra) throw std::invalid_argument("usage: list");
+        print_selected_source_context(session, source_paths);
         continue;
       }
       if (command == "print" || command == "p") {

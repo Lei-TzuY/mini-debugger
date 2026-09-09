@@ -24,6 +24,11 @@ struct SnapshotFileAggregate {
   uint64_t second;
 };
 
+static const uint64_t snapshot_crash_xmm15[2] = {
+    UINT64_C(0x0123456789abcdef), UINT64_C(0xfedcba9876543210)};
+static const uint64_t snapshot_sibling_xmm15[2] = {
+    UINT64_C(0x0f1e2d3c4b5a6978), UINT64_C(0x8877665544332211)};
+
 volatile uint64_t parameter_seed = UINT64_C(0x1122334455667788);
 volatile uint64_t inline_seed = INLINE_LOCAL_EXPECTED;
 uint64_t indirect_seed = INDIRECT_LOCAL_EXPECTED ^ INDIRECT_LOCAL_XOR;
@@ -38,7 +43,15 @@ static void* snapshot_sibling_worker(void* argument) {
   fprintf(ready, "%ld\n", (long)syscall(SYS_gettid));
   if (fclose(ready) != 0) return (void*)(uintptr_t)1;
   snapshot_sibling_ready = 1;
-  for (;;) pause();
+  __asm__ volatile("movdqu %0, %%xmm15\n"
+                   "movq $34, %%rax\n"
+                   "1:\n"
+                   "syscall\n"
+                   "jmp 1b\n"
+                   :
+                   : "m"(snapshot_sibling_xmm15)
+                   : "rax", "rcx", "r11", "xmm15", "memory");
+  __builtin_unreachable();
 }
 
 static int start_snapshot_sibling(const char* ready_path) {
@@ -74,9 +87,12 @@ __attribute__((noinline)) uint64_t clobber_argument_registers(
                    "nop\n"
                    ::: "rdi", "rbx", "memory");
   if (snapshot_crash_enabled) {
-    __asm__ volatile("xorq %%rax, %%rax\n"
+    __asm__ volatile("movdqu %0, %%xmm15\n"
+                     "xorq %%rax, %%rax\n"
                      "movq %%rax, (%%rax)\n"
-                     ::: "rax", "memory");
+                     :
+                     : "m"(snapshot_crash_xmm15)
+                     : "rax", "xmm15", "memory");
   }
   return result;
 }

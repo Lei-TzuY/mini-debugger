@@ -3,6 +3,7 @@
 #include "dwarf/eh_frame.hpp"
 #include "elf/elf.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>

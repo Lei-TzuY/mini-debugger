@@ -103,7 +103,9 @@ class SnapshotModulePathResolver {
       }
     }
     if (!best) return std::nullopt;
-    return normalized(best->to / suffix_after(candidate, best->from));
+    const auto suffix = suffix_after(candidate, best->from);
+    if (suffix.empty()) return best->to;
+    return normalized(best->to / suffix);
   }
 
   std::vector<Substitution> substitutions_;

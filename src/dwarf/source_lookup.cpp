@@ -5,8 +5,7 @@ namespace mdbg {
 namespace {
 
 std::optional<LocalScalarValue> inspect_snapshot_caller_breg3_unit(
-    const DebugSections& sections, const ElfFile& module,
-    std::string_view recorded_module_path,
+    const DebugSections& sections, std::string_view recorded_module_path,
     const SnapshotInspectionFrameContext& frame, std::uint64_t virtual_pc,
     std::string_view name, std::size_t unit_start, std::size_t& next_unit) {
   std::uint16_t unit_version = 0;
@@ -130,7 +129,7 @@ LocalScalarValue inspect_local_value(const CoreSnapshot& snapshot,
   while (unit < sections.info.size()) {
     std::size_t next = unit;
     const auto result = inspect_snapshot_caller_breg3_unit(
-        sections, module, owner.module_path, frame, owner.virtual_address, name, unit, next);
+        sections, owner.module_path, frame, owner.virtual_address, name, unit, next);
     if (result) return *result;
     if (next <= unit) {
       throw std::runtime_error("DWARF parser did not advance to the next unit");

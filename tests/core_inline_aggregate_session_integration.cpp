@@ -101,6 +101,8 @@ std::string run_core_cli(const std::string& cli, const std::string& core,
   const std::string script =
       "frame 1\ninline " + std::to_string(inline_index) +
       "\nprint caller_direct_aggregate\n"
+      "aggregate-member caller_direct_aggregate direct\n"
+      "deref-aggregate-member caller_direct_aggregate linked\n"
       "member caller_aggregate_pointer direct\n"
       "deref-member caller_aggregate_pointer linked\n"
       "inline physical\n"
@@ -192,6 +194,35 @@ void exercise(const std::string& fixture, const std::string& cli) {
                   linked_member.pointee_type->is_signed,
               "selected-inline by-value pointer member lost bounded pointer metadata");
 
+      const auto aggregate_direct =
+          session.inspect_aggregate_member("caller_direct_aggregate", "direct");
+      require(aggregate_direct.kind == mdbg::LocalValueKind::Integer &&
+                  aggregate_direct.raw_value == UINT64_C(0x55667788) &&
+                  aggregate_direct.byte_size == sizeof(int) && aggregate_direct.is_signed,
+              "selected-inline direct aggregate integer-member selection was not exact");
+      require(supported_snapshot_storage(aggregate_direct.storage),
+              "selected-inline direct aggregate member lost immutable snapshot provenance");
+
+      const auto aggregate_linked =
+          session.inspect_aggregate_member("caller_direct_aggregate", "linked");
+      require(aggregate_linked.kind == mdbg::LocalValueKind::Pointer &&
+                  aggregate_linked.raw_value == linked_member.raw_value &&
+                  aggregate_linked.byte_size == sizeof(void*) &&
+                  aggregate_linked.pointee_type &&
+                  aggregate_linked.pointee_type->kind == mdbg::LocalValueKind::Integer &&
+                  aggregate_linked.pointee_type->byte_size == sizeof(int) &&
+                  aggregate_linked.pointee_type->is_signed,
+              "selected-inline direct aggregate pointer-member selection lost metadata");
+      const auto aggregate_linked_value =
+          session.dereference_aggregate_member("caller_direct_aggregate", "linked");
+      require(aggregate_linked_value.kind == mdbg::LocalValueKind::Integer &&
+                  aggregate_linked_value.raw_value == UINT64_C(0x02468ace) &&
+                  aggregate_linked_value.byte_size == sizeof(int) &&
+                  aggregate_linked_value.is_signed,
+              "selected-inline direct aggregate pointer member did not dereference exactly once");
+      require(supported_snapshot_storage(aggregate_linked_value.storage),
+              "selected-inline direct aggregate pointee lost immutable snapshot provenance");
+
       const auto direct =
           session.inspect_pointer_member("caller_aggregate_pointer", "direct");
       require(direct.kind == mdbg::LocalValueKind::Integer &&
@@ -235,6 +266,10 @@ void exercise(const std::string& fixture, const std::string& cli) {
     const bool cli_by_value =
         output.find("caller_direct_aggregate = { direct=0x55667788, linked=0x") !=
         std::string::npos;
+    const bool cli_aggregate_direct =
+        output.find("caller_direct_aggregate.direct = 0x55667788") != std::string::npos;
+    const bool cli_aggregate_linked =
+        output.find("*(caller_direct_aggregate.linked) = 0x2468ace") != std::string::npos;
     const bool cli_direct =
         output.find("caller_aggregate_pointer->direct = 0x11223344") != std::string::npos;
     const bool cli_linked =
@@ -248,6 +283,10 @@ void exercise(const std::string& fixture, const std::string& cli) {
     }
     require(cli_by_value,
             "mdbg-core did not render the selected-inline by-value aggregate");
+    require(cli_aggregate_direct,
+            "mdbg-core did not render selected-inline direct-aggregate integer member");
+    require(cli_aggregate_linked,
+            "mdbg-core did not dereference selected-inline direct-aggregate pointer member");
     require(cli_direct, "mdbg-core did not render selected-inline direct member");
     require(cli_linked, "mdbg-core did not dereference selected-inline pointer member");
     require(cli_thread, "mdbg-core did not complete thread-selection invalidation workflow");

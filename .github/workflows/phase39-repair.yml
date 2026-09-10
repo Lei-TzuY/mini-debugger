@@ -14,12 +14,11 @@ jobs:
     runs-on: ubuntu-latest
     env:
       CXX: g++
-      CLEAN_PARENT: 1e42712276b9c484f665fdfd54c9d65353f92570
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Apply staged union patch and self-clean
+      - name: Apply bounded union production patch
         run: |
           python3 - <<'PY'
           from pathlib import Path
@@ -57,14 +56,9 @@ jobs:
             tests/core_inline_union_session_integration.cpp \
             build-phase39/libmdbg_core.a -pthread \
             -o /tmp/core-inline-union-session
-          git show "$CLEAN_PARENT:.github/workflows/core-inline-evidence.yml" \
-            > .github/workflows/core-inline-evidence.yml
-          rm .github/workflows/phase39-repair.yml
           git config user.name "LeiZ"
           git config user.email "52287354+Lei-TzuY@users.noreply.github.com"
           git add src/dwarf/local_value.hpp src/dwarf/source_lookup.cpp \
-            src/dwarf/inline_member.hpp src/snapshot/session.hpp src/cli/core_main.cpp \
-            .github/workflows/core-inline-evidence.yml \
-            .github/workflows/phase39-repair.yml
+            src/dwarf/inline_member.hpp src/snapshot/session.hpp src/cli/core_main.cpp
           git commit -m "feat: add explicit selected-inline union member selection"
           git push origin HEAD:feat/selected-inline-union

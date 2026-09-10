@@ -1,0 +1,74 @@
+name: phase38-recover
+
+on:
+  push:
+    branches: [feat/core-inline-fixed-array]
+    paths: [.github/workflows/phase38-recover.yml]
+
+permissions:
+  contents: write
+
+jobs:
+  recover:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Apply bounded fixed-array implementation
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          import textwrap
+
+          source_path = Path('.github/workflows/phase38-apply2.yml')
+          source = source_path.read_text()
+          begin_marker = "          python3 - <<'PY'\n"
+          end_marker = "\n          PY\n"
+          begin = source.index(begin_marker) + len(begin_marker)
+          end = source.index(end_marker, begin)
+          script = textwrap.dedent(source[begin:end])
+
+          old_helper = '''def replace(path, old, new):
+              p = Path(path)
+              text = p.read_text()
+              if text.count(old) != 1:
+                  raise SystemExit(f"expected unique patch anchor missing in {path}: {old[:80]!r}")
+              p.write_text(text.replace(old, new))
+          '''
+          new_helper = '''def replace(path, old, new):
+              p = Path(path)
+              text = p.read_text()
+              if text.count(old) == 1:
+                  p.write_text(text.replace(old, new))
+                  return
+              pieces = re.split(r'(\\s+)', old)
+              pattern = ''.join(r'\\s+' if piece and piece.isspace() else re.escape(piece)
+                                for piece in pieces if piece)
+              matches = list(re.finditer(pattern, text))
+              if len(matches) != 1:
+                  raise SystemExit(
+                      f"expected unique whitespace-tolerant patch anchor missing in {path}: "
+                      f"{old[:80]!r}; matches={len(matches)}")
+              match = matches[0]
+              p.write_text(text[:match.start()] + new + text[match.end():])
+          '''
+          if old_helper not in script:
+              raise SystemExit('could not replace phase38 apply helper')
+          script = script.replace(old_helper, new_helper)
+          exec(compile(script, '<phase38-apply2>', 'exec'), {'__name__': '__main__'})
+
+          recovery = Path('.github/workflows/phase38-recover.yml')
+          if recovery.exists():
+              recovery.unlink()
+          PY
+          git diff --check
+          git config user.name "LeiZ"
+          git config user.email "52287354+Lei-TzuY@users.noreply.github.com"
+          git add -A
+          git diff --cached --check
+          git commit -m "feat: materialize selected-inline fixed arrays"
+          git push origin HEAD:feat/core-inline-fixed-array
+          git push origin --delete feat/core-inline-fixed-array-runner || true

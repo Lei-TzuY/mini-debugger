@@ -15,6 +15,18 @@ constexpr std::uint8_t kSnapshotDwOpR12 =
 constexpr std::uint8_t kSnapshotDwOpXmm0 =
     static_cast<std::uint8_t>(kDwOpReg0 + 17U);
 
+struct SnapshotRegisterPieceSource {
+  struct Registers {
+    std::uint64_t rdi;
+    std::uint64_t rsi;
+  };
+
+  std::uint64_t rdi;
+  std::uint64_t rsi;
+
+  [[nodiscard]] Registers registers() const noexcept { return Registers{rdi, rsi}; }
+};
+
 std::uint64_t decode_snapshot_address(const std::vector<std::byte>& expression) {
   constexpr std::size_t kAddressSize = sizeof(std::uint64_t);
   if (expression.size() != 1 + kAddressSize) {
@@ -427,6 +439,22 @@ std::optional<LocalScalarValue> inspect_snapshot_unit(
                                           value_type, location_expression);
   }
 
+  if (value_type.kind == LocalValueKind::Structure && opcode == kDwOpReg5) {
+    if (!frame.registers.rdi || !frame.registers.rsi) {
+      throw std::runtime_error(
+          "snapshot register-piece local requires explicit restored RDI/RSI ownership");
+    }
+    const SnapshotRegisterPieceSource register_source{*frame.registers.rdi,
+                                                       *frame.registers.rsi};
+    const auto bytes = evaluate_register_piece_structure(
+        location_expression, register_source, value_type);
+    const ElfFile module(owner.module_file_path);
+    auto result = decode_structure(module, name, value_type, bytes);
+    result.module_path = owner.module_path;
+    result.storage = LocalValueStorage::SnapshotCoreRegister;
+    return result;
+  }
+
   if (opcode == kSnapshotDwOpR12) {
     if (location_expression.size() != 1) {
       throw std::runtime_error(
@@ -494,10 +522,10 @@ std::optional<LocalScalarValue> inspect_snapshot_unit(
   if (opcode != kDwOpAddr) {
     if (frame.index == 0) {
       throw std::runtime_error(
-          "snapshot frame-zero local requires compiler-proven XMM0, DW_OP_fbreg, DW_OP_reg12, or DW_OP_addr ownership");
+          "snapshot frame-zero local requires compiler-proven XMM0, register-piece, DW_OP_fbreg, DW_OP_reg12, or DW_OP_addr ownership");
     }
     throw std::runtime_error(
-        "snapshot caller local requires compiler-proven XMM0, DW_OP_fbreg, DW_OP_breg3, DW_OP_reg12, or DW_OP_addr ownership");
+        "snapshot caller local requires compiler-proven XMM0, register-piece, DW_OP_fbreg, DW_OP_breg3, DW_OP_reg12, or DW_OP_addr ownership");
   }
   if (value_type.kind != LocalValueKind::Structure &&
       (value_type.byte_size == 0 || value_type.byte_size > sizeof(std::uint64_t))) {

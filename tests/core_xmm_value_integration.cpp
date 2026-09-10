@@ -21,6 +21,7 @@ constexpr std::uint64_t kCallerStackLocalValue = UINT64_C(0xcafebabedeadbeef);
 constexpr std::uint64_t kPointerPointeeValue = UINT64_C(0x8877665544332211);
 constexpr std::uint64_t kAggregateFirst = UINT64_C(0x0123456789abcdef);
 constexpr std::uint64_t kAggregateSecond = UINT64_C(0xfedcba9876543210);
+constexpr std::uint64_t kTypedMarker = UINT64_C(0x13579bdf2468ace0);
 
 void require(bool condition, const std::string& message) {
   if (!condition) throw std::runtime_error(message);
@@ -54,14 +55,9 @@ std::string shell_quote(const std::string& text) {
   return result;
 }
 
-std::string run_core_cli(const std::string& executable,
-                         const std::string& core_path) {
-  const std::string command =
-      "printf 'bt\\nframe 1\\nlist\\nprint caller_stack_local\\nquit\\n' | " +
-      shell_quote(executable) + " " + shell_quote(core_path) + " 2>&1";
+std::string run_command(const std::string& command, const std::string& context) {
   FILE* pipe = ::popen(command.c_str(), "r");
-  if (pipe == nullptr) throw std::runtime_error("failed to launch mdbg-core subprocess");
-
+  if (pipe == nullptr) throw std::runtime_error("failed to launch " + context);
   std::string output;
   std::array<char, 512> buffer{};
   while (std::fgets(buffer.data(), static_cast<int>(buffer.size()), pipe) != nullptr) {
@@ -69,8 +65,25 @@ std::string run_core_cli(const std::string& executable,
   }
   const int status = ::pclose(pipe);
   require(status != -1 && WIFEXITED(status) && WEXITSTATUS(status) == 0,
-          "mdbg-core subprocess did not exit cleanly: " + output);
+          context + " did not exit cleanly: " + output);
   return output;
+}
+
+void require_typed_object_oracle(const std::string& executable) {
+  const auto output = run_command(
+      "python3 tests/core_typed_object_dwarf_oracle.py " + shell_quote(executable) +
+          " 2>&1",
+      "typed-object DWARF oracle");
+  require(output.find("typed-object DWARF oracle passed") != std::string::npos,
+          "typed-object DWARF oracle did not report compiler-proven evidence");
+}
+
+std::string run_core_cli(const std::string& executable,
+                         const std::string& core_path) {
+  const std::string command =
+      "printf 'bt\\nframe 1\\nlist\\nprint caller_stack_local\\nquit\\n' | " +
+      shell_quote(executable) + " " + shell_quote(core_path) + " 2>&1";
+  return run_command(command, "mdbg-core subprocess");
 }
 
 void require_source_value(const mdbg::LocalScalarValue& value, double expected,
@@ -226,6 +239,28 @@ void require_aggregate_pointer_dereference(const mdbg::CoreInspectionSession& se
   }
 }
 
+void require_typed_pointer_evidence(const mdbg::CoreInspectionSession& session) {
+  const auto pointer = session.inspect_value("typed_pointer");
+  require(pointer.name == "typed_pointer",
+          "typed pointer lookup returned the wrong source name");
+  require(pointer.kind == mdbg::LocalValueKind::Pointer &&
+              pointer.byte_size == sizeof(std::uintptr_t) && pointer.raw_value != 0,
+          "typed pointer did not retain bounded pointer identity");
+  require(pointer.pointee_type.has_value() &&
+              pointer.pointee_type->kind == mdbg::LocalValueKind::Structure &&
+              pointer.pointee_type->byte_size == 2 * sizeof(std::uint64_t),
+          "typed pointer did not retain its compiler-proven structure pointee");
+
+  const auto object = session.dereference_value("typed_pointer");
+  require(object.kind == mdbg::LocalValueKind::Structure &&
+              object.byte_size == 2 * sizeof(std::uint64_t) && object.members.size() == 2,
+          "typed pointer did not materialize the bounded containing structure");
+  require(object.storage == mdbg::LocalValueStorage::SnapshotCoreMemory ||
+              object.storage == mdbg::LocalValueStorage::SnapshotRuntimeArtifact,
+          "typed structure object bypassed snapshot-memory provenance");
+  (void)kTypedMarker;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -245,6 +280,7 @@ int main(int argc, char** argv) {
     require(mdbg::snapshot_frame_lookup_pc(session.selected_frame()) ==
                 session.selected_frame().runtime_pc,
             "frame-zero lookup PC was incorrectly normalized");
+    require_typed_object_oracle(session.selected_frame().module_path);
 
     const auto crash_fp = session.snapshot().floating_point_state(crash_tid);
     const auto sibling_fp = session.snapshot().floating_point_state(sibling_tid);
@@ -260,6 +296,7 @@ int main(int argc, char** argv) {
     require_stack_local(session);
     require_pointer_dereference(session);
     require_aggregate_pointer_dereference(session);
+    require_typed_pointer_evidence(session);
     const auto caller_resume_pc = require_caller_stack_local(session);
     const auto stale_caller_frame = session.selected_frame();
 

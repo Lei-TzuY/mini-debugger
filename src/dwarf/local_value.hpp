@@ -16,7 +16,7 @@ class SnapshotModulePathResolver;
 struct InspectionFrameContext;
 struct SnapshotInspectionFrameContext;
 
-enum class LocalValueKind { Integer, Pointer, Floating, Structure };
+enum class LocalValueKind { Integer, Pointer, Floating, Structure, Array };
 enum class LocalDiscoveryKind { Variable, FormalParameter };
 enum class LocalValueStorage {
   Computed,
@@ -60,6 +60,20 @@ struct LocalStructMember {
   std::optional<LocalPointerPointeeType> pointee_type{};
 };
 
+struct LocalArrayElement {
+  std::uint64_t raw_value;
+  std::size_t byte_size;
+  bool is_signed;
+  LocalValueKind kind{LocalValueKind::Integer};
+};
+
+struct LocalArrayType {
+  std::size_t element_count;
+  std::size_t element_byte_size;
+  bool element_is_signed;
+  LocalValueKind element_kind{LocalValueKind::Integer};
+};
+
 struct LocalIntegerValue {
   std::string module_path;
   std::string name;
@@ -73,6 +87,8 @@ struct LocalIntegerValue {
   std::string storage_file_path{};
   std::uint64_t storage_file_offset{0};
   std::optional<LocalPointeeType> pointee_type{};
+  std::vector<LocalArrayElement> elements{};
+  std::optional<LocalArrayType> array_type{};
 };
 
 using LocalScalarValue = LocalIntegerValue;

@@ -15,6 +15,12 @@ constexpr std::uint8_t kInlineDwOpRcx =
 constexpr std::size_t kMaxInlineContexts = 8;
 constexpr std::size_t kMaxInlineRangeEntries = 64;
 constexpr std::size_t kMaxDiscoveredLocals = 64;
+constexpr std::uint64_t kInlineDwTagArrayType = 0x01;
+constexpr std::uint64_t kInlineDwTagSubrangeType = 0x21;
+constexpr std::uint64_t kInlineDwAtLowerBound = 0x22;
+constexpr std::uint64_t kInlineDwAtUpperBound = 0x2f;
+constexpr std::uint64_t kInlineDwAtCount = 0x37;
+constexpr std::size_t kMaxSelectedInlineArrayElements = 64;
 
 std::vector<std::byte> read_debug_ranges(const std::string& path) {
   const auto sections = read_named_sections(path, {".debug_ranges"});
@@ -377,6 +383,162 @@ std::optional<LocalPointeeType> selected_inline_direct_structure_type(
   throw std::runtime_error("selected-inline local type chain is too deep");
 }
 
+struct SelectedInlineFixedArrayType {
+  std::size_t element_count;
+  std::size_t element_byte_size;
+  bool element_is_signed;
+  std::size_t byte_size;
+};
+
+bool selected_inline_array_bound_form(std::uint64_t form) {
+  return form == kDwFormData1 || form == kDwFormData2 ||
+         form == kDwFormData4 || form == kDwFormData8 ||
+         form == kDwFormUdata || form == kDwFormImplicitConst;
+}
+
+std::optional<SelectedInlineFixedArrayType> selected_inline_fixed_array_type(
+    const std::vector<Die>& dies, std::uint64_t type_offset) {
+  for (unsigned depth = 0; depth < 16; ++depth) {
+    const auto index = die_index_by_offset(dies, type_offset);
+    if (!index) {
+      throw std::runtime_error(
+          "selected-inline fixed-array type references an unknown DIE");
+    }
+    const auto& die = dies[*index];
+    if (die.tag == kDwTagTypedef || die.tag == kDwTagConstType) {
+      const auto* wrapped = attribute(die, kDwAtType);
+      if (wrapped == nullptr || wrapped->form != kDwFormRef4) {
+        throw std::runtime_error(
+            "selected-inline fixed-array wrapper does not use DW_FORM_ref4");
+      }
+      type_offset = wrapped->number;
+      continue;
+    }
+    if (die.tag != kInlineDwTagArrayType) return std::nullopt;
+
+    const auto* element_ref = attribute(die, kDwAtType);
+    if (element_ref == nullptr || element_ref->form != kDwFormRef4) {
+      throw std::runtime_error(
+          "selected-inline fixed array has no supported element type");
+    }
+    const auto element = resolve_integer_type(dies, element_ref->number);
+
+    std::optional<std::size_t> subrange;
+    for (std::size_t child = 0; child < dies.size(); ++child) {
+      if (dies[child].parent != *index) continue;
+      if (dies[child].tag != kInlineDwTagSubrangeType || subrange) {
+        throw std::runtime_error(
+            "selected-inline fixed array requires exactly one direct subrange");
+      }
+      subrange = child;
+    }
+    if (!subrange) {
+      throw std::runtime_error(
+          "selected-inline fixed array has no direct subrange");
+    }
+
+    const auto& range = dies[*subrange];
+    const auto* lower = attribute(range, kInlineDwAtLowerBound);
+    if (lower != nullptr &&
+        (!selected_inline_array_bound_form(lower->form) || lower->number != 0)) {
+      throw std::runtime_error(
+          "selected-inline fixed array requires a zero lower bound");
+    }
+    const auto* count = attribute(range, kInlineDwAtCount);
+    const auto* upper = attribute(range, kInlineDwAtUpperBound);
+    if (count != nullptr && !selected_inline_array_bound_form(count->form)) {
+      throw std::runtime_error(
+          "selected-inline fixed-array count has an unsupported form");
+    }
+    if (upper != nullptr && !selected_inline_array_bound_form(upper->form)) {
+      throw std::runtime_error(
+          "selected-inline fixed-array upper bound has an unsupported form");
+    }
+    std::uint64_t element_count = 0;
+    if (count != nullptr) {
+      element_count = count->number;
+      if (upper != nullptr &&
+          (upper->number == std::numeric_limits<std::uint64_t>::max() ||
+           upper->number + 1 != element_count)) {
+        throw std::runtime_error(
+            "selected-inline fixed-array count conflicts with upper bound");
+      }
+    } else if (upper != nullptr) {
+      if (upper->number == std::numeric_limits<std::uint64_t>::max()) {
+        throw std::runtime_error(
+            "selected-inline fixed-array upper bound overflows element count");
+      }
+      element_count = upper->number + 1;
+    } else {
+      throw std::runtime_error(
+          "selected-inline fixed array has no bounded element count");
+    }
+    if (element_count == 0 ||
+        element_count > kMaxSelectedInlineArrayElements) {
+      throw std::runtime_error(
+          "selected-inline fixed-array count exceeds the bounded 64-element model");
+    }
+    if (element.byte_size == 0 || element.byte_size > sizeof(std::uint64_t) ||
+        element_count > kMaxLocalStructSize / element.byte_size) {
+      throw std::runtime_error(
+          "selected-inline fixed-array storage exceeds the bounded scalar-array model");
+    }
+    const auto byte_size = static_cast<std::size_t>(element_count) *
+                           element.byte_size;
+    const auto* declared_size = attribute(die, kDwAtByteSize);
+    if (declared_size != nullptr && declared_size->number != byte_size) {
+      throw std::runtime_error(
+          "selected-inline fixed-array byte size conflicts with its element layout");
+    }
+    return SelectedInlineFixedArrayType{
+        static_cast<std::size_t>(element_count), element.byte_size,
+        element.is_signed, byte_size};
+  }
+  throw std::runtime_error("selected-inline fixed-array type chain is too deep");
+}
+
+LocalScalarValue materialize_selected_inline_array(
+    const SnapshotModuleAddress& owner, std::string_view name,
+    const SelectedInlineFixedArrayType& array,
+    const SnapshotMemoryRead& memory) {
+  if (array.element_count == 0 ||
+      array.element_count > kMaxSelectedInlineArrayElements ||
+      array.element_byte_size == 0 ||
+      array.element_byte_size > sizeof(std::uint64_t) ||
+      array.byte_size != array.element_count * array.element_byte_size ||
+      memory.bytes.size() != array.byte_size) {
+    throw std::runtime_error(
+        "selected-inline fixed-array bytes exceed the bounded array model");
+  }
+  LocalScalarValue result{owner.module_path, std::string(name), 0,
+                          array.byte_size, false, LocalValueKind::Array};
+  result.array_type = LocalArrayType{array.element_count,
+                                     array.element_byte_size,
+                                     array.element_is_signed,
+                                     LocalValueKind::Integer};
+  result.elements.reserve(array.element_count);
+  for (std::size_t index = 0; index < array.element_count; ++index) {
+    result.elements.push_back(LocalArrayElement{
+        decode_integer(memory.bytes, index * array.element_byte_size,
+                       array.element_byte_size),
+        array.element_byte_size, array.element_is_signed,
+        LocalValueKind::Integer});
+  }
+  if (memory.provenance == SnapshotMemoryProvenance::Core) {
+    result.storage = LocalValueStorage::SnapshotCoreMemory;
+  } else {
+    if (memory.module_path != owner.module_path) {
+      throw std::logic_error(
+          "selected-inline fixed-array artifact ownership changed during value read");
+    }
+    result.storage = LocalValueStorage::SnapshotRuntimeArtifact;
+    result.storage_module_path = memory.module_path;
+    result.storage_file_path = memory.module_file_path;
+    result.storage_file_offset = memory.artifact_file_offset;
+  }
+  return result;
+}
+
 LocalScalarValue materialize_selected_inline_structure(
     const SnapshotModuleAddress& owner, std::string_view name,
     const LocalPointeeType& aggregate, const SnapshotMemoryRead& memory) {
@@ -489,18 +651,23 @@ std::optional<LocalScalarValue> inspect_inline_scalar_unit(
         "selected-inline local has no supported DW_FORM_ref4 type");
   }
 
-  const auto pointee_type = resolve_pointer_pointee_type(dies, type->number);
-  const auto direct_structure =
-      pointee_type ? std::optional<LocalPointeeType>{}
-                   : selected_inline_direct_structure_type(dies, type->number);
+  const auto pointee_type = resolve_pointer_pointee_type(dies, type->number);  const auto direct_structure =
+    pointee_type ? std::optional<LocalPointeeType>{}
+                 : selected_inline_direct_structure_type(dies, type->number);
+  const auto direct_array =
+    (pointee_type || direct_structure)
+        ? std::optional<SelectedInlineFixedArrayType>{}
+        : selected_inline_fixed_array_type(dies, type->number);
   const auto value_type =
       pointee_type ? ValueType{sizeof(std::uintptr_t), false,
-                               LocalValueKind::Pointer, {}}
-                   : direct_structure
-                         ? ValueType{direct_structure->byte_size, false,
-                                     LocalValueKind::Structure, {}}
-                         : resolve_value_type(dies, type->number);
-  if (!direct_structure &&
+                               LocalValueKind::Pointer, {}}                   : direct_structure
+               ? ValueType{direct_structure->byte_size, false,
+                           LocalValueKind::Structure, {}}
+               : direct_array
+                     ? ValueType{direct_array->byte_size, false,
+                                 LocalValueKind::Array, {}}
+                     : resolve_value_type(dies, type->number);
+  if (!direct_structure && !direct_array &&
       ((value_type.kind != LocalValueKind::Integer &&
         value_type.kind != LocalValueKind::Pointer) ||
        value_type.byte_size == 0 ||
@@ -541,12 +708,15 @@ std::optional<LocalScalarValue> inspect_inline_scalar_unit(
     }
     const auto memory = read_snapshot_memory(
         snapshot, module_paths, static_cast<std::uintptr_t>(runtime_address),
-        value_type.byte_size);
-    if (direct_structure) {
-      return materialize_selected_inline_structure(owner, requested_name,
-                                                   *direct_structure, memory);
-    }
-    auto result =
+        value_type.byte_size);    if (direct_structure) {
+    return materialize_selected_inline_structure(owner, requested_name,
+                                                 *direct_structure, memory);
+  }
+  if (direct_array) {
+    return materialize_selected_inline_array(owner, requested_name,
+                                             *direct_array, memory);
+  }
+  auto result =
         materialize_snapshot_memory_value(owner, requested_name, value_type, memory);
     attach_pointer_metadata(result, pointee_type);
     return result;
@@ -555,6 +725,10 @@ std::optional<LocalScalarValue> inspect_inline_scalar_unit(
   if (direct_structure) {
     throw std::runtime_error(
         "frame-zero selected-inline aggregate materialization is outside current compiler evidence");
+  }
+  if (direct_array) {
+    throw std::runtime_error(
+        "frame-zero selected-inline fixed-array materialization is outside current compiler evidence");
   }
   if (value_type.kind == LocalValueKind::Pointer) {
     throw std::runtime_error(

@@ -216,6 +216,16 @@ void print_value(const mdbg::LocalScalarValue& value) {
                 << value.members[index].raw_value << std::dec;
     }
     std::cout << " }";
+  } else if (value.kind == mdbg::LocalValueKind::Array) {
+    if (!value.array_type || value.elements.size() != value.array_type->element_count) {
+      throw std::logic_error("bounded fixed-array value lost its element metadata");
+    }
+    std::cout << '[';
+    for (std::size_t index = 0; index < value.elements.size(); ++index) {
+      if (index != 0) std::cout << ", ";
+      std::cout << "0x" << std::hex << value.elements[index].raw_value << std::dec;
+    }
+    std::cout << ']';
   } else if (value.kind == mdbg::LocalValueKind::Floating) {
     print_floating_value(value);
   } else {
@@ -224,6 +234,13 @@ void print_value(const mdbg::LocalScalarValue& value) {
   std::cout << " [" << value.byte_size << "-byte ";
   if (value.kind == mdbg::LocalValueKind::Floating) {
     std::cout << "floating";
+  } else if (value.kind == mdbg::LocalValueKind::Array) {
+    if (!value.array_type) {
+      throw std::logic_error("bounded fixed-array value lost its type metadata");
+    }
+    std::cout << "array " << value.array_type->element_count << " x "
+              << value.array_type->element_byte_size << "-byte "
+              << (value.array_type->element_is_signed ? "signed" : "unsigned");
   } else {
     std::cout << (value.is_signed ? "signed" : "unsigned");
   }
@@ -308,6 +325,7 @@ void print_help() {
                "  deref-member <name> <member>  dereference that member once\n"
                "  aggregate-member <name> <member>  select one by-value aggregate member\n"
                "  deref-aggregate-member <name> <member>  dereference that member once\n"
+               "  array-element <name> <index>  select one bounded fixed-array element\n"
                "  x <address> <length> inspect immutable snapshot memory\n"
                "  help                 show this help\n"
                "  quit | q             exit the core session\n";
@@ -482,7 +500,17 @@ int run_session(const std::string& core_path, mdbg::SnapshotModulePathResolver m
         print_value(session.dereference_aggregate_member(name, member));
         continue;
       }
-      if (command == "x") {
+      if (command == "array-element") {
+      std::string name;
+      std::string index_text;
+      std::string extra;
+      if (!(input >> name >> index_text) || (input >> extra)) {
+        throw std::invalid_argument("usage: array-element <name> <index>");
+      }
+      print_value(session.inspect_array_element(name, parse_frame_index(index_text)));
+      continue;
+    }
+    if (command == "x") {
         std::string address_text;
         std::string length_text;
         std::string extra;

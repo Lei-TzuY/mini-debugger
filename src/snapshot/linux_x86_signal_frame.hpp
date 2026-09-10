@@ -16,6 +16,8 @@ namespace mdbg {
 struct LinuxX86SignalFrameRecovery {
   EhFrameCursor cursor;
   std::uint64_t r12;
+  std::uint64_t rdi;
+  std::uint64_t rsi;
   std::array<std::byte, 16> xmm0;
 };
 
@@ -89,12 +91,16 @@ inline std::array<std::byte, 16> read_linux_x86_signal_xmm0(
 inline LinuxX86SignalFrameRecovery recover_linux_x86_signal_frame(
     const CoreSnapshot& snapshot, std::uintptr_t ucontext_address) {
   constexpr std::uintptr_t kR12 = 4;
+  constexpr std::uintptr_t kRdi = 8;
+  constexpr std::uintptr_t kRsi = 9;
   constexpr std::uintptr_t kRbp = 10;
   constexpr std::uintptr_t kRbx = 11;
   constexpr std::uintptr_t kRsp = 15;
   constexpr std::uintptr_t kRip = 16;
 
   const auto r12 = read_linux_x86_signal_slot(snapshot, ucontext_address, kR12);
+  const auto rdi = read_linux_x86_signal_slot(snapshot, ucontext_address, kRdi);
+  const auto rsi = read_linux_x86_signal_slot(snapshot, ucontext_address, kRsi);
   const auto rip = read_linux_x86_signal_slot(snapshot, ucontext_address, kRip);
   const auto rsp = read_linux_x86_signal_slot(snapshot, ucontext_address, kRsp);
   const auto rbp = read_linux_x86_signal_slot(snapshot, ucontext_address, kRbp);
@@ -115,6 +121,8 @@ inline LinuxX86SignalFrameRecovery recover_linux_x86_signal_frame(
                     std::optional<std::uintptr_t>{static_cast<std::uintptr_t>(rbp)},
                     std::optional<std::uint64_t>{rbx}},
       r12,
+      rdi,
+      rsi,
       xmm0};
 }
 

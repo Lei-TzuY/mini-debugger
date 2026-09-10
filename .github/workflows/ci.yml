@@ -144,3 +144,36 @@ jobs:
             fi
           done
           test "$signal_failures" -eq 0
+
+          "$CC" -O1 -g -gdwarf-4 -fPIE -pie \
+            tests/fixtures/signal_piece_core_fixture.c \
+            -o build/signal_piece_core_fixture_pie
+          "$CC" -O1 -g -gdwarf-4 -fno-pie -no-pie \
+            tests/fixtures/signal_piece_core_fixture.c \
+            -o build/signal_piece_core_fixture_nopie
+          "$CXX" -std=c++17 -Wall -Wextra -Wpedantic -Werror -Isrc \
+            tests/core_signal_piece_integration.cpp build/libmdbg_core.a -pthread \
+            -o build/core_signal_piece_integration
+
+          piece_failures=0
+          for fixture in build/signal_piece_core_fixture_pie build/signal_piece_core_fixture_nopie; do
+            rm -f /tmp/mdbg-core-*
+            set +e
+            "$fixture"
+            status=$?
+            set -e
+            if [ "$status" -eq 0 ]; then
+              echo "signal-piece fixture unexpectedly exited cleanly"
+              exit 1
+            fi
+            core=$(find /tmp -maxdepth 1 -type f -name 'mdbg-core-*' | head -n 1)
+            test -n "$core"
+            set +e
+            ./build/core_signal_piece_integration "$core" "$fixture"
+            piece_status=$?
+            set -e
+            if [ "$piece_status" -ne 0 ]; then
+              piece_failures=1
+            fi
+          done
+          test "$piece_failures" -eq 0

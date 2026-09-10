@@ -1,6 +1,7 @@
 #pragma once
 
 #include "dwarf/inline_context.hpp"
+#include "dwarf/inline_member.hpp"
 #include "dwarf/local_value.hpp"
 #include "snapshot/frame_lookup.hpp"
 #include "snapshot/inspection.hpp"
@@ -180,30 +181,37 @@ class CoreInspectionSession {
 
   [[nodiscard]] LocalScalarValue inspect_pointer_member(
       std::string_view name, std::string_view member_name) const {
-    require_physical_value_context();
     const auto& frame = selected_frame();
     validate_selected_frame(frame);
+    if (selected_inline_context_) {
+      if (selected_inline_context_->module_path != frame.module_path) {
+        throw std::logic_error("selected inline context belongs to a different module");
+      }
+      return inspect_inline_local_pointer_member(
+          snapshot_, frame, selected_inline_context_->die_offset, name,
+          member_name, module_paths_);
+    }
     return inspect_local_pointer_member(
         snapshot_, frame, name, member_name, module_paths_);
   }
 
   [[nodiscard]] LocalScalarValue dereference_pointer_member(
       std::string_view name, std::string_view member_name) const {
-    require_physical_value_context();
     const auto& frame = selected_frame();
     validate_selected_frame(frame);
+    if (selected_inline_context_) {
+      if (selected_inline_context_->module_path != frame.module_path) {
+        throw std::logic_error("selected inline context belongs to a different module");
+      }
+      return dereference_inline_local_pointer_member(
+          snapshot_, frame, selected_inline_context_->die_offset, name,
+          member_name, module_paths_);
+    }
     return dereference_local_pointer_member(
         snapshot_, frame, name, member_name, module_paths_);
   }
 
  private:
-  void require_physical_value_context() const {
-    if (selected_inline_context_) {
-      throw std::logic_error(
-          "inline-context pointer traversal is not supported; select physical first");
-    }
-  }
-
   void validate_selected_frame(const SnapshotInspectionFrameContext& frame) const {
     validate_snapshot_inspection_frame(snapshot_, frame);
     validate_snapshot_frame_lookup_pc(frame);

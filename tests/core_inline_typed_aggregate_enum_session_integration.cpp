@@ -13,6 +13,7 @@
 #include <iostream>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <thread>
 
 namespace {
@@ -67,13 +68,14 @@ bool supported_snapshot_storage(mdbg::LocalValueStorage storage) {
 }
 
 const mdbg::LocalStructMember& member_named(const mdbg::LocalScalarValue& value,
-                                            const std::string& name) {
+                                            std::string_view name) {
   const auto it = std::find_if(value.members.begin(), value.members.end(),
-                               [&name](const mdbg::LocalStructMember& member) {
+                               [name](const mdbg::LocalStructMember& member) {
                                  return member.name == name;
                                });
   if (it == value.members.end()) {
-    throw std::runtime_error("typed aggregate member is unavailable: " + name);
+    throw std::runtime_error("typed aggregate member is unavailable: " +
+                             std::string(name));
   }
   return *it;
 }

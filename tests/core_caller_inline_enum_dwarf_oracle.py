@@ -120,14 +120,14 @@ def main():
     byte_size, encoding, representation = enum_representation(enumeration, by_offset)
     if byte_size != 4:
         raise RuntimeError(f"CallerInlineState compiler width is {byte_size}, expected 4")
-    if encoding != 5:
+    if encoding != 7:
         raise RuntimeError(
-            f"CallerInlineState compiler representation is not signed integer encoding: {encoding}"
+            f"CallerInlineState compiler representation is not unsigned integer encoding: {encoding}"
         )
 
     enumerators = direct_enumerators(records, enumeration)
     expected = [
-        ("CALLER_INLINE_COLD", -3),
+        ("CALLER_INLINE_STARTING", 3),
         ("CALLER_INLINE_READY", 7),
         ("CALLER_INLINE_DONE", 19),
     ]

@@ -57,12 +57,13 @@ def direct_enumerators(records, enum_type):
     return result
 
 
-def validate_signed_representation(enum_type, by_offset):
+def validate_integral_representation(enum_type, by_offset):
     encoding = enum_type["attrs"].get("encoding")
     if encoding:
-        if numeric_attr(encoding, "caller_mode encoding") != 5:
-            raise RuntimeError("caller_mode direct compiler encoding is not signed integer")
-        return "direct-encoding"
+        code = numeric_attr(encoding, "caller_mode encoding")
+        if code not in {5, 7}:
+            raise RuntimeError("caller_mode direct compiler encoding is not signed/unsigned integer")
+        return ("direct-encoding", code == 5)
 
     underlying = referenced_type(enum_type, by_offset, "caller_mode underlying type")
     if underlying["tag"] != "DW_TAG_base_type":
@@ -71,11 +72,12 @@ def validate_signed_representation(enum_type, by_offset):
     underlying_encoding = underlying["attrs"].get("encoding")
     if not size or numeric_attr(size, "caller_mode underlying byte size") != 4:
         raise RuntimeError("caller_mode underlying compiler type is not four bytes")
-    if not underlying_encoding or numeric_attr(
-        underlying_encoding, "caller_mode underlying encoding"
-    ) != 5:
-        raise RuntimeError("caller_mode underlying compiler type is not signed integer")
-    return "underlying-type"
+    if not underlying_encoding:
+        raise RuntimeError("caller_mode underlying compiler type has no integer encoding")
+    code = numeric_attr(underlying_encoding, "caller_mode underlying encoding")
+    if code not in {5, 7}:
+        raise RuntimeError("caller_mode underlying compiler type is not signed/unsigned integer")
+    return ("underlying-type", code == 5)
 
 
 def main():
@@ -107,7 +109,7 @@ def main():
     size = enum_type["attrs"].get("byte_size")
     if not size or numeric_attr(size, "caller_mode byte size") != 4:
         raise RuntimeError("caller_mode compiler enum type is not exactly four bytes")
-    representation = validate_signed_representation(enum_type, by_offset)
+    representation, is_signed = validate_integral_representation(enum_type, by_offset)
 
     enumerators = direct_enumerators(records, enum_type)
     expected = {
@@ -127,8 +129,8 @@ def main():
 
     print(
         "caller_mode compiler evidence: "
-        f"binding-count={len(bindings)} type=DW_TAG_enumeration_type byte-size=4 signed "
-        f"representation={representation} "
+        f"binding-count={len(bindings)} type=DW_TAG_enumeration_type byte-size=4 "
+        f"{'signed' if is_signed else 'unsigned'} representation={representation} "
         "CallerInlineIdle=3 CallerInlineReady=7 CallerInlineBusy=42"
     )
 

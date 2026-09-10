@@ -1,0 +1,75 @@
+name: phase34-apply-production
+
+on:
+  push:
+    branches:
+      - feat/core-inline-pointer-traversal
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.event.head_commit.message == 'stage phase34 production patch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Apply bounded selected-inline pointer traversal
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          # 1. Preserve pointer type/pointee metadata in the existing selected-inline materializer.
+          path = Path('src/dwarf/source_lookup.cpp')
+          text = path.read_text()
+          old = '''  const auto value_type = resolve_value_type(dies, type->number);\n  if (value_type.kind != LocalValueKind::Integer || value_type.byte_size == 0 ||\n      value_type.byte_size > sizeof(std::uint64_t)) {\n    throw std::runtime_error(\n        "selected-inline scalar materialization requires a bounded integer value");\n  }\n'''
+          new = '''  const auto pointee_type = resolve_pointer_pointee_type(dies, type->number);\n  const auto value_type =\n      pointee_type ? ValueType{sizeof(std::uintptr_t), false,\n                               LocalValueKind::Pointer, {}}\n                   : resolve_value_type(dies, type->number);\n  if ((value_type.kind != LocalValueKind::Integer &&\n       value_type.kind != LocalValueKind::Pointer) ||\n      value_type.byte_size == 0 || value_type.byte_size > sizeof(std::uint64_t)) {\n    throw std::runtime_error(\n        "selected-inline value materialization requires a bounded integer/pointer scalar");\n  }\n'''
+          if old not in text:
+              raise SystemExit('selected-inline type gate changed')
+          text = text.replace(old, new, 1)
+
+          old = '''    const auto memory = read_snapshot_memory(\n        snapshot, module_paths, static_cast<std::uintptr_t>(runtime_address),\n        value_type.byte_size);\n    return materialize_snapshot_memory_value(owner, requested_name, value_type, memory);\n  }\n\n  if (expression.size() != 1) {\n'''
+          new = '''    const auto memory = read_snapshot_memory(\n        snapshot, module_paths, static_cast<std::uintptr_t>(runtime_address),\n        value_type.byte_size);\n    auto result =\n        materialize_snapshot_memory_value(owner, requested_name, value_type, memory);\n    attach_pointer_metadata(result, pointee_type);\n    return result;\n  }\n\n  if (value_type.kind == LocalValueKind::Pointer) {\n    throw std::runtime_error(\n        "frame-zero selected-inline pointer materialization is outside current compiler evidence");\n  }\n  if (expression.size() != 1) {\n'''
+          if old not in text:
+              raise SystemExit('selected-inline caller materialization point changed')
+          text = text.replace(old, new, 1)
+
+          marker = '''LocalScalarValue inspect_inline_local_value(\n    const CoreSnapshot& snapshot, const SnapshotInspectionFrameContext& frame,\n    std::size_t inline_die_offset, std::string_view name,\n    const SnapshotModulePathResolver& module_paths) {\n'''
+          start = text.find(marker)
+          if start == -1:
+              raise SystemExit('selected-inline public materializer changed')
+          closing = '''  throw std::runtime_error("selected inline DIE is unavailable in the owning debug file");\n}\n\n}  // namespace mdbg\n'''
+          pos = text.find(closing, start)
+          if pos == -1:
+              raise SystemExit('selected-inline public materializer tail changed')
+          replacement = '''  throw std::runtime_error("selected inline DIE is unavailable in the owning debug file");\n}\n\nLocalScalarValue dereference_inline_local_pointer(\n    const CoreSnapshot& snapshot, const SnapshotInspectionFrameContext& frame,\n    std::size_t inline_die_offset, std::string_view name,\n    const SnapshotModulePathResolver& module_paths) {\n  const auto pointer = inspect_inline_local_value(\n      snapshot, frame, inline_die_offset, name, module_paths);\n  if (pointer.kind != LocalValueKind::Pointer) {\n    throw std::logic_error(\n        "selected-inline local value is not a pointer: " + std::string(name));\n  }\n  if (!pointer.pointee_type ||\n      pointer.pointee_type->kind != LocalValueKind::Integer ||\n      pointer.pointee_type->byte_size == 0 ||\n      pointer.pointee_type->byte_size > sizeof(std::uint64_t) ||\n      !pointer.pointee_type->members.empty()) {\n    throw std::runtime_error(\n        "selected-inline pointer does not have a bounded integer pointee type");\n  }\n  if (pointer.raw_value == 0) {\n    throw std::runtime_error(\n        "cannot dereference a null selected-inline core pointer: " +\n        std::string(name));\n  }\n  if (pointer.raw_value > std::numeric_limits<std::uintptr_t>::max()) {\n    throw std::runtime_error("selected-inline core pointer exceeds host address width");\n  }\n\n  const auto memory = read_snapshot_memory(\n      snapshot, module_paths, static_cast<std::uintptr_t>(pointer.raw_value),\n      pointer.pointee_type->byte_size);\n  const ValueType value_type{pointer.pointee_type->byte_size,\n                             pointer.pointee_type->is_signed,\n                             LocalValueKind::Integer, {}};\n  const SnapshotModuleAddress owner{pointer.module_path, {}, 0};\n  return materialize_snapshot_memory_value(\n      owner, "*" + pointer.name, value_type, memory, false);\n}\n\n}  // namespace mdbg\n'''
+          text = text[:pos] + replacement + text[pos + len(closing):]
+          path.write_text(text)
+
+          # 2. Expose only the bounded selected-inline pointer operation.
+          path = Path('src/dwarf/inline_context.hpp')
+          text = path.read_text()
+          old = '''LocalScalarValue inspect_inline_local_value(\n    const CoreSnapshot& snapshot, const SnapshotInspectionFrameContext& frame,\n    std::size_t inline_die_offset, std::string_view name,\n    const SnapshotModulePathResolver& module_paths);\n\n}  // namespace mdbg\n'''
+          new = '''LocalScalarValue inspect_inline_local_value(\n    const CoreSnapshot& snapshot, const SnapshotInspectionFrameContext& frame,\n    std::size_t inline_die_offset, std::string_view name,\n    const SnapshotModulePathResolver& module_paths);\nLocalScalarValue dereference_inline_local_pointer(\n    const CoreSnapshot& snapshot, const SnapshotInspectionFrameContext& frame,\n    std::size_t inline_die_offset, std::string_view name,\n    const SnapshotModulePathResolver& module_paths);\n\n}  // namespace mdbg\n'''
+          if old not in text:
+              raise SystemExit('inline_context declaration tail changed')
+          path.write_text(text.replace(old, new, 1))
+
+          # 3. Route CoreInspectionSession deref through selected-inline ownership.
+          path = Path('src/snapshot/session.hpp')
+          text = path.read_text()
+          old = '''  [[nodiscard]] LocalScalarValue dereference_value(std::string_view name) const {\n    require_physical_value_context();\n    const auto& frame = selected_frame();\n    validate_selected_frame(frame);\n    return dereference_local_pointer(snapshot_, frame, name, module_paths_);\n  }\n'''
+          new = '''  [[nodiscard]] LocalScalarValue dereference_value(std::string_view name) const {\n    const auto& frame = selected_frame();\n    validate_selected_frame(frame);\n    if (selected_inline_context_) {\n      if (selected_inline_context_->module_path != frame.module_path) {\n        throw std::logic_error("selected inline context belongs to a different module");\n      }\n      return dereference_inline_local_pointer(\n          snapshot_, frame, selected_inline_context_->die_offset, name, module_paths_);\n    }\n    return dereference_local_pointer(snapshot_, frame, name, module_paths_);\n  }\n'''
+          if old not in text:
+              raise SystemExit('CoreInspectionSession dereference_value changed')
+          path.write_text(text.replace(old, new, 1))
+          PY
+
+          git rm .github/workflows/phase34-apply-production.yml
+          git config user.name LeiZ
+          git config user.email '52287354+Lei-TzuY@users.noreply.github.com'
+          git add src/dwarf/source_lookup.cpp src/dwarf/inline_context.hpp src/snapshot/session.hpp
+          git commit -m 'feat: traverse selected inline pointer values'
+          git push origin HEAD:feat/core-inline-pointer-traversal

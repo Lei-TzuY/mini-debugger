@@ -63,6 +63,9 @@ jobs:
           "$CXX" -std=c++17 -Wall -Wextra -Wpedantic -Werror -Isrc \
             tests/core_xmm_value_integration.cpp build/libmdbg_core.a -pthread \
             -o build/core_xmm_value_integration
+          "$CXX" -std=c++17 -Wall -Wextra -Wpedantic -Werror -Isrc \
+            tests/core_local_discovery_integration.cpp build/libmdbg_core.a -pthread \
+            -o build/core_local_discovery_integration
 
           for fixture in build/xmm_core_value_fixture_pie build/xmm_core_value_fixture_nopie; do
             python3 tests/core_xmm_dwarf_oracle.py "$fixture"
@@ -81,6 +84,7 @@ jobs:
             test -n "$core"
             sibling=$(cat "$ready")
             ./build/core_xmm_value_integration "$core" "$sibling"
+            ./build/core_local_discovery_integration "$core" "$sibling"
             output=$(printf 'print xmm_value\nprint stack_local\nderef scalar_pointer\nderef aggregate_pointer\nthread %s\nprint xmm_value\nquit\n' "$sibling" | \
               ./build/mdbg-core "$core")
             printf '%s\n' "$output"

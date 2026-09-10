@@ -58,7 +58,8 @@ jobs:
           if old_helper not in script:
               raise SystemExit('could not replace phase38 apply helper')
           script = script.replace(old_helper, new_helper)
-          exec(compile(script, '<phase38-apply2>', 'exec'), {'__name__': '__main__'})
+          exec(compile(script, '<phase38-apply2>', 'exec'),
+               {'__name__': '__main__', 're': re})
 
           recovery = Path('.github/workflows/phase38-recover.yml')
           if recovery.exists():

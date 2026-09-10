@@ -171,6 +171,23 @@ void print_locals(const mdbg::CoreInspectionSession& session) {
   }
 }
 
+void print_inline_contexts(const mdbg::CoreInspectionSession& session) {
+  const auto contexts = session.inline_contexts();
+  if (contexts.empty()) {
+    std::cout << "no inline contexts for selected physical frame\n";
+    return;
+  }
+  const auto selected = session.selected_inline_context_index();
+  for (std::size_t index = 0; index < contexts.size(); ++index) {
+    const auto& context = contexts[index];
+    std::cout << (selected && *selected == index ? "* " : "  ") << "inline " << index
+              << ' ' << context.module_path << '!' << context.name << " called at "
+              << context.call_site.file << ':' << context.call_site.line;
+    if (context.call_site.column != 0) std::cout << ':' << context.call_site.column;
+    std::cout << '\n';
+  }
+}
+
 void print_floating_value(const mdbg::LocalScalarValue& value) {
   if (value.byte_size == sizeof(float)) {
     const auto bits = static_cast<std::uint32_t>(value.raw_value);
@@ -280,6 +297,9 @@ void print_help() {
                "  thread <tid>         select an immutable core thread\n"
                "  bt | backtrace       show immutable snapshot frames\n"
                "  frame <index>        select an immutable snapshot frame\n"
+               "  inline               show inline source contexts for the physical frame\n"
+               "  inline <index>       select one inline source context\n"
+               "  inline physical      return local scope to the physical frame\n"
                "  list | l             show source context for the selected frame\n"
                "  locals               list active parameter/local names without reading values\n"
                "  print <name> | p <name>  inspect a source value in the selected frame\n"
@@ -366,6 +386,27 @@ int run_session(const std::string& core_path, mdbg::SnapshotModulePathResolver m
         session.select_frame(index);
         std::cout << "selected frame " << index << '\n';
         print_frame(session, session.selected_frame());
+        continue;
+      }
+      if (command == "inline") {
+        std::string selection;
+        std::string extra;
+        if (!(input >> selection)) {
+          print_inline_contexts(session);
+          continue;
+        }
+        if (input >> extra) {
+          throw std::invalid_argument("usage: inline [<index>|physical]");
+        }
+        if (selection == "physical") {
+          session.clear_inline_context();
+          std::cout << "selected physical frame " << session.selected_frame_index() << '\n';
+          continue;
+        }
+        const auto index = parse_frame_index(selection);
+        session.select_inline_context(index);
+        std::cout << "selected inline " << index << '\n';
+        print_inline_contexts(session);
         continue;
       }
       if (command == "list" || command == "l") {

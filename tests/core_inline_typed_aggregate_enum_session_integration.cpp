@@ -57,9 +57,9 @@ std::string generate_core(const std::string& fixture) {
 std::size_t selected_inner_index(const mdbg::CoreInspectionSession& session) {
   const auto contexts = session.inline_contexts();
   for (std::size_t index = 0; index < contexts.size(); ++index) {
-    if (contexts[index].name == "caller_inline_inner") return index;
+    if (contexts[index].name == "caller_typed_inline_inner") return index;
   }
-  throw std::runtime_error("caller_inline_inner inline context is unavailable");
+  throw std::runtime_error("caller_typed_inline_inner inline context is unavailable");
 }
 
 bool supported_snapshot_storage(mdbg::LocalValueStorage storage) {
@@ -87,13 +87,13 @@ void require_enum_type(const mdbg::LocalScalarValue& value) {
           "typed aggregate mode leaf lost uint32 raw value 42");
   require(value.enum_type.has_value(),
           "typed aggregate mode leaf lost enum metadata");
-  require(value.enum_type->name == "CallerInlineMode" &&
+  require(value.enum_type->name == "CallerInlineTypedMode" &&
               value.enum_type->byte_size == 4 && !value.enum_type->is_signed,
-          "typed aggregate mode leaf lost CallerInlineMode representation");
+          "typed aggregate mode leaf lost CallerInlineTypedMode representation");
   require(value.enum_type->enumerators.size() == 3,
           "typed aggregate mode leaf lost bounded enumerator table");
   const auto symbol = mdbg::local_enum_symbol(value);
-  require(symbol && *symbol == "CallerInlineBusy",
+  require(symbol && *symbol == "CallerInlineTypedBusy",
           "typed aggregate mode leaf did not retain exact symbolic identity");
 }
 
@@ -191,13 +191,13 @@ void exercise(const std::string& fixture, const std::string& cli) {
     require(!mdbg::local_enum_symbol(unknown),
             "unknown composed enum raw value must remain numeric");
     auto ambiguous = selected;
-    ambiguous.enum_type->enumerators.push_back({"CallerInlineBusyAlias", 42});
+    ambiguous.enum_type->enumerators.push_back({"CallerInlineTypedBusyAlias", 42});
     require(!mdbg::local_enum_symbol(ambiguous),
             "duplicate composed enum raw values must remain symbolically ambiguous");
 
     const auto output = run_core_cli(cli, core, inner);
     require(output.find(
-                "caller_typed_aggregate.mode = CallerInlineMode::CallerInlineBusy (0x2a)") !=
+                "caller_typed_aggregate.mode = CallerInlineTypedMode::CallerInlineTypedBusy (0x2a)") !=
                 std::string::npos,
             "mdbg-core did not render composed enum member symbol and numeric value");
     require(output.find("[4-byte enum unsigned]") != std::string::npos,

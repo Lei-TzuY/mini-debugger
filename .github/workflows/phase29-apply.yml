@@ -1,0 +1,234 @@
+name: phase29-apply
+
+on:
+  push:
+    branches:
+      - feat/core-scoped-local-discovery
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.event.head_commit.message == 'chore: apply phase 29 implementation'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/core-scoped-local-discovery
+          fetch-depth: 0
+      - name: Apply bounded scoped-local implementation
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path, old, new):
+              p = Path(path)
+              text = p.read_text()
+              if text.count(old) != 1:
+                  raise SystemExit(f"anchor count for {path}: {text.count(old)}")
+              p.write_text(text.replace(old, new, 1))
+
+          replace_once(
+              "src/dwarf/local_value.hpp",
+              "enum class LocalValueKind { Integer, Pointer, Floating, Structure };\n",
+              "enum class LocalValueKind { Integer, Pointer, Floating, Structure };\n"
+              "enum class LocalDiscoveryKind { Variable, FormalParameter };\n\n"
+              "struct LocalDiscoveryEntry {\n"
+              "  std::string name;\n"
+              "  LocalDiscoveryKind kind;\n"
+              "};\n")
+
+          replace_once(
+              "src/dwarf/local_value.hpp",
+              "LocalScalarValue inspect_local_value(const CoreSnapshot& snapshot,\n"
+              "                                     const SnapshotInspectionFrameContext& frame,\n"
+              "                                     std::string_view name,\n"
+              "                                     const SnapshotModulePathResolver& module_paths);\n",
+              "LocalScalarValue inspect_local_value(const CoreSnapshot& snapshot,\n"
+              "                                     const SnapshotInspectionFrameContext& frame,\n"
+              "                                     std::string_view name,\n"
+              "                                     const SnapshotModulePathResolver& module_paths);\n"
+              "std::vector<LocalDiscoveryEntry> discover_local_values(\n"
+              "    const CoreSnapshot& snapshot, const SnapshotInspectionFrameContext& frame,\n"
+              "    const SnapshotModulePathResolver& module_paths);\n")
+
+          discovery_helper = r'''std::optional<std::vector<LocalDiscoveryEntry>> discover_snapshot_unit(
+              const DebugSections& sections, std::uint64_t virtual_pc,
+              std::size_t unit_start, std::size_t& next_unit) {
+            std::uint16_t unit_version = 0;
+            const auto dies = parse_unit_dies(sections, unit_start, next_unit, unit_version);
+            (void)unit_version;
+
+            std::optional<std::size_t> subprogram;
+            for (std::size_t index = 0; index < dies.size(); ++index) {
+              if (dies[index].tag != kDwTagSubprogram ||
+                  !die_contains_pc(dies[index], virtual_pc)) {
+                continue;
+              }
+              if (subprogram) {
+                throw std::runtime_error(
+                    "snapshot local discovery PC matches multiple DWARF subprograms");
+              }
+              subprogram = index;
+            }
+            if (!subprogram) return std::nullopt;
+
+            struct Candidate {
+              std::size_t depth;
+              LocalDiscoveryKind kind;
+            };
+            std::map<std::string, Candidate> selected;
+            constexpr std::size_t kMaxDiscoveredLocals = 64;
+
+            for (std::size_t index = 0; index < dies.size(); ++index) {
+              const bool variable = dies[index].tag == kDwTagVariable;
+              const bool parameter = dies[index].tag == kDwTagFormalParameter;
+              if (!variable && !parameter) continue;
+              const auto* name = attribute_with_abstract_origin(dies, index, kDwAtName);
+              if (name == nullptr || name->text.empty()) continue;
+              const auto depth = active_scope_depth(dies, index, *subprogram, virtual_pc);
+              if (!depth) continue;
+
+              const auto kind = parameter ? LocalDiscoveryKind::FormalParameter
+                                          : LocalDiscoveryKind::Variable;
+              const auto existing = selected.find(name->text);
+              if (existing == selected.end()) {
+                if (selected.size() >= kMaxDiscoveredLocals) {
+                  throw std::runtime_error(
+                      "active scoped-local catalogue exceeds the bounded 64-name limit");
+                }
+                selected.emplace(name->text, Candidate{*depth, kind});
+                continue;
+              }
+              if (*depth > existing->second.depth) {
+                existing->second = Candidate{*depth, kind};
+                continue;
+              }
+              if (*depth == existing->second.depth) {
+                throw std::runtime_error(
+                    "ambiguous active local name at equal lexical depth: " + name->text);
+              }
+            }
+
+            std::vector<LocalDiscoveryEntry> result;
+            result.reserve(selected.size());
+            for (const auto& [name, candidate] : selected) {
+              result.push_back(LocalDiscoveryEntry{name, candidate.kind});
+            }
+            return result;
+          }
+
+          '''
+          replace_once(
+              "src/dwarf/source_lookup.cpp",
+              "std::optional<LocalScalarValue> inspect_snapshot_unit(\n",
+              discovery_helper + "std::optional<LocalScalarValue> inspect_snapshot_unit(\n")
+
+          discovery_public = r'''std::vector<LocalDiscoveryEntry> discover_local_values(
+              const CoreSnapshot& snapshot, const SnapshotInspectionFrameContext& frame,
+              const SnapshotModulePathResolver& module_paths) {
+            validate_snapshot_inspection_frame(snapshot, frame);
+            validate_snapshot_frame_lookup_pc(frame);
+
+            const auto lookup_runtime_pc = snapshot_frame_lookup_pc(frame);
+            const auto owner =
+                resolve_snapshot_module_address(snapshot, lookup_runtime_pc, module_paths);
+            if (owner.module_path != frame.module_path) {
+              throw std::logic_error("snapshot local discovery module ownership changed");
+            }
+            const auto sections =
+                read_debug_sections(module_paths.resolve_debug_file(owner.module_path));
+
+            std::size_t unit = 0;
+            while (unit < sections.info.size()) {
+              std::size_t next = unit;
+              const auto result = discover_snapshot_unit(
+                  sections, owner.virtual_address, unit, next);
+              if (result) return *result;
+              if (next <= unit) {
+                throw std::runtime_error("DWARF parser did not advance to the next unit");
+              }
+              unit = next;
+            }
+            throw std::runtime_error(
+                "snapshot local discovery PC is not covered by a supported DWARF4/5 subprogram");
+          }
+
+          '''
+          replace_once(
+              "src/dwarf/source_lookup.cpp",
+              "LocalScalarValue inspect_local_value(const CoreSnapshot& snapshot,\n",
+              discovery_public +
+              "LocalScalarValue inspect_local_value(const CoreSnapshot& snapshot,\n")
+
+          replace_once(
+              "src/snapshot/session.hpp",
+              "  [[nodiscard]] LocalScalarValue inspect_value(std::string_view name) const {\n",
+              "  [[nodiscard]] std::vector<LocalDiscoveryEntry> locals() const {\n"
+              "    const auto& frame = selected_frame();\n"
+              "    validate_selected_frame(frame);\n"
+              "    return discover_local_values(snapshot_, frame, module_paths_);\n"
+              "  }\n\n"
+              "  [[nodiscard]] LocalScalarValue inspect_value(std::string_view name) const {\n")
+
+          print_locals = r'''void print_locals(const mdbg::CoreInspectionSession& session) {
+            const auto entries = session.locals();
+            if (entries.empty()) {
+              std::cout << "no active locals\n";
+              return;
+            }
+            for (const auto& entry : entries) {
+              std::cout << (entry.kind == mdbg::LocalDiscoveryKind::FormalParameter
+                                ? "param "
+                                : "local ")
+                        << entry.name << '\n';
+            }
+          }
+
+          '''
+          replace_once(
+              "src/cli/core_main.cpp",
+              "void print_crash(const mdbg::CoreInspectionSession& session) {\n",
+              print_locals + "void print_crash(const mdbg::CoreInspectionSession& session) {\n")
+
+          replace_once(
+              "src/cli/core_main.cpp",
+              '               "  list | l             show source context for the selected frame\\n"\n',
+              '               "  list | l             show source context for the selected frame\\n"\n'
+              '               "  locals               list active scoped local names\\n"\n')
+
+          locals_command = r'''      if (command == "locals") {
+                std::string extra;
+                if (input >> extra) throw std::invalid_argument("usage: locals");
+                print_locals(session);
+                continue;
+              }
+          '''
+          replace_once(
+              "src/cli/core_main.cpp",
+              '      if (command == "print" || command == "p") {\n',
+              locals_command + '      if (command == "print" || command == "p") {\n')
+
+          ci = Path(".github/workflows/ci.yml")
+          text = ci.read_text()
+          old = "output=$(printf 'print xmm_value\\nprint stack_local\\nderef scalar_pointer\\nderef aggregate_pointer\\nthread %s\\nprint xmm_value\\nquit\\n' \"$sibling\" | \\\n              ./build/mdbg-core \"$core\")"
+          new = "output=$(printf 'locals\\nprint xmm_value\\nprint stack_local\\nderef scalar_pointer\\nderef aggregate_pointer\\nthread %s\\nlocals\\nprint xmm_value\\nquit\\n' \"$sibling\" | \\\n              ./build/mdbg-core \"$core\")"
+          if text.count(old) != 1:
+              raise SystemExit(f"CI command anchor count: {text.count(old)}")
+          text = text.replace(old, new, 1)
+          old = "            printf '%s\\n' \"$output\" | grep -F 'xmm_value = 9876.5'\n"
+          new = (old +
+                 "            printf '%s\\n' \"$output\" | grep -F 'local stack_local'\n" +
+                 "            printf '%s\\n' \"$output\" | grep -F 'param seed'\n")
+          if text.count(old) != 1:
+              raise SystemExit(f"CI assertion anchor count: {text.count(old)}")
+          ci.write_text(text.replace(old, new, 1))
+          PY
+
+          rm .github/workflows/phase29-apply.yml
+          git config user.name "LeiZ"
+          git config user.email "52287354+Lei-TzuY@users.noreply.github.com"
+          git add -A
+          git commit -m "feat: add bounded scoped core local discovery"
+          git push origin HEAD:feat/core-scoped-local-discovery

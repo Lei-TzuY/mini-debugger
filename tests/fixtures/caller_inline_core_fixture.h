@@ -16,7 +16,7 @@ struct CallerInlineBitFields {
 };
 
 enum CallerInlineMode {
-  CALLER_INLINE_COLD = -3,
+  CALLER_INLINE_COLD = 3,
   CALLER_INLINE_READY = 7,
   CALLER_INLINE_HOT = 42,
 };

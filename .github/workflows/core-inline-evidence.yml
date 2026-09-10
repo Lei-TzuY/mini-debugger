@@ -4,6 +4,9 @@ on:
   push:
   pull_request:
 
+permissions:
+  contents: write
+
 jobs:
   selected-inline-aggregate:
     runs-on: ubuntu-latest
@@ -65,3 +68,351 @@ jobs:
           /tmp/core-inline-array-session /tmp/caller-inline-nopie build/mdbg-core
           /tmp/core-inline-union-session /tmp/caller-inline-pie build/mdbg-core
           /tmp/core-inline-union-session /tmp/caller-inline-nopie build/mdbg-core
+
+  apply-production:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/feat/selected-inline-union' && github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Apply and self-clean bounded union patch
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          def replace_one(path, old, new):
+              p = Path(path)
+              text = p.read_text()
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"{path}: expected one replacement, found {count}")
+              p.write_text(text.replace(old, new, 1))
+
+          def regex_one(path, pattern, replacement):
+              p = Path(path)
+              text = p.read_text()
+              updated, count = re.subn(pattern, replacement, text, count=1, flags=re.S)
+              if count != 1:
+                  raise SystemExit(f"{path}: expected one regex replacement, found {count}")
+              p.write_text(updated)
+
+          replace_one(
+              'src/dwarf/local_value.hpp',
+              'enum class LocalValueKind { Integer, Pointer, Floating, Structure, Array };',
+              'enum class LocalValueKind { Integer, Pointer, Floating, Structure, Union, Array };')
+
+          replace_one(
+              'src/dwarf/source_lookup.cpp',
+              'constexpr std::uint64_t kInlineDwTagArrayType = 0x01;\n',
+              'constexpr std::uint64_t kInlineDwTagArrayType = 0x01;\nconstexpr std::uint64_t kInlineDwTagUnionType = 0x17;\n')
+
+          union_helpers = r'''LocalStructMemberType selected_inline_union_member_type(
+    const std::vector<Die>& dies, const Die& member, std::size_t union_size) {
+  const auto* member_name = attribute(member, kDwAtName);
+  const auto* member_type = attribute(member, kDwAtType);
+  const auto* member_offset = attribute(member, kDwAtDataMemberLocation);
+  if (member_name == nullptr || member_name->text.empty()) {
+    throw std::runtime_error("selected-inline union member has no supported name");
+  }
+  if (member_type == nullptr || member_type->form != kDwFormRef4) {
+    throw std::runtime_error(
+        "selected-inline union member has no supported DW_FORM_ref4 type");
+  }
+  if (member_offset != nullptr &&
+      (!is_constant_member_offset_form(member_offset->form) ||
+       member_offset->number != 0)) {
+    throw std::runtime_error(
+        "selected-inline union member does not share storage at offset zero");
+  }
+
+  std::uint64_t type_offset = member_type->number;
+  for (unsigned depth = 0; depth < 16; ++depth) {
+    const auto index = die_index_by_offset(dies, type_offset);
+    if (!index) {
+      throw std::runtime_error(
+          "selected-inline union member type references an unknown DIE");
+    }
+    const auto& type_die = dies[*index];
+    if (type_die.tag == kDwTagTypedef || type_die.tag == kDwTagConstType) {
+      const auto* wrapped = attribute(type_die, kDwAtType);
+      if (wrapped == nullptr || wrapped->form != kDwFormRef4) {
+        throw std::runtime_error(
+            "selected-inline union member wrapper does not use DW_FORM_ref4");
+      }
+      type_offset = wrapped->number;
+      continue;
+    }
+    if (type_die.tag != kDwTagBaseType) {
+      throw std::runtime_error(
+          "selected-inline union member is not a bounded integer scalar");
+    }
+    const auto integer = resolve_integer_type(dies, type_offset);
+    if (integer.byte_size == 0 || integer.byte_size > sizeof(std::uint64_t) ||
+        integer.byte_size > union_size) {
+      throw std::runtime_error(
+          "selected-inline union integer member exceeds bounded shared storage");
+    }
+    return LocalStructMemberType{member_name->text, 0, integer.byte_size,
+                                 integer.is_signed};
+  }
+  throw std::runtime_error("selected-inline union member type chain is too deep");
+}
+
+std::optional<LocalPointeeType> selected_inline_direct_union_type(
+    const std::vector<Die>& dies, std::uint64_t type_offset) {
+  for (unsigned depth = 0; depth < 16; ++depth) {
+    const auto index = die_index_by_offset(dies, type_offset);
+    if (!index) {
+      throw std::runtime_error("selected-inline union type references an unknown DIE");
+    }
+    const auto& die = dies[*index];
+    if (die.tag == kDwTagTypedef || die.tag == kDwTagConstType) {
+      const auto* wrapped = attribute(die, kDwAtType);
+      if (wrapped == nullptr || wrapped->form != kDwFormRef4) {
+        throw std::runtime_error(
+            "selected-inline union wrapper does not use DW_FORM_ref4");
+      }
+      type_offset = wrapped->number;
+      continue;
+    }
+    if (die.tag != kInlineDwTagUnionType) return std::nullopt;
+
+    const auto* size = attribute(die, kDwAtByteSize);
+    if (size == nullptr || size->number == 0 || size->number > kMaxLocalStructSize) {
+      throw std::runtime_error("selected-inline union has an unsupported byte size");
+    }
+    const auto union_size = static_cast<std::size_t>(size->number);
+    LocalPointeeType result{union_size, false, LocalValueKind::Union, {}};
+    for (std::size_t child = 0; child < dies.size(); ++child) {
+      if (dies[child].parent != *index) continue;
+      if (dies[child].tag != kDwTagMember) {
+        throw std::runtime_error(
+            "selected-inline union has an unsupported direct child DIE");
+      }
+      if (result.members.size() >= kMaxLocalStructMembers) {
+        throw std::runtime_error("selected-inline union has too many direct members");
+      }
+      auto resolved = selected_inline_union_member_type(dies, dies[child], union_size);
+      const auto duplicate = std::find_if(
+          result.members.begin(), result.members.end(),
+          [&resolved](const LocalStructMemberType& existing) {
+            return existing.name == resolved.name;
+          });
+      if (duplicate != result.members.end()) {
+        throw std::runtime_error("selected-inline union has duplicate member names");
+      }
+      result.members.push_back(std::move(resolved));
+    }
+    if (result.members.empty()) {
+      throw std::runtime_error("selected-inline union has no supported direct members");
+    }
+    return result;
+  }
+  throw std::runtime_error("selected-inline union type chain is too deep");
+}
+
+'''
+          replace_one(
+              'src/dwarf/source_lookup.cpp',
+              'struct SelectedInlineFixedArrayType {\n',
+              union_helpers + 'struct SelectedInlineFixedArrayType {\n')
+
+          union_materializer = r'''LocalScalarValue materialize_selected_inline_union(
+    const SnapshotModuleAddress& owner, std::string_view name,
+    const LocalPointeeType& union_type, const SnapshotMemoryRead& memory) {
+  if (union_type.kind != LocalValueKind::Union || union_type.byte_size == 0 ||
+      union_type.byte_size > kMaxLocalStructSize || union_type.members.empty() ||
+      union_type.members.size() > kMaxLocalStructMembers ||
+      memory.bytes.size() != union_type.byte_size) {
+    throw std::runtime_error(
+        "selected-inline union bytes exceed the bounded overlapping-storage model");
+  }
+  LocalScalarValue result{owner.module_path, std::string(name), 0,
+                          union_type.byte_size, false, LocalValueKind::Union};
+  result.members.reserve(union_type.members.size());
+  for (const auto& member : union_type.members) {
+    if (member.offset != 0 || member.kind != LocalValueKind::Integer ||
+        member.pointee_type || member.byte_size == 0 ||
+        member.byte_size > sizeof(std::uint64_t) ||
+        member.byte_size > union_type.byte_size) {
+      throw std::logic_error(
+          "selected-inline union member violates bounded shared-storage semantics");
+    }
+    result.members.push_back(LocalStructMember{
+        member.name, decode_integer(memory.bytes, 0, member.byte_size),
+        member.byte_size, member.is_signed, LocalValueKind::Integer, {}});
+  }
+  if (memory.provenance == SnapshotMemoryProvenance::Core) {
+    result.storage = LocalValueStorage::SnapshotCoreMemory;
+  } else {
+    if (memory.module_path != owner.module_path) {
+      throw std::logic_error(
+          "selected-inline union artifact ownership changed during value read");
+    }
+    result.storage = LocalValueStorage::SnapshotRuntimeArtifact;
+    result.storage_module_path = memory.module_path;
+    result.storage_file_path = memory.module_file_path;
+    result.storage_file_offset = memory.artifact_file_offset;
+  }
+  return result;
+}
+
+'''
+          replace_one(
+              'src/dwarf/source_lookup.cpp',
+              'LocalScalarValue materialize_selected_inline_structure(\n',
+              union_materializer + 'LocalScalarValue materialize_selected_inline_structure(\n')
+
+          regex_one(
+              'src/dwarf/source_lookup.cpp',
+              r'  const auto pointee_type = resolve_pointer_pointee_type\(dies, type->number\);\n  const auto direct_structure =.*?  if \(!direct_structure && !direct_array &&',
+              '''  const auto pointee_type = resolve_pointer_pointee_type(dies, type->number);
+  const auto direct_structure =
+      pointee_type ? std::optional<LocalPointeeType>{}
+                   : selected_inline_direct_structure_type(dies, type->number);
+  const auto direct_union =
+      (pointee_type || direct_structure)
+          ? std::optional<LocalPointeeType>{}
+          : selected_inline_direct_union_type(dies, type->number);
+  const auto direct_array =
+      (pointee_type || direct_structure || direct_union)
+          ? std::optional<SelectedInlineFixedArrayType>{}
+          : selected_inline_fixed_array_type(dies, type->number);
+  const auto value_type =
+      pointee_type
+          ? ValueType{sizeof(std::uintptr_t), false, LocalValueKind::Pointer, {}}
+          : direct_structure
+                ? ValueType{direct_structure->byte_size, false,
+                            LocalValueKind::Structure, {}}
+                : direct_union
+                      ? ValueType{direct_union->byte_size, false,
+                                  LocalValueKind::Union, {}}
+                      : direct_array
+                            ? ValueType{direct_array->byte_size, false,
+                                        LocalValueKind::Array, {}}
+                            : resolve_value_type(dies, type->number);
+  if (!direct_structure && !direct_union && !direct_array &&''')
+
+          replace_one(
+              'src/dwarf/source_lookup.cpp',
+              '  if (direct_array) {\n    return materialize_selected_inline_array(owner, requested_name,\n                                             *direct_array, memory);\n  }\n  auto result =\n',
+              '  if (direct_union) {\n    return materialize_selected_inline_union(owner, requested_name,\n                                             *direct_union, memory);\n  }\n  if (direct_array) {\n    return materialize_selected_inline_array(owner, requested_name,\n                                             *direct_array, memory);\n  }\n  auto result =\n')
+
+          replace_one(
+              'src/dwarf/source_lookup.cpp',
+              '  if (direct_array) {\n    throw std::runtime_error(\n        "frame-zero selected-inline fixed-array materialization is outside current compiler evidence");\n  }\n',
+              '  if (direct_union) {\n    throw std::runtime_error(\n        "frame-zero selected-inline union materialization is outside current compiler evidence");\n  }\n  if (direct_array) {\n    throw std::runtime_error(\n        "frame-zero selected-inline fixed-array materialization is outside current compiler evidence");\n  }\n')
+
+          union_lookup = r'''inline const LocalStructMember& union_member(
+    const LocalScalarValue& value, std::string_view member_name) {
+  if (member_name.empty()) {
+    throw std::invalid_argument("selected-inline union member name must not be empty");
+  }
+  if (value.kind != LocalValueKind::Union || value.members.empty()) {
+    throw std::runtime_error(
+        "selected-inline local is not a materialized bounded union: " + value.name);
+  }
+  const auto member = std::find_if(
+      value.members.begin(), value.members.end(),
+      [member_name](const LocalStructMember& candidate) {
+        return candidate.name == member_name;
+      });
+  if (member == value.members.end()) {
+    throw std::runtime_error(
+        "bounded selected-inline union has no member named: " +
+        std::string(member_name));
+  }
+  if (member->kind != LocalValueKind::Integer || member->pointee_type ||
+      member->byte_size == 0 || member->byte_size > sizeof(std::uint64_t)) {
+    throw std::runtime_error(
+        "selected-inline union member kind is outside the bounded explicit-selection model");
+  }
+  return *member;
+}
+
+'''
+          replace_one(
+              'src/dwarf/inline_member.hpp',
+              '}  // namespace inline_member_detail\n',
+              union_lookup + '}  // namespace inline_member_detail\n')
+
+          union_api = r'''inline LocalScalarValue inspect_inline_local_union_member(
+    const LocalScalarValue& value, std::string_view member_name) {
+  const auto& member = inline_member_detail::union_member(value, member_name);
+  LocalScalarValue result{value.module_path,
+                          value.name + "." + std::string(member_name),
+                          member.raw_value, member.byte_size,
+                          member.is_signed, member.kind};
+  inline_member_detail::copy_storage(result, value);
+  return result;
+}
+
+'''
+          replace_one(
+              'src/dwarf/inline_member.hpp',
+              'inline LocalScalarValue dereference_inline_local_aggregate_member(\n',
+              union_api + 'inline LocalScalarValue dereference_inline_local_aggregate_member(\n')
+
+          session_api = r'''  [[nodiscard]] LocalScalarValue inspect_union_member(
+      std::string_view name, std::string_view member_name) const {
+    const auto& frame = selected_frame();
+    validate_selected_frame(frame);
+    if (!selected_inline_context_) {
+      throw std::logic_error(
+          "union member selection requires a selected inline context");
+    }
+    if (selected_inline_context_->module_path != frame.module_path) {
+      throw std::logic_error("selected inline context belongs to a different module");
+    }
+    const auto value = inspect_inline_local_value(
+        snapshot_, frame, selected_inline_context_->die_offset, name, module_paths_);
+    return inspect_inline_local_union_member(value, member_name);
+  }
+
+'''
+          replace_one(
+              'src/snapshot/session.hpp',
+              '  [[nodiscard]] LocalScalarValue inspect_array_element(\n',
+              session_api + '  [[nodiscard]] LocalScalarValue inspect_array_element(\n')
+
+          replace_one(
+              'src/cli/core_main.cpp',
+              '  if (value.kind == mdbg::LocalValueKind::Structure) {\n',
+              '  if (value.kind == mdbg::LocalValueKind::Union) {\n    std::cout << "union{";\n    for (std::size_t index = 0; index < value.members.size(); ++index) {\n      if (index != 0) std::cout << ", ";\n      std::cout << value.members[index].name;\n    }\n    std::cout << \'}\';\n  } else if (value.kind == mdbg::LocalValueKind::Structure) {\n')
+          replace_one(
+              'src/cli/core_main.cpp',
+              '  if (value.kind == mdbg::LocalValueKind::Floating) {\n    std::cout << "floating";\n  } else if (value.kind == mdbg::LocalValueKind::Array) {\n',
+              '  if (value.kind == mdbg::LocalValueKind::Floating) {\n    std::cout << "floating";\n  } else if (value.kind == mdbg::LocalValueKind::Union) {\n    std::cout << "union";\n  } else if (value.kind == mdbg::LocalValueKind::Array) {\n')
+          replace_one(
+              'src/cli/core_main.cpp',
+              '               "  aggregate-member <name> <member>  select one by-value aggregate member\\n"\n',
+              '               "  aggregate-member <name> <member>  select one by-value aggregate member\\n"\n               "  union-member <name> <member>  explicitly select one overlapping union member\\n"\n')
+          union_command = r'''      if (command == "union-member") {
+        std::string name;
+        std::string member;
+        std::string extra;
+        if (!(input >> name >> member) || (input >> extra)) {
+          throw std::invalid_argument("usage: union-member <name> <member>");
+        }
+        print_value(session.inspect_union_member(name, member));
+        continue;
+      }
+'''
+          replace_one(
+              'src/cli/core_main.cpp',
+              '      if (command == "deref-aggregate-member") {\n',
+              union_command + '      if (command == "deref-aggregate-member") {\n')
+          PY
+          git diff --check
+          cmake -S . -B build-phase39 -DCMAKE_BUILD_TYPE=Debug
+          cmake --build build-phase39 --target mdbg-core --parallel 2
+          git show HEAD^:.github/workflows/core-inline-evidence.yml > .github/workflows/core-inline-evidence.yml
+          git config user.name "LeiZ"
+          git config user.email "52287354+Lei-TzuY@users.noreply.github.com"
+          git add src/dwarf/local_value.hpp src/dwarf/source_lookup.cpp \
+            src/dwarf/inline_member.hpp src/snapshot/session.hpp src/cli/core_main.cpp \
+            .github/workflows/core-inline-evidence.yml
+          git commit -m "feat: add explicit selected-inline union member selection"
+          git push origin HEAD:feat/selected-inline-union

@@ -33,7 +33,8 @@ def selected_enum_bindings(records, by_offset):
                 continue
             if resolved_name(child, by_offset) != "caller_mode":
                 continue
-            if child["attrs"].get("location"):
+            location = child["attrs"].get("location")
+            if location:
                 result.append(child)
     return result
 
@@ -92,6 +93,13 @@ def main():
         raise RuntimeError(
             "caller_mode has no compiler-produced concrete selected-inline DW_AT_location"
         )
+    for binding in bindings:
+        location = binding["attrs"].get("location", "")
+        if "DW_OP_fbreg" not in location:
+            raise RuntimeError(
+                "caller_mode does not use the already-supported caller-frame DW_OP_fbreg location: "
+                + location
+            )
 
     enum_types = []
     for binding in bindings:
@@ -129,7 +137,8 @@ def main():
 
     print(
         "caller_mode compiler evidence: "
-        f"binding-count={len(bindings)} type=DW_TAG_enumeration_type byte-size=4 "
+        f"binding-count={len(bindings)} location=DW_OP_fbreg "
+        "type=DW_TAG_enumeration_type byte-size=4 "
         f"{'signed' if is_signed else 'unsigned'} representation={representation} "
         "CallerInlineIdle=3 CallerInlineReady=7 CallerInlineBusy=42"
     )

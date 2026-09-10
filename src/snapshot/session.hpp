@@ -121,6 +121,22 @@ class CoreInspectionSession {
     return dereference_local_pointer(snapshot_, frame, name, module_paths_);
   }
 
+  [[nodiscard]] LocalScalarValue inspect_pointer_member(
+      std::string_view name, std::string_view member_name) const {
+    const auto& frame = selected_frame();
+    validate_selected_frame(frame);
+    return inspect_local_pointer_member(
+        snapshot_, frame, name, member_name, module_paths_);
+  }
+
+  [[nodiscard]] LocalScalarValue dereference_pointer_member(
+      std::string_view name, std::string_view member_name) const {
+    const auto& frame = selected_frame();
+    validate_selected_frame(frame);
+    return dereference_local_pointer_member(
+        snapshot_, frame, name, member_name, module_paths_);
+  }
+
  private:
   void validate_selected_frame(const SnapshotInspectionFrameContext& frame) const {
     validate_snapshot_inspection_frame(snapshot_, frame);

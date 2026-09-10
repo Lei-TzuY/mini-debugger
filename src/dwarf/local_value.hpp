@@ -24,11 +24,18 @@ enum class LocalValueStorage {
   SnapshotRuntimeArtifact
 };
 
+struct LocalPointerPointeeType {
+  std::size_t byte_size;
+  bool is_signed;
+};
+
 struct LocalStructMemberType {
   std::string name;
   std::size_t offset;
   std::size_t byte_size;
   bool is_signed;
+  LocalValueKind kind{LocalValueKind::Integer};
+  std::optional<LocalPointerPointeeType> pointee_type{};
 };
 
 struct LocalPointeeType {
@@ -43,6 +50,8 @@ struct LocalStructMember {
   std::uint64_t raw_value;
   std::size_t byte_size;
   bool is_signed;
+  LocalValueKind kind{LocalValueKind::Integer};
+  std::optional<LocalPointerPointeeType> pointee_type{};
 };
 
 struct LocalIntegerValue {
@@ -79,6 +88,14 @@ LocalScalarValue inspect_local_value(const CoreSnapshot& snapshot,
 LocalScalarValue dereference_local_pointer(
     const CoreSnapshot& snapshot, const SnapshotInspectionFrameContext& frame,
     std::string_view name, const SnapshotModulePathResolver& module_paths);
+LocalScalarValue inspect_local_pointer_member(
+    const CoreSnapshot& snapshot, const SnapshotInspectionFrameContext& frame,
+    std::string_view name, std::string_view member_name,
+    const SnapshotModulePathResolver& module_paths);
+LocalScalarValue dereference_local_pointer_member(
+    const CoreSnapshot& snapshot, const SnapshotInspectionFrameContext& frame,
+    std::string_view name, std::string_view member_name,
+    const SnapshotModulePathResolver& module_paths);
 
 LocalIntegerValue inspect_local_integer(const Debugger& debugger,
                                         const ElfFile& preferred_elf,

@@ -1,0 +1,53 @@
+name: core-inline-evidence
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  selected-inline-aggregate:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - compiler: gcc
+            cc: gcc
+            cxx: g++
+          - compiler: clang
+            cc: clang
+            cxx: clang++
+    name: selected-inline-aggregate (${{ matrix.compiler }})
+    env:
+      CC: ${{ matrix.cc }}
+      CXX: ${{ matrix.cxx }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build optimized caller-inline fixtures
+        run: |
+          "$CC" -O2 -g -gdwarf-4 -fPIE -pie \
+            tests/fixtures/caller_inline_core_fixture.c \
+            tests/fixtures/caller_inline_crash_leaf.c -pthread \
+            -o /tmp/caller-inline-pie
+          "$CC" -O2 -g -gdwarf-4 -fno-pie -no-pie \
+            tests/fixtures/caller_inline_core_fixture.c \
+            tests/fixtures/caller_inline_crash_leaf.c -pthread \
+            -o /tmp/caller-inline-nopie
+      - name: Verify compiler-produced inline aggregate binding
+        run: |
+          python3 tests/core_caller_inline_dwarf_oracle.py /tmp/caller-inline-pie
+          python3 tests/core_caller_inline_dwarf_oracle.py /tmp/caller-inline-nopie
+      - name: Build core inspection surface
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
+          cmake --build build --target mdbg-core --parallel 2
+          "$CXX" -std=c++17 -Wall -Wextra -Wpedantic -Werror -Isrc \
+            tests/core_inline_aggregate_session_integration.cpp \
+            build/libmdbg_core.a -pthread \
+            -o /tmp/core-inline-aggregate-session
+      - name: Verify selected-inline aggregate session and CLI
+        run: |
+          sudo sysctl -w kernel.core_pattern=/tmp/mdbg-core-%p
+          ulimit -c unlimited
+          /tmp/core-inline-aggregate-session /tmp/caller-inline-pie build/mdbg-core
+          /tmp/core-inline-aggregate-session /tmp/caller-inline-nopie build/mdbg-core

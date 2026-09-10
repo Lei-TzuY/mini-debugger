@@ -95,8 +95,34 @@ def addr2line_contexts(path, address):
     return [(lines[i].strip(), lines[i + 1].strip()) for i in range(0, len(lines), 2)]
 
 
+def unwrap_type(record, by_offset, context):
+    current = record
+    wrappers = {"DW_TAG_typedef", "DW_TAG_const_type", "DW_TAG_volatile_type", "DW_TAG_restrict_type"}
+    for _ in range(16):
+        if current["tag"] not in wrappers:
+            return current
+        wrapped = current["attrs"].get("type")
+        if not wrapped:
+            raise RuntimeError(f"{context}: type wrapper has no DW_AT_type")
+        current = by_offset.get(ref_offset(wrapped, context))
+        if current is None:
+            raise RuntimeError(f"{context}: type wrapper references an unknown DIE")
+    raise RuntimeError(f"{context}: type wrapper chain is too deep")
+
+
+def referenced_type(record, by_offset, context):
+    type_text = resolved_attr(record, by_offset, "type")
+    if not type_text:
+        raise RuntimeError(f"{context}: no resolved DW_AT_type")
+    result = by_offset.get(ref_offset(type_text, context))
+    if result is None:
+        raise RuntimeError(f"{context}: references an unknown type DIE")
+    return unwrap_type(result, by_offset, context)
+
+
 def selected_inner_bindings(records, by_offset):
     result = {}
+    wanted = {"caller_shadow", "caller_pointer", "caller_aggregate_pointer"}
     for pos, record in enumerate(records):
         if record["tag"] != "DW_TAG_inlined_subroutine":
             continue
@@ -108,21 +134,88 @@ def selected_inner_bindings(records, by_offset):
             if child["tag"] not in {"DW_TAG_variable", "DW_TAG_formal_parameter"}:
                 continue
             name = resolved_name(child, by_offset)
-            if name not in {"caller_shadow", "caller_pointer"}:
+            if name not in wanted:
                 continue
             location = child["attrs"].get("location")
             if not location:
                 continue
-            type_text = resolved_attr(child, by_offset, "type")
-            if not type_text:
-                raise RuntimeError(f"{name} has no resolved DW_AT_type")
-            type_die = by_offset.get(ref_offset(type_text, f"{name} type"))
-            if type_die is None:
-                raise RuntimeError(f"{name} references an unknown type DIE")
+            type_die = referenced_type(child, by_offset, f"{name} type")
             result.setdefault(name, []).append(
                 (child["offset"], child["depth"], location, type_die["tag"], type_die["offset"])
             )
     return result
+
+
+def validate_aggregate_pointer(records, by_offset, bindings):
+    entries = bindings.get("caller_aggregate_pointer", [])
+    if not entries:
+        raise RuntimeError(
+            "caller_aggregate_pointer has no compiler-produced concrete DW_AT_location"
+        )
+
+    candidates = []
+    binding_offsets = {entry[0] for entry in entries}
+    for record in records:
+        if record["offset"] not in binding_offsets:
+            continue
+        pointer = referenced_type(record, by_offset, "caller_aggregate_pointer type")
+        if pointer["tag"] != "DW_TAG_pointer_type":
+            continue
+        pointee_text = pointer["attrs"].get("type")
+        if not pointee_text:
+            raise RuntimeError("caller_aggregate_pointer pointer type has no pointee")
+        pointee = by_offset.get(ref_offset(pointee_text, "aggregate pointee"))
+        if pointee is None:
+            raise RuntimeError("caller_aggregate_pointer pointee DIE is unavailable")
+        pointee = unwrap_type(pointee, by_offset, "aggregate pointee")
+        if pointee["tag"] == "DW_TAG_structure_type":
+            candidates.append(pointee)
+
+    if not candidates:
+        raise RuntimeError(
+            "caller_aggregate_pointer does not resolve to a compiler-owned structure type"
+        )
+
+    structure = candidates[0]
+    try:
+        position = next(i for i, record in enumerate(records) if record["offset"] == structure["offset"])
+    except StopIteration as error:
+        raise RuntimeError("aggregate structure DIE disappeared from the parsed stream") from error
+
+    members = {}
+    for child in records[position + 1 :]:
+        if child["depth"] <= structure["depth"]:
+            break
+        if child["depth"] != structure["depth"] + 1 or child["tag"] != "DW_TAG_member":
+            continue
+        name = resolved_name(child, by_offset)
+        if name in {"direct", "linked"}:
+            members[name] = child
+
+    if set(members) != {"direct", "linked"}:
+        raise RuntimeError(f"aggregate direct-member DIEs are incomplete: {sorted(members)}")
+    for name, member in members.items():
+        if "data_member_location" not in member["attrs"]:
+            raise RuntimeError(f"aggregate member {name} has no DW_AT_data_member_location")
+
+    direct_type = referenced_type(members["direct"], by_offset, "direct member type")
+    if direct_type["tag"] != "DW_TAG_base_type":
+        raise RuntimeError("aggregate direct member is not a compiler base type")
+
+    linked_type = referenced_type(members["linked"], by_offset, "linked member type")
+    if linked_type["tag"] != "DW_TAG_pointer_type":
+        raise RuntimeError("aggregate linked member is not a compiler pointer type")
+    linked_pointee_text = linked_type["attrs"].get("type")
+    if not linked_pointee_text:
+        raise RuntimeError("aggregate linked pointer has no pointee type")
+    linked_pointee = by_offset.get(ref_offset(linked_pointee_text, "linked member pointee"))
+    if linked_pointee is None:
+        raise RuntimeError("aggregate linked pointer references an unknown pointee")
+    linked_pointee = unwrap_type(linked_pointee, by_offset, "linked member pointee")
+    if linked_pointee["tag"] != "DW_TAG_base_type":
+        raise RuntimeError("aggregate linked pointer does not target a compiler base type")
+
+    return structure, members
 
 
 def main():
@@ -141,26 +234,38 @@ def main():
     bindings = selected_inner_bindings(records, by_offset)
     shadow = bindings.get("caller_shadow", [])
     pointer = bindings.get("caller_pointer", [])
+    aggregate_pointer = bindings.get("caller_aggregate_pointer", [])
     if not shadow:
         raise RuntimeError("caller_shadow has no compiler-produced concrete DW_AT_location")
     if not pointer:
         raise RuntimeError("caller_pointer has no compiler-produced concrete DW_AT_location")
+    if not aggregate_pointer:
+        raise RuntimeError(
+            "caller_aggregate_pointer has no compiler-produced concrete DW_AT_location"
+        )
     if not any(entry[3] == "DW_TAG_pointer_type" for entry in pointer):
         raise RuntimeError(
             "caller_pointer compiler binding does not resolve to a DW_TAG_pointer_type"
         )
+
+    structure, members = validate_aggregate_pointer(records, by_offset, bindings)
 
     print(f"caller-inline resume probe: 0x{resume:x}")
     print("caller-inline addr2line chain: " + " -> ".join(
         f"{name}@{location}" for name, location in contexts[: len(wanted)]
     ))
     print("caller_inline_inner concrete DWARF bindings:")
-    for name in ("caller_shadow", "caller_pointer"):
+    for name in ("caller_shadow", "caller_pointer", "caller_aggregate_pointer"):
         for offset, depth, location, type_tag, type_offset in bindings[name]:
             print(
                 f"  {name}: die=0x{offset:x} depth={depth} location={location} "
                 f"type={type_tag}@0x{type_offset:x}"
             )
+    print(
+        "caller_aggregate_pointer structure: "
+        f"die=0x{structure['offset']:x} direct={members['direct']['attrs']['data_member_location']} "
+        f"linked={members['linked']['attrs']['data_member_location']}"
+    )
 
     try:
         loc_dump = run("readelf", "--debug-dump=loc", path)

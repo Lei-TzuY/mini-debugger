@@ -1,18 +1,31 @@
 #pragma once
 
+struct CallerInlineAggregate {
+  int direct;
+  const int* linked;
+};
+
 extern int caller_inline_pointee;
-int caller_inline_crash_leaf(int token, const int* observed,
-                             const int* const* selected);
+extern int caller_inline_member_pointee;
+extern struct CallerInlineAggregate caller_inline_aggregate;
+
+int caller_inline_crash_leaf(
+    int token, const int* observed, const int* const* selected,
+    const struct CallerInlineAggregate* const* selected_aggregate);
 
 static __attribute__((always_inline)) inline int caller_inline_inner(int seed) {
   int caller_shadow = seed + 43;
   const int* caller_pointer = &caller_inline_pointee;
-  int crashed = caller_inline_crash_leaf(seed + 5, &caller_shadow, &caller_pointer);
+  const struct CallerInlineAggregate* caller_aggregate_pointer =
+      &caller_inline_aggregate;
+  int crashed = caller_inline_crash_leaf(seed + 5, &caller_shadow, &caller_pointer,
+                                         &caller_aggregate_pointer);
   __asm__ volatile(
       ".globl snapshot_caller_inline_resume_probe\n"
       "snapshot_caller_inline_resume_probe:\n"
       ::: "memory");
-  return crashed + caller_shadow + *caller_pointer;
+  return crashed + caller_shadow + *caller_pointer +
+         caller_aggregate_pointer->direct + *caller_aggregate_pointer->linked;
 }
 
 static __attribute__((always_inline)) inline int caller_inline_outer(int seed) {

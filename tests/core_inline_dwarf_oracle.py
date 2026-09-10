@@ -170,6 +170,7 @@ def require_mdbg_core_callsite_ownership(path):
                 "inline\n"
                 "inline 1\n"
                 "locals\n"
+                "print shadow_value\n"
                 "quit\n"
             ),
             text=True,
@@ -207,19 +208,12 @@ def require_mdbg_core_callsite_ownership(path):
             "selected inner inline context lost compiler-owned scalar catalogue entries"
         )
 
-    candidates = {
-        "outer_only": "!outer_only = 0x81 [4-byte signed]",
-        "inner_only": "!inner_only = 0x114 [4-byte signed]",
-        "shadow_value": "!shadow_value = 0x141 [4-byte signed]",
-    }
-    supported = [name for name, marker in candidates.items() if marker in output[:selected]]
-    print("mdbg-core inline scalar candidate probe:\n" + output)
-    if not supported:
+    expected_inner = "!shadow_value = 0x141 [4-byte signed]"
+    print("mdbg-core selected-inline scalar probe:\n" + output)
+    if expected_inner not in selected_output:
         raise RuntimeError(
-            "compiler artifact retained no inline scalar that the existing bounded snapshot "
-            "evaluator can materialize"
+            "selected inner inline context did not materialize its shadow_value as 0x141"
         )
-    print("supported inline scalar candidates: " + ", ".join(supported))
 
 
 def main():

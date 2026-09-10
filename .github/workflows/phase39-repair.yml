@@ -1,0 +1,58 @@
+name: phase39-repair
+
+on:
+  push:
+    branches:
+      - feat/selected-inline-union
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Apply staged union patch and self-clean
+        env:
+          STAGED_HEAD: a9a2764e0da53a8ead8278a4424a8ada1c658311
+          CLEAN_PARENT: 1e42712276b9c484f665fdfd54c9d65353f92570
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('.github/workflows/core-inline-evidence.yml')
+          text = path.read_text()
+          start_marker = "          python3 - <<'PY'\n"
+          end_marker = "\n          PY\n"
+          start = text.index(start_marker) + len(start_marker)
+          end = text.index(end_marker, start)
+          body = text[start:end]
+          normalized = '\n'.join(
+              line[10:] if line.startswith('          ') else line
+              for line in body.splitlines()
+          ) + '\n'
+          Path('/tmp/apply-phase39.py').write_text(normalized)
+          PY
+          python3 /tmp/apply-phase39.py
+          git diff --check
+          cmake -S . -B build-phase39 -DCMAKE_BUILD_TYPE=Debug
+          cmake --build build-phase39 --target mdbg-core --parallel 2
+          "$CXX" -std=c++17 -Wall -Wextra -Wpedantic -Werror -Isrc \
+            tests/core_inline_union_session_integration.cpp \
+            build-phase39/libmdbg_core.a -pthread \
+            -o /tmp/core-inline-union-session
+          git show "$CLEAN_PARENT:.github/workflows/core-inline-evidence.yml" \
+            > .github/workflows/core-inline-evidence.yml
+          rm .github/workflows/phase39-repair.yml
+          git config user.name "LeiZ"
+          git config user.email "52287354+Lei-TzuY@users.noreply.github.com"
+          git add src/dwarf/local_value.hpp src/dwarf/source_lookup.cpp \
+            src/dwarf/inline_member.hpp src/snapshot/session.hpp src/cli/core_main.cpp \
+            .github/workflows/core-inline-evidence.yml \
+            .github/workflows/phase39-repair.yml
+          git commit -m "feat: add explicit selected-inline union member selection"
+          git push origin HEAD:feat/selected-inline-union

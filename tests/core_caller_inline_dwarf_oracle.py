@@ -50,6 +50,13 @@ def ref_offset(value, context):
     return int(match.group(1), 16)
 
 
+def numeric_attr(value, context):
+    matches = re.findall(r"(?:0x[0-9a-fA-F]+|\d+)", value)
+    if not matches:
+        raise RuntimeError(f"{context}: numeric attribute is unavailable: {value}")
+    return int(matches[-1], 0)
+
+
 def resolved_attr(record, by_offset, name):
     current = record
     for _ in range(8):
@@ -127,6 +134,7 @@ def selected_inner_bindings(records, by_offset):
         "caller_pointer",
         "caller_aggregate_pointer",
         "caller_direct_aggregate",
+        "caller_fixed_array",
     }
     for pos, record in enumerate(records):
         if record["tag"] != "DW_TAG_inlined_subroutine":
@@ -248,6 +256,76 @@ def validate_direct_aggregate(records, by_offset, bindings, expected_structure):
     return structures[0]
 
 
+def validate_fixed_array(records, by_offset, bindings):
+    entries = bindings.get("caller_fixed_array", [])
+    if not entries:
+        raise RuntimeError(
+            "caller_fixed_array has no compiler-produced concrete DW_AT_location"
+        )
+    binding_offsets = {entry[0] for entry in entries}
+    arrays = []
+    for record in records:
+        if record["offset"] not in binding_offsets:
+            continue
+        value_type = referenced_type(record, by_offset, "caller_fixed_array type")
+        if value_type["tag"] != "DW_TAG_array_type":
+            raise RuntimeError(
+                "caller_fixed_array concrete binding does not resolve to DW_TAG_array_type"
+            )
+        arrays.append(value_type)
+    if not arrays:
+        raise RuntimeError("caller_fixed_array has no compiler-owned array type")
+
+    array = arrays[0]
+    element_text = array["attrs"].get("type")
+    if not element_text:
+        raise RuntimeError("caller_fixed_array array type has no DW_AT_type")
+    element = by_offset.get(ref_offset(element_text, "caller_fixed_array element type"))
+    if element is None:
+        raise RuntimeError("caller_fixed_array element type DIE is unavailable")
+    element = unwrap_type(element, by_offset, "caller_fixed_array element type")
+    if element["tag"] != "DW_TAG_base_type":
+        raise RuntimeError("caller_fixed_array element is not a compiler base type")
+    size_text = element["attrs"].get("byte_size")
+    encoding_text = element["attrs"].get("encoding", "")
+    if not size_text or numeric_attr(size_text, "array element byte size") != 4:
+        raise RuntimeError("caller_fixed_array element is not a 4-byte compiler scalar")
+    if "signed" not in encoding_text and numeric_attr(encoding_text, "array element encoding") != 5:
+        raise RuntimeError("caller_fixed_array element is not a signed integer type")
+
+    try:
+        position = next(i for i, record in enumerate(records) if record["offset"] == array["offset"])
+    except StopIteration as error:
+        raise RuntimeError("caller_fixed_array array DIE disappeared from the parsed stream") from error
+    subranges = []
+    for child in records[position + 1 :]:
+        if child["depth"] <= array["depth"]:
+            break
+        if child["depth"] == array["depth"] + 1 and child["tag"] == "DW_TAG_subrange_type":
+            subranges.append(child)
+    if len(subranges) != 1:
+        raise RuntimeError(
+            f"caller_fixed_array requires exactly one direct subrange, found {len(subranges)}"
+        )
+    subrange = subranges[0]
+    lower = subrange["attrs"].get("lower_bound")
+    if lower and numeric_attr(lower, "array lower bound") != 0:
+        raise RuntimeError("caller_fixed_array lower bound is not zero")
+    count = subrange["attrs"].get("count")
+    upper = subrange["attrs"].get("upper_bound")
+    if count:
+        element_count = numeric_attr(count, "array element count")
+    elif upper:
+        element_count = numeric_attr(upper, "array upper bound") + 1
+    else:
+        raise RuntimeError("caller_fixed_array subrange has neither count nor upper bound")
+    if element_count != 3:
+        raise RuntimeError(
+            f"caller_fixed_array compiler subrange has unexpected element count: {element_count}"
+        )
+    return array, subrange, element
+
+
 def main():
     if len(sys.argv) != 2:
         raise SystemExit("usage: core_caller_inline_dwarf_oracle.py <fixture>")
@@ -266,6 +344,7 @@ def main():
     pointer = bindings.get("caller_pointer", [])
     aggregate_pointer = bindings.get("caller_aggregate_pointer", [])
     direct_aggregate = bindings.get("caller_direct_aggregate", [])
+    fixed_array = bindings.get("caller_fixed_array", [])
     if not shadow:
         raise RuntimeError("caller_shadow has no compiler-produced concrete DW_AT_location")
     if not pointer:
@@ -278,6 +357,10 @@ def main():
         raise RuntimeError(
             "caller_direct_aggregate has no compiler-produced concrete DW_AT_location"
         )
+    if not fixed_array:
+        raise RuntimeError(
+            "caller_fixed_array has no compiler-produced concrete DW_AT_location"
+        )
     if not any(entry[3] == "DW_TAG_pointer_type" for entry in pointer):
         raise RuntimeError(
             "caller_pointer compiler binding does not resolve to a DW_TAG_pointer_type"
@@ -285,6 +368,7 @@ def main():
 
     structure, members = validate_aggregate_pointer(records, by_offset, bindings)
     direct_structure = validate_direct_aggregate(records, by_offset, bindings, structure)
+    array, subrange, element = validate_fixed_array(records, by_offset, bindings)
 
     print(f"caller-inline resume probe: 0x{resume:x}")
     print("caller-inline addr2line chain: " + " -> ".join(
@@ -296,6 +380,7 @@ def main():
         "caller_pointer",
         "caller_aggregate_pointer",
         "caller_direct_aggregate",
+        "caller_fixed_array",
     ):
         for offset, depth, location, type_tag, type_offset in bindings[name]:
             print(
@@ -310,6 +395,11 @@ def main():
     print(
         "caller_direct_aggregate structure: "
         f"die=0x{direct_structure['offset']:x}"
+    )
+    print(
+        "caller_fixed_array type: "
+        f"die=0x{array['offset']:x} subrange=0x{subrange['offset']:x} "
+        f"element=0x{element['offset']:x} count=3 byte_size=4 signed"
     )
 
     try:

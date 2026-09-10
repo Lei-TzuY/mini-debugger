@@ -21,6 +21,7 @@ constexpr std::uint64_t kCallerStackLocalValue = UINT64_C(0xcafebabedeadbeef);
 constexpr std::uint64_t kPointerPointeeValue = UINT64_C(0x8877665544332211);
 constexpr std::uint64_t kAggregateFirst = UINT64_C(0x0123456789abcdef);
 constexpr std::uint64_t kAggregateSecond = UINT64_C(0xfedcba9876543210);
+constexpr std::uint64_t kTypedMarker = UINT64_C(0x13579bdf2468ace0);
 
 void require(bool condition, const std::string& message) {
   if (!condition) throw std::runtime_error(message);
@@ -54,14 +55,9 @@ std::string shell_quote(const std::string& text) {
   return result;
 }
 
-std::string run_core_cli(const std::string& executable,
-                         const std::string& core_path) {
-  const std::string command =
-      "printf 'bt\\nframe 1\\nlist\\nprint caller_stack_local\\nquit\\n' | " +
-      shell_quote(executable) + " " + shell_quote(core_path) + " 2>&1";
+std::string run_command(const std::string& command, const std::string& context) {
   FILE* pipe = ::popen(command.c_str(), "r");
-  if (pipe == nullptr) throw std::runtime_error("failed to launch mdbg-core subprocess");
-
+  if (pipe == nullptr) throw std::runtime_error("failed to launch " + context);
   std::string output;
   std::array<char, 512> buffer{};
   while (std::fgets(buffer.data(), static_cast<int>(buffer.size()), pipe) != nullptr) {
@@ -69,8 +65,25 @@ std::string run_core_cli(const std::string& executable,
   }
   const int status = ::pclose(pipe);
   require(status != -1 && WIFEXITED(status) && WEXITSTATUS(status) == 0,
-          "mdbg-core subprocess did not exit cleanly: " + output);
+          context + " did not exit cleanly: " + output);
   return output;
+}
+
+void require_typed_object_oracle(const std::string& executable) {
+  const auto output = run_command(
+      "python3 tests/core_typed_object_dwarf_oracle.py " + shell_quote(executable) +
+          " 2>&1",
+      "typed-object DWARF oracle");
+  require(output.find("typed-object DWARF oracle passed") != std::string::npos,
+          "typed-object DWARF oracle did not report compiler-proven evidence");
+}
+
+std::string run_core_cli(const std::string& executable,
+                         const std::string& core_path) {
+  const std::string command =
+      "printf 'print typed_pointer\\nderef typed_pointer\\nmember typed_pointer payload\\nderef-member typed_pointer payload\\nmember typed_pointer marker\\nbt\\nframe 1\\nlist\\nprint caller_stack_local\\nquit\\n' | " +
+      shell_quote(executable) + " " + shell_quote(core_path) + " 2>&1";
+  return run_command(command, "mdbg-core subprocess");
 }
 
 void require_source_value(const mdbg::LocalScalarValue& value, double expected,
@@ -226,6 +239,104 @@ void require_aggregate_pointer_dereference(const mdbg::CoreInspectionSession& se
   }
 }
 
+void require_typed_pointer_evidence(const mdbg::CoreInspectionSession& session) {
+  const auto pointer = session.inspect_value("typed_pointer");
+  require(pointer.name == "typed_pointer",
+          "typed pointer lookup returned the wrong source name");
+  require(pointer.kind == mdbg::LocalValueKind::Pointer &&
+              pointer.byte_size == sizeof(std::uintptr_t) && pointer.raw_value != 0,
+          "typed pointer did not retain bounded pointer identity");
+  require(pointer.pointee_type.has_value() &&
+              pointer.pointee_type->kind == mdbg::LocalValueKind::Structure &&
+              pointer.pointee_type->byte_size == 2 * sizeof(std::uint64_t),
+          "typed pointer did not retain its compiler-proven structure pointee");
+  require(pointer.pointee_type->members.size() == 2 &&
+              pointer.pointee_type->members[0].name == "payload" &&
+              pointer.pointee_type->members[0].kind == mdbg::LocalValueKind::Pointer &&
+              pointer.pointee_type->members[0].pointee_type.has_value() &&
+              pointer.pointee_type->members[0].pointee_type->byte_size ==
+                  sizeof(std::uint64_t) &&
+              pointer.pointee_type->members[1].name == "marker" &&
+              pointer.pointee_type->members[1].kind == mdbg::LocalValueKind::Integer,
+          "typed pointer did not retain the compiler-proven pointer-member graph");
+
+  const auto object = session.dereference_value("typed_pointer");
+  require(object.kind == mdbg::LocalValueKind::Structure &&
+              object.byte_size == 2 * sizeof(std::uint64_t) && object.members.size() == 2,
+          "typed pointer did not materialize the bounded containing structure");
+  require(object.members[0].name == "payload" &&
+              object.members[0].kind == mdbg::LocalValueKind::Pointer &&
+              object.members[0].raw_value != 0 &&
+              object.members[0].pointee_type.has_value(),
+          "typed structure did not preserve its pointer-valued payload member");
+  require(object.members[1].name == "marker" &&
+              object.members[1].kind == mdbg::LocalValueKind::Integer &&
+              object.members[1].raw_value == kTypedMarker,
+          "typed structure did not recover its deterministic marker member");
+  require(object.storage == mdbg::LocalValueStorage::SnapshotCoreMemory ||
+              object.storage == mdbg::LocalValueStorage::SnapshotRuntimeArtifact,
+          "typed structure object bypassed snapshot-memory provenance");
+}
+
+void require_typed_pointer_member_traversal(const mdbg::CoreInspectionSession& session) {
+  const auto object = session.dereference_value("typed_pointer");
+  const auto member = session.inspect_pointer_member("typed_pointer", "payload");
+  require(member.name == "typed_pointer->payload",
+          "pointer-member hop changed the bounded source-value name");
+  require(member.kind == mdbg::LocalValueKind::Pointer &&
+              member.byte_size == sizeof(std::uintptr_t) && !member.is_signed &&
+              member.raw_value != 0,
+          "pointer-member hop lost x86-64 pointer identity");
+  require(member.pointee_type.has_value() &&
+              member.pointee_type->kind == mdbg::LocalValueKind::Integer &&
+              member.pointee_type->byte_size == sizeof(std::uint64_t) &&
+              !member.pointee_type->is_signed,
+          "pointer-member hop lost bounded uint64_t pointee metadata");
+  require(member.storage == object.storage,
+          "pointer-member hop lost containing-object provenance");
+  if (member.storage == mdbg::LocalValueStorage::SnapshotRuntimeArtifact) {
+    require(!member.storage_module_path.empty() && !member.storage_file_path.empty(),
+            "artifact-backed pointer member lost runtime-artifact provenance");
+  }
+
+  const auto dereferenced =
+      session.dereference_pointer_member("typed_pointer", "payload");
+  require(dereferenced.name == "*(typed_pointer->payload)",
+          "second bounded dereference changed the source-value name");
+  require(dereferenced.kind == mdbg::LocalValueKind::Integer &&
+              dereferenced.byte_size == sizeof(std::uint64_t) &&
+              !dereferenced.is_signed,
+          "second bounded dereference lost uint64_t type identity");
+  require(dereferenced.raw_value == kPointerPointeeValue,
+          "second bounded dereference did not recover the deterministic pointee");
+  require(dereferenced.storage == mdbg::LocalValueStorage::SnapshotCoreMemory ||
+              dereferenced.storage == mdbg::LocalValueStorage::SnapshotRuntimeArtifact,
+          "second bounded dereference bypassed snapshot-memory provenance");
+  if (dereferenced.storage == mdbg::LocalValueStorage::SnapshotRuntimeArtifact) {
+    require(!dereferenced.storage_module_path.empty() &&
+                !dereferenced.storage_file_path.empty(),
+            "artifact-backed second dereference lost runtime-artifact provenance");
+  }
+
+  bool non_pointer_rejected = false;
+  try {
+    (void)session.inspect_pointer_member("typed_pointer", "marker");
+  } catch (const std::exception&) {
+    non_pointer_rejected = true;
+  }
+  require(non_pointer_rejected,
+          "typed member traversal accepted a non-pointer direct member");
+
+  bool unknown_member_rejected = false;
+  try {
+    (void)session.inspect_pointer_member("typed_pointer", "missing");
+  } catch (const std::exception&) {
+    unknown_member_rejected = true;
+  }
+  require(unknown_member_rejected,
+          "typed member traversal accepted an unknown direct member");
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -245,6 +356,7 @@ int main(int argc, char** argv) {
     require(mdbg::snapshot_frame_lookup_pc(session.selected_frame()) ==
                 session.selected_frame().runtime_pc,
             "frame-zero lookup PC was incorrectly normalized");
+    require_typed_object_oracle(session.selected_frame().module_path);
 
     const auto crash_fp = session.snapshot().floating_point_state(crash_tid);
     const auto sibling_fp = session.snapshot().floating_point_state(sibling_tid);
@@ -260,6 +372,8 @@ int main(int argc, char** argv) {
     require_stack_local(session);
     require_pointer_dereference(session);
     require_aggregate_pointer_dereference(session);
+    require_typed_pointer_evidence(session);
+    require_typed_pointer_member_traversal(session);
     const auto caller_resume_pc = require_caller_stack_local(session);
     const auto stale_caller_frame = session.selected_frame();
 
@@ -287,6 +401,14 @@ int main(int argc, char** argv) {
     const auto core_cli =
         (std::filesystem::path(argv[0]).parent_path() / "mdbg-core").string();
     const auto cli_output = run_core_cli(core_cli, argv[1]);
+    require(cli_output.find("typed_pointer->payload = 0x") != std::string::npos,
+            "mdbg-core did not expose the explicit typed pointer-member hop");
+    require(cli_output.find("*(typed_pointer->payload) = 0x8877665544332211") !=
+                std::string::npos,
+            "mdbg-core did not expose the second bounded typed dereference");
+    require(cli_output.find("bounded structure member is not a supported pointer: marker") !=
+                std::string::npos,
+            "mdbg-core did not reject a non-pointer direct member deterministically");
     require(cli_output.find("selected frame 1") != std::string::npos,
             "mdbg-core did not expose historical frame selection");
     require(cli_output.find("caller_with_stack_local") != std::string::npos,

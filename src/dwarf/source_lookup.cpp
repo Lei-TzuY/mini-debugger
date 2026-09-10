@@ -16,8 +16,11 @@ constexpr std::size_t kMaxInlineContexts = 8;
 constexpr std::size_t kMaxInlineRangeEntries = 64;
 constexpr std::size_t kMaxDiscoveredLocals = 64;
 constexpr std::uint64_t kInlineDwTagArrayType = 0x01;
+constexpr std::uint64_t kInlineDwTagEnumerationType = 0x04;
 constexpr std::uint64_t kInlineDwTagUnionType = 0x17;
 constexpr std::uint64_t kInlineDwTagSubrangeType = 0x21;
+constexpr std::uint64_t kInlineDwTagEnumerator = 0x28;
+constexpr std::uint64_t kInlineDwAtConstValue = 0x1c;
 constexpr std::uint64_t kInlineDwAtLowerBound = 0x22;
 constexpr std::uint64_t kInlineDwAtUpperBound = 0x2f;
 constexpr std::uint64_t kInlineDwAtCount = 0x37;
@@ -25,6 +28,7 @@ constexpr std::uint64_t kInlineDwAtBitOffset = 0x0c;
 constexpr std::uint64_t kInlineDwAtBitSize = 0x0d;
 constexpr std::uint64_t kInlineDwAtDataBitOffset = 0x6b;
 constexpr std::size_t kMaxSelectedInlineArrayElements = 64;
+constexpr std::size_t kMaxSelectedInlineEnumEntries = 64;
 
 std::vector<std::byte> read_debug_ranges(const std::string& path) {
   const auto sections = read_named_sections(path, {".debug_ranges"});
@@ -904,6 +908,123 @@ LocalScalarValue materialize_selected_inline_structure(
   return result;
 }
 
+bool selected_inline_enum_constant_form(std::uint64_t form) {
+  return form == kDwFormData1 || form == kDwFormData2 ||
+         form == kDwFormData4 || form == kDwFormData8 ||
+         form == kDwFormUdata || form == kDwFormImplicitConst;
+}
+
+std::optional<LocalEnumType> selected_inline_enum_type(
+    const std::vector<Die>& dies, std::uint64_t type_offset) {
+  for (unsigned depth = 0; depth < 16; ++depth) {
+    const auto index = die_index_by_offset(dies, type_offset);
+    if (!index) {
+      throw std::runtime_error("selected-inline enum type references an unknown DIE");
+    }
+    const auto& die = dies[*index];
+    if (die.tag == kDwTagTypedef || die.tag == kDwTagConstType) {
+      const auto* wrapped = attribute(die, kDwAtType);
+      if (wrapped == nullptr || wrapped->form != kDwFormRef4) {
+        throw std::runtime_error(
+            "selected-inline enum wrapper does not use DW_FORM_ref4");
+      }
+      type_offset = wrapped->number;
+      continue;
+    }
+    if (die.tag != kInlineDwTagEnumerationType) return std::nullopt;
+
+    const auto* name = attribute(die, kDwAtName);
+    const auto* size = attribute(die, kDwAtByteSize);
+    if (name == nullptr || name->text.empty()) {
+      throw std::runtime_error("selected-inline enum has no supported name");
+    }
+    if (size == nullptr || size->number == 0 ||
+        size->number > sizeof(std::uint64_t)) {
+      throw std::runtime_error(
+          "selected-inline enum has an unsupported scalar byte size");
+    }
+    const auto byte_size = static_cast<std::size_t>(size->number);
+
+    bool is_signed = false;
+    const auto* encoding = attribute(die, kDwAtEncoding);
+    const auto* underlying_ref = attribute(die, kDwAtType);
+    if (encoding != nullptr) {
+      if (encoding->number != kDwAteSigned &&
+          encoding->number != kDwAteUnsigned) {
+        throw std::runtime_error(
+            "selected-inline enum direct encoding is not signed/unsigned integer");
+      }
+      is_signed = encoding->number == kDwAteSigned;
+      if (underlying_ref != nullptr) {
+        if (underlying_ref->form != kDwFormRef4) {
+          throw std::runtime_error(
+              "selected-inline enum underlying type does not use DW_FORM_ref4");
+        }
+        const auto underlying = resolve_integer_type(dies, underlying_ref->number);
+        if (underlying.byte_size != byte_size ||
+            underlying.is_signed != is_signed) {
+          throw std::runtime_error(
+              "selected-inline enum direct and underlying representations disagree");
+        }
+      }
+    } else {
+      if (underlying_ref == nullptr || underlying_ref->form != kDwFormRef4) {
+        throw std::runtime_error(
+            "selected-inline enum has no compiler-described integer representation");
+      }
+      const auto underlying = resolve_integer_type(dies, underlying_ref->number);
+      if (underlying.byte_size != byte_size) {
+        throw std::runtime_error(
+            "selected-inline enum byte size disagrees with its underlying type");
+      }
+      is_signed = underlying.is_signed;
+    }
+
+    LocalEnumType result{name->text, byte_size, is_signed, {}};
+    for (std::size_t child = 0; child < dies.size(); ++child) {
+      if (dies[child].parent != *index) continue;
+      if (dies[child].tag != kInlineDwTagEnumerator) {
+        throw std::runtime_error(
+            "selected-inline enum has an unsupported direct child DIE");
+      }
+      if (result.enumerators.size() >= kMaxSelectedInlineEnumEntries) {
+        throw std::runtime_error(
+            "selected-inline enum exceeds the bounded 64-entry table");
+      }
+      const auto* entry_name = attribute(dies[child], kDwAtName);
+      const auto* constant = attribute(dies[child], kInlineDwAtConstValue);
+      if (entry_name == nullptr || entry_name->text.empty()) {
+        throw std::runtime_error("selected-inline enumerator has no supported name");
+      }
+      if (constant == nullptr ||
+          !selected_inline_enum_constant_form(constant->form)) {
+        throw std::runtime_error(
+            "selected-inline enumerator has no supported constant value");
+      }
+      const auto raw = truncate_integer(constant->number, byte_size);
+      if (!is_signed && raw != constant->number) {
+        throw std::runtime_error(
+            "selected-inline unsigned enumerator exceeds enum storage width");
+      }
+      const auto duplicate = std::find_if(
+          result.enumerators.begin(), result.enumerators.end(),
+          [&](const LocalEnumEntry& existing) {
+            return existing.name == entry_name->text;
+          });
+      if (duplicate != result.enumerators.end()) {
+        throw std::runtime_error(
+            "selected-inline enum has duplicate enumerator names");
+      }
+      result.enumerators.push_back(LocalEnumEntry{entry_name->text, raw});
+    }
+    if (result.enumerators.empty()) {
+      throw std::runtime_error("selected-inline enum has no bounded direct enumerators");
+    }
+    return result;
+  }
+  throw std::runtime_error("selected-inline enum type chain is too deep");
+}
+
 std::optional<LocalScalarValue> inspect_inline_scalar_unit(
     const DebugSections& sections, const std::vector<std::byte>& ranges,
     const CoreSnapshot& snapshot, const SnapshotInspectionFrameContext& frame,
@@ -985,6 +1106,10 @@ std::optional<LocalScalarValue> inspect_inline_scalar_unit(
       (pointee_type || direct_structure || direct_union)
 ? std::optional<SelectedInlineFixedArrayType>{}
 : selected_inline_fixed_array_type(dies, type->number);
+  const auto direct_enum =
+    (pointee_type || direct_structure || direct_union || direct_array)
+        ? std::optional<LocalEnumType>{}
+        : selected_inline_enum_type(dies, type->number);
   const auto value_type =
       pointee_type
 ? ValueType{sizeof(std::uintptr_t), false, LocalValueKind::Pointer, {}}
@@ -997,8 +1122,11 @@ std::optional<LocalScalarValue> inspect_inline_scalar_unit(
             : direct_array
                   ? ValueType{direct_array->byte_size, false,
                               LocalValueKind::Array, {}}
+                  : direct_enum
+                  ? ValueType{direct_enum->byte_size, direct_enum->is_signed,
+                              LocalValueKind::Enumeration, {}}
                   : resolve_value_type(dies, type->number);
-  if (!direct_structure && !direct_union && !direct_array &&
+  if (!direct_structure && !direct_union && !direct_array && !direct_enum &&
       ((value_type.kind != LocalValueKind::Integer &&
         value_type.kind != LocalValueKind::Pointer) ||
        value_type.byte_size == 0 ||
@@ -1054,6 +1182,7 @@ std::optional<LocalScalarValue> inspect_inline_scalar_unit(
   auto result =
         materialize_snapshot_memory_value(owner, requested_name, value_type, memory);
     attach_pointer_metadata(result, pointee_type);
+    if (direct_enum) result.enum_type = *direct_enum;
     return result;
   }
 
@@ -1092,8 +1221,9 @@ std::optional<LocalScalarValue> inspect_inline_scalar_unit(
   LocalScalarValue result{owner.module_path, std::string(requested_name),
                           truncate_integer(raw, value_type.byte_size),
                           value_type.byte_size, value_type.is_signed,
-                          LocalValueKind::Integer};
+                          value_type.kind};
   result.storage = LocalValueStorage::SnapshotCoreRegister;
+  if (direct_enum) result.enum_type = *direct_enum;
   return result;
 }
 

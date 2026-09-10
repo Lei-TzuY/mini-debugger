@@ -41,6 +41,8 @@ jobs:
           python3 tests/core_caller_inline_union_dwarf_oracle.py /tmp/caller-inline-nopie
           python3 tests/core_caller_inline_bitfield_dwarf_oracle.py /tmp/caller-inline-pie
           python3 tests/core_caller_inline_bitfield_dwarf_oracle.py /tmp/caller-inline-nopie
+          python3 tests/core_caller_inline_enum_dwarf_oracle.py /tmp/caller-inline-pie
+          python3 tests/core_caller_inline_enum_dwarf_oracle.py /tmp/caller-inline-nopie
       - name: Build core inspection surface
         run: |
           cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
@@ -61,6 +63,10 @@ jobs:
             tests/core_inline_bitfield_session_integration.cpp \
             build/libmdbg_core.a -pthread \
             -o /tmp/core-inline-bitfield-session
+          "$CXX" -std=c++17 -Wall -Wextra -Wpedantic -Werror -Isrc \
+            tests/core_inline_enum_session_integration.cpp \
+            build/libmdbg_core.a -pthread \
+            -o /tmp/core-inline-enum-session
       - name: Verify selected-inline aggregate session and CLI
         run: |
           sudo sysctl -w kernel.core_pattern=/tmp/mdbg-core-%p
@@ -73,3 +79,5 @@ jobs:
           /tmp/core-inline-union-session /tmp/caller-inline-nopie build/mdbg-core
           /tmp/core-inline-bitfield-session /tmp/caller-inline-pie build/mdbg-core
           /tmp/core-inline-bitfield-session /tmp/caller-inline-nopie build/mdbg-core
+          /tmp/core-inline-enum-session /tmp/caller-inline-pie build/mdbg-core
+          /tmp/core-inline-enum-session /tmp/caller-inline-nopie build/mdbg-core

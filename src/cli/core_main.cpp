@@ -208,7 +208,17 @@ void print_floating_value(const mdbg::LocalScalarValue& value) {
 
 void print_value(const mdbg::LocalScalarValue& value) {
   std::cout << value.module_path << '!' << value.name << " = ";
-  if (value.kind == mdbg::LocalValueKind::Union) {
+  if (value.kind == mdbg::LocalValueKind::Enumeration) {
+    if (!value.enum_type) {
+      throw std::logic_error("bounded enum value lost its type metadata");
+    }
+    if (const auto symbol = mdbg::local_enum_symbol(value)) {
+      std::cout << value.enum_type->name << "::" << *symbol << " (0x"
+                << std::hex << value.raw_value << std::dec << ')';
+    } else {
+      std::cout << "0x" << std::hex << value.raw_value << std::dec;
+    }
+  } else if (value.kind == mdbg::LocalValueKind::Union) {
     std::cout << "union{";
     for (std::size_t index = 0; index < value.members.size(); ++index) {
       if (index != 0) std::cout << ", ";
@@ -241,6 +251,11 @@ void print_value(const mdbg::LocalScalarValue& value) {
   std::cout << " [" << value.byte_size << "-byte ";
   if (value.kind == mdbg::LocalValueKind::Floating) {
     std::cout << "floating";
+  } else if (value.kind == mdbg::LocalValueKind::Enumeration) {
+    if (!value.enum_type) {
+      throw std::logic_error("bounded enum value lost its type metadata");
+    }
+    std::cout << "enum " << (value.enum_type->is_signed ? "signed" : "unsigned");
   } else if (value.kind == mdbg::LocalValueKind::Union) {
     std::cout << "union";
   } else if (value.kind == mdbg::LocalValueKind::Array) {

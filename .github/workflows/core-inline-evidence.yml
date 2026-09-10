@@ -1,0 +1,36 @@
+name: core-inline-evidence
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  compiler-artifact:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - compiler: gcc
+            cc: gcc
+          - compiler: clang
+            cc: clang
+    name: compiler-artifact (${{ matrix.compiler }})
+    env:
+      CC: ${{ matrix.cc }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build optimized caller-inline fixtures
+        run: |
+          "$CC" -O2 -g -gdwarf-4 -fPIE -pie \
+            tests/fixtures/caller_inline_core_fixture.c \
+            tests/fixtures/caller_inline_crash_leaf.c \
+            -o /tmp/caller-inline-pie
+          "$CC" -O2 -g -gdwarf-4 -fno-pie -no-pie \
+            tests/fixtures/caller_inline_core_fixture.c \
+            tests/fixtures/caller_inline_crash_leaf.c \
+            -o /tmp/caller-inline-nopie
+      - name: Verify compiler-produced inline aggregate binding
+        run: |
+          python3 tests/core_caller_inline_dwarf_oracle.py /tmp/caller-inline-pie
+          python3 tests/core_caller_inline_dwarf_oracle.py /tmp/caller-inline-nopie

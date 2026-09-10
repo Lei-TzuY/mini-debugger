@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import os
 import re
 import subprocess
 import sys
@@ -80,11 +81,19 @@ def origin_name(record, by_offset):
     return name or None
 
 
-def addr2line_chain(path, probe):
+def addr2line_contexts(path, probe):
     lines = run("addr2line", "-i", "-f", "-e", path, hex(probe)).splitlines()
-    if len(lines) < 2:
-        raise RuntimeError("addr2line emitted no inline chain")
-    return [lines[index].strip() for index in range(0, len(lines), 2)]
+    if len(lines) < 2 or len(lines) % 2 != 0:
+        raise RuntimeError("addr2line emitted an incomplete inline chain")
+    return [
+        (lines[index].strip(), lines[index + 1].strip())
+        for index in range(0, len(lines), 2)
+    ]
+
+
+def location_basename(location):
+    source = location.rsplit(":", 1)[0]
+    return os.path.basename(source)
 
 
 def main():
@@ -121,8 +130,9 @@ def main():
     if missing:
         raise RuntimeError(f"missing concrete inline call-site metadata: {missing}")
 
-    chain = addr2line_chain(path, probe)
+    contexts = addr2line_contexts(path, probe)
     wanted = ["inline_inner", "inline_outer", "physical_frame"]
+    chain = [name for name, _ in contexts]
     if chain[: len(wanted)] != wanted:
         raise RuntimeError(f"unexpected addr2line inline chain: {chain}")
 
@@ -130,6 +140,20 @@ def main():
     inner = expected["inline_inner"]
     if inner[0] <= outer[0]:
         raise RuntimeError("inline_inner DIE is not nested below inline_outer")
+    if inner[1] == outer[1]:
+        raise RuntimeError(
+            "cross-file fixture did not produce distinct compiler DW_AT_call_file indices"
+        )
+
+    source_basenames = {
+        location_basename(location) for _, location in contexts[: len(wanted)]
+    }
+    required_sources = {"inline_core_fixture.h", "inline_core_fixture.c"}
+    if not required_sources.issubset(source_basenames):
+        raise RuntimeError(
+            "addr2line did not prove header/source inline ownership: "
+            + ", ".join(sorted(source_basenames))
+        )
 
     for name in ("inline_outer", "inline_inner"):
         depth, file_index, line, evidence = expected[name]
@@ -137,7 +161,12 @@ def main():
             f"{name}: depth={depth} probe=0x{probe:x} range={evidence} "
             f"call_file={file_index} call_line={line}"
         )
-    print("addr2line chain: " + " -> ".join(chain[: len(wanted)]))
+    print(
+        "addr2line chain: "
+        + " -> ".join(
+            f"{name}@{location}" for name, location in contexts[: len(wanted)]
+        )
+    )
 
 
 if __name__ == "__main__":

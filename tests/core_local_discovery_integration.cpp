@@ -188,6 +188,11 @@ void test_inline_artifact_gate(const std::string& integration_path,
           "inline contexts lost physical-frame module ownership");
   require(contexts[0].call_site.line != 0 && contexts[1].call_site.line != 0,
           "inline contexts lost compiler call-site line metadata");
+  require(std::filesystem::path(contexts[0].call_site.file).filename() ==
+              "inline_core_fixture.c" &&
+              std::filesystem::path(contexts[1].call_site.file).filename() ==
+                  "inline_core_fixture.h",
+          "inline contexts lost compiler-owned cross-file call-site ownership");
 
   const auto physical = inline_session.locals();
   require(has_name(physical, "physical_only"),

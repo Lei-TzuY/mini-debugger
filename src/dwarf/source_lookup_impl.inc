@@ -1092,8 +1092,9 @@ LocalScalarValue decode_structure(const ElfFile& module, std::string_view name,
   return result;
 }
 
+template <typename RegisterSource>
 std::vector<std::byte> evaluate_register_piece_structure(
-    const std::vector<std::byte>& expression, const Debugger& debugger,
+    const std::vector<std::byte>& expression, const RegisterSource& register_source,
     const ValueType& value_type) {
   if (value_type.kind != LocalValueKind::Structure || value_type.byte_size != 16) {
     throw std::runtime_error(
@@ -1121,7 +1122,7 @@ std::vector<std::byte> evaluate_register_piece_structure(
     throw std::runtime_error("unsupported trailing operations after register-piece local");
   }
 
-  const auto regs = debugger.registers();
+  const auto regs = register_source.registers();
   std::vector<std::byte> bytes(16);
   const auto store = [&](std::size_t offset, std::uint64_t value) {
     for (std::size_t index = 0; index < 8; ++index) {

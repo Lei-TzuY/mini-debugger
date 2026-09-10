@@ -117,10 +117,14 @@ inline std::optional<std::string_view> local_enum_symbol(const LocalScalarValue&
   if (value.kind != LocalValueKind::Enumeration || !value.enum_type) {
     return std::nullopt;
   }
+  const LocalEnumEntry* match = nullptr;
   for (const auto& enumerator : value.enum_type->enumerators) {
-    if (enumerator.raw_value == value.raw_value) return enumerator.name;
+    if (enumerator.raw_value != value.raw_value) continue;
+    if (match != nullptr) return std::nullopt;
+    match = &enumerator;
   }
-  return std::nullopt;
+  return match == nullptr ? std::nullopt
+                          : std::optional<std::string_view>{match->name};
 }
 
 LocalScalarValue inspect_local_value(const Debugger& debugger,

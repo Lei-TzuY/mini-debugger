@@ -13,6 +13,8 @@
 
 namespace {
 
+constexpr std::uint64_t kInnerShadowValue = 0xaaaabbbbccccddddULL;
+
 void require(bool condition, const std::string& message) {
   if (!condition) throw std::runtime_error(message);
 }
@@ -22,6 +24,14 @@ bool has_name(const std::vector<mdbg::LocalDiscoveryEntry>& entries,
   return std::any_of(entries.begin(), entries.end(), [&](const auto& entry) {
     return entry.name == name;
   });
+}
+
+std::size_t count_name(const std::vector<mdbg::LocalDiscoveryEntry>& entries,
+                       const std::string& name) {
+  return static_cast<std::size_t>(
+      std::count_if(entries.begin(), entries.end(), [&](const auto& entry) {
+        return entry.name == name;
+      }));
 }
 
 bool has_entry(const std::vector<mdbg::LocalDiscoveryEntry>& entries,
@@ -67,6 +77,16 @@ std::string run_command(const std::string& command) {
   return output;
 }
 
+std::size_t count_substring(const std::string& text, const std::string& needle) {
+  std::size_t count = 0;
+  std::size_t offset = 0;
+  while ((offset = text.find(needle, offset)) != std::string::npos) {
+    ++count;
+    offset += needle.size();
+  }
+  return count;
+}
+
 void require_cli_catalogue(const std::string& segment, const std::string& present,
                            const std::string& absent, const std::string& context) {
   require(segment.find("variable " + present) != std::string::npos,
@@ -98,10 +118,16 @@ void test_core_cli(const std::string& integration_path, const std::string& core_
   const auto caller_segment = output.substr(frame_marker, thread_marker - frame_marker);
   const auto sibling_segment = output.substr(thread_marker);
   require_cli_catalogue(crash_segment, "xmm_value", "caller_stack_local", "crash frame");
+  require(count_substring(crash_segment, "variable shadow_value") == 1,
+          "crash frame CLI did not collapse shadowed locals to one active binding");
   require_cli_catalogue(caller_segment, "caller_stack_local", "xmm_value", "caller frame");
+  require(caller_segment.find("shadow_value") == std::string::npos,
+          "caller frame CLI leaked a callee shadowed local");
   require_cli_catalogue(sibling_segment, "xmm_value", "stack_local", "sibling frame");
   require(sibling_segment.find("parameter seed") != std::string::npos,
           "sibling frame CLI did not classify seed as a formal parameter");
+  require(sibling_segment.find("shadow_value") == std::string::npos,
+          "sibling frame CLI leaked a crash-frame shadowed local");
 }
 
 }  // namespace
@@ -122,6 +148,11 @@ int main(int argc, char** argv) {
             "crash frame did not discover compiler-owned xmm_value");
     require(has_name(crash_locals, "stack_local"),
             "crash frame did not discover compiler-owned stack_local");
+    require(count_name(crash_locals, "shadow_value") == 1,
+            "crash frame did not collapse shadowed locals to one active binding");
+    const auto shadow_value = session.inspect_value("shadow_value");
+    require(shadow_value.raw_value == kInnerShadowValue,
+            "shadowed-name materialization did not resolve the deepest active binding");
     require(!has_name(crash_locals, "caller_stack_local"),
             "crash frame leaked a caller-only local");
 
@@ -132,8 +163,8 @@ int main(int argc, char** argv) {
     require_bounded_catalogue(caller_locals, "caller frame");
     require(has_name(caller_locals, "caller_stack_local"),
             "caller frame did not discover compiler-owned caller_stack_local");
-    require(!has_name(caller_locals, "xmm_value"),
-            "caller frame leaked a callee-only local");
+    require(!has_name(caller_locals, "xmm_value") && !has_name(caller_locals, "shadow_value"),
+            "caller frame leaked callee-only locals");
 
     session.select_thread(sibling_tid);
     require(session.selected_frame_index() == 0,
@@ -145,7 +176,8 @@ int main(int argc, char** argv) {
     require(has_entry(sibling_locals, "seed", mdbg::LocalDiscoveryKind::FormalParameter),
             "sibling frame did not classify compiler-owned seed as a formal parameter");
     require(!has_name(sibling_locals, "stack_local") &&
-                !has_name(sibling_locals, "caller_stack_local"),
+                !has_name(sibling_locals, "caller_stack_local") &&
+                !has_name(sibling_locals, "shadow_value"),
             "sibling frame leaked locals from the crash-thread selection");
 
     test_core_cli(argv[0], argv[1], sibling_tid);

@@ -357,6 +357,7 @@ std::optional<std::vector<LocalDiscoveryEntry>> discover_inline_locals_unit(
 std::optional<LocalScalarValue> inspect_inline_scalar_unit(
     const DebugSections& sections, const std::vector<std::byte>& ranges,
     const CoreSnapshot& snapshot, const SnapshotInspectionFrameContext& frame,
+    const SnapshotModulePathResolver& module_paths,
     const SnapshotModuleAddress& owner, std::uint64_t virtual_pc,
     std::size_t inline_die_offset, std::string_view requested_name,
     std::size_t unit_start, std::size_t& next_unit) {
@@ -439,12 +440,36 @@ std::optional<LocalScalarValue> inspect_inline_scalar_unit(
     throw std::runtime_error(
         "selected-inline scalar has no supported DW_AT_location form");
   }
+  if (expression.empty()) {
+    throw std::runtime_error(
+        "selected-inline scalar requires one exact compiler-proven location operation");
+  }
+
+  const auto opcode = std::to_integer<std::uint8_t>(expression.front());
+  if (frame.index != 0) {
+    if (opcode != kDwOpFbreg) {
+      throw std::runtime_error(
+          "caller-frame selected-inline scalar currently requires compiler-proven DW_OP_fbreg");
+    }
+    const auto base = snapshot_frame_base(
+        dies, *subprogram, snapshot, frame, module_paths, owner);
+    const auto runtime_address = add_signed(
+        base, decode_snapshot_fbreg_offset(expression),
+        "caller-frame selected-inline DW_OP_fbreg runtime address");
+    if (runtime_address > std::numeric_limits<std::uintptr_t>::max()) {
+      throw std::overflow_error(
+          "caller-frame selected-inline DW_OP_fbreg address exceeds runtime address width");
+    }
+    const auto memory = read_snapshot_memory(
+        snapshot, module_paths, static_cast<std::uintptr_t>(runtime_address),
+        value_type.byte_size);
+    return materialize_snapshot_memory_value(owner, requested_name, value_type, memory);
+  }
+
   if (expression.size() != 1) {
     throw std::runtime_error(
         "selected-inline scalar requires one exact compiler-proven register operation");
   }
-
-  const auto opcode = std::to_integer<std::uint8_t>(expression.front());
   const auto& regs = snapshot.thread(frame.thread_tid).registers;
   std::uint64_t raw = 0;
   if (opcode == kInlineDwOpRdx) {
@@ -565,10 +590,6 @@ LocalScalarValue inspect_inline_local_value(
   }
   validate_snapshot_inspection_frame(snapshot, frame);
   validate_snapshot_frame_lookup_pc(frame);
-  if (frame.index != 0) {
-    throw std::runtime_error(
-        "selected-inline scalar materialization is currently bounded to exact frame zero");
-  }
 
   const auto lookup_runtime_pc = snapshot_frame_lookup_pc(frame);
   const auto owner =
@@ -584,8 +605,8 @@ LocalScalarValue inspect_inline_local_value(
   while (unit < sections.info.size()) {
     std::size_t next = unit;
     const auto result = inspect_inline_scalar_unit(
-        sections, ranges, snapshot, frame, owner, owner.virtual_address,
-        inline_die_offset, name, unit, next);
+        sections, ranges, snapshot, frame, module_paths, owner,
+        owner.virtual_address, inline_die_offset, name, unit, next);
     if (result) return *result;
     if (next <= unit) {
       throw std::runtime_error(

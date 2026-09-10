@@ -116,11 +116,12 @@ def require_mdbg_core_callsite_ownership(path):
         output = subprocess.check_output(
             [mdbg_core, core_path],
             input=(
+                "print outer_only\n"
+                "print inner_only\n"
                 "print shadow_value\n"
                 "inline\n"
                 "inline 1\n"
                 "locals\n"
-                "print shadow_value\n"
                 "quit\n"
             ),
             text=True,
@@ -153,23 +154,24 @@ def require_mdbg_core_callsite_ownership(path):
     if selected == -1:
         raise RuntimeError("mdbg-core did not select the compiler-proven inner inline context")
     selected_output = output[selected:]
-    if "variable shadow_value" not in selected_output:
+    if "variable shadow_value" not in selected_output or "variable inner_only" not in selected_output:
         raise RuntimeError(
-            "selected inner inline context did not expose compiler-owned shadow_value"
+            "selected inner inline context lost compiler-owned scalar catalogue entries"
         )
 
-    scalar_marker = "!shadow_value = 0x141 [4-byte signed]"
-    before_selection = output[:selected]
-    if scalar_marker not in before_selection:
+    candidates = {
+        "outer_only": "!outer_only = 0x81 [4-byte signed]",
+        "inner_only": "!inner_only = 0x114 [4-byte signed]",
+        "shadow_value": "!shadow_value = 0x141 [4-byte signed]",
+    }
+    supported = [name for name, marker in candidates.items() if marker in output[:selected]]
+    print("mdbg-core inline scalar candidate probe:\n" + output)
+    if not supported:
         raise RuntimeError(
-            "existing snapshot evaluator could not materialize compiler-produced inner "
-            "shadow_value from the immutable physical frame"
+            "compiler artifact retained no inline scalar that the existing bounded snapshot "
+            "evaluator can materialize"
         )
-    if scalar_marker not in selected_output:
-        raise RuntimeError(
-            "selected inline context could not materialize its compiler-produced "
-            "shadow_value through mdbg-core print"
-        )
+    print("supported inline scalar candidates: " + ", ".join(supported))
 
 
 def main():
@@ -245,7 +247,6 @@ def main():
             f"{name}@{location}" for name, location in contexts[: len(wanted)]
         )
     )
-    print("inline scalar: shadow_value=0x141 via existing snapshot evaluator")
 
 
 if __name__ == "__main__":

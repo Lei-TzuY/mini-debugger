@@ -163,6 +163,14 @@ void print_selected_source_context(const mdbg::CoreInspectionSession& session,
   }
 }
 
+void print_locals(const mdbg::CoreInspectionSession& session) {
+  for (const auto& entry : session.locals()) {
+    std::cout << (entry.kind == mdbg::LocalDiscoveryKind::FormalParameter ? "parameter "
+                                                                          : "variable ")
+              << entry.name << '\n';
+  }
+}
+
 void print_floating_value(const mdbg::LocalScalarValue& value) {
   if (value.byte_size == sizeof(float)) {
     const auto bits = static_cast<std::uint32_t>(value.raw_value);
@@ -273,6 +281,7 @@ void print_help() {
                "  bt | backtrace       show immutable snapshot frames\n"
                "  frame <index>        select an immutable snapshot frame\n"
                "  list | l             show source context for the selected frame\n"
+               "  locals               list active parameter/local names without reading values\n"
                "  print <name> | p <name>  inspect a source value in the selected frame\n"
                "  deref <name>         dereference one bounded pointer value\n"
                "  member <name> <member>  inspect one bounded pointer-valued direct member\n"
@@ -363,6 +372,12 @@ int run_session(const std::string& core_path, mdbg::SnapshotModulePathResolver m
         std::string extra;
         if (input >> extra) throw std::invalid_argument("usage: list");
         print_selected_source_context(session, source_paths);
+        continue;
+      }
+      if (command == "locals") {
+        std::string extra;
+        if (input >> extra) throw std::invalid_argument("usage: locals");
+        print_locals(session);
         continue;
       }
       if (command == "print" || command == "p") {

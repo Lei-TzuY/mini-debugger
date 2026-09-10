@@ -12,6 +12,7 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 namespace mdbg {
 
@@ -107,6 +108,12 @@ class CoreInspectionSession {
       throw std::logic_error("core frame belongs to a different selected thread");
     }
     selected_frame_ = index;
+  }
+
+  [[nodiscard]] std::vector<LocalDiscoveryEntry> locals() const {
+    const auto& frame = selected_frame();
+    validate_selected_frame(frame);
+    return discover_local_values(snapshot_, frame, module_paths_);
   }
 
   [[nodiscard]] LocalScalarValue inspect_value(std::string_view name) const {

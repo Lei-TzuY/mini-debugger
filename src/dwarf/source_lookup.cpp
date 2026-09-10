@@ -423,11 +423,16 @@ std::optional<LocalScalarValue> inspect_inline_scalar_unit(
         "selected-inline local has no supported DW_FORM_ref4 type");
   }
 
-  const auto value_type = resolve_value_type(dies, type->number);
-  if (value_type.kind != LocalValueKind::Integer || value_type.byte_size == 0 ||
-      value_type.byte_size > sizeof(std::uint64_t)) {
+  const auto pointee_type = resolve_pointer_pointee_type(dies, type->number);
+  const auto value_type =
+      pointee_type ? ValueType{sizeof(std::uintptr_t), false,
+                               LocalValueKind::Pointer, {}}
+                   : resolve_value_type(dies, type->number);
+  if ((value_type.kind != LocalValueKind::Integer &&
+       value_type.kind != LocalValueKind::Pointer) ||
+      value_type.byte_size == 0 || value_type.byte_size > sizeof(std::uint64_t)) {
     throw std::runtime_error(
-        "selected-inline scalar materialization requires a bounded integer value");
+        "selected-inline value materialization requires a bounded integer/pointer scalar");
   }
 
   std::vector<std::byte> expression;
@@ -463,9 +468,16 @@ std::optional<LocalScalarValue> inspect_inline_scalar_unit(
     const auto memory = read_snapshot_memory(
         snapshot, module_paths, static_cast<std::uintptr_t>(runtime_address),
         value_type.byte_size);
-    return materialize_snapshot_memory_value(owner, requested_name, value_type, memory);
+    auto result =
+        materialize_snapshot_memory_value(owner, requested_name, value_type, memory);
+    attach_pointer_metadata(result, pointee_type);
+    return result;
   }
 
+  if (value_type.kind == LocalValueKind::Pointer) {
+    throw std::runtime_error(
+        "frame-zero selected-inline pointer materialization is outside current compiler evidence");
+  }
   if (expression.size() != 1) {
     throw std::runtime_error(
         "selected-inline scalar requires one exact compiler-proven register operation");
@@ -615,6 +627,44 @@ LocalScalarValue inspect_inline_local_value(
     unit = next;
   }
   throw std::runtime_error("selected inline DIE is unavailable in the owning debug file");
+}
+
+LocalScalarValue dereference_inline_local_pointer(
+    const CoreSnapshot& snapshot, const SnapshotInspectionFrameContext& frame,
+    std::size_t inline_die_offset, std::string_view name,
+    const SnapshotModulePathResolver& module_paths) {
+  const auto pointer = inspect_inline_local_value(
+      snapshot, frame, inline_die_offset, name, module_paths);
+  if (pointer.kind != LocalValueKind::Pointer) {
+    throw std::logic_error(
+        "selected-inline local value is not a pointer: " + std::string(name));
+  }
+  if (!pointer.pointee_type ||
+      pointer.pointee_type->kind != LocalValueKind::Integer ||
+      pointer.pointee_type->byte_size == 0 ||
+      pointer.pointee_type->byte_size > sizeof(std::uint64_t) ||
+      !pointer.pointee_type->members.empty()) {
+    throw std::runtime_error(
+        "selected-inline pointer does not have a bounded integer pointee type");
+  }
+  if (pointer.raw_value == 0) {
+    throw std::runtime_error(
+        "cannot dereference a null selected-inline core pointer: " +
+        std::string(name));
+  }
+  if (pointer.raw_value > std::numeric_limits<std::uintptr_t>::max()) {
+    throw std::runtime_error("selected-inline core pointer exceeds host address width");
+  }
+
+  const auto memory = read_snapshot_memory(
+      snapshot, module_paths, static_cast<std::uintptr_t>(pointer.raw_value),
+      pointer.pointee_type->byte_size);
+  const ValueType value_type{pointer.pointee_type->byte_size,
+                             pointer.pointee_type->is_signed,
+                             LocalValueKind::Integer, {}};
+  const SnapshotModuleAddress owner{pointer.module_path, {}, 0};
+  return materialize_snapshot_memory_value(
+      owner, "*" + pointer.name, value_type, memory, false);
 }
 
 }  // namespace mdbg

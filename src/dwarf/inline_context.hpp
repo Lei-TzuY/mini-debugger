@@ -34,5 +34,9 @@ LocalScalarValue inspect_inline_local_value(
     const CoreSnapshot& snapshot, const SnapshotInspectionFrameContext& frame,
     std::size_t inline_die_offset, std::string_view name,
     const SnapshotModulePathResolver& module_paths);
+LocalScalarValue dereference_inline_local_pointer(
+    const CoreSnapshot& snapshot, const SnapshotInspectionFrameContext& frame,
+    std::size_t inline_die_offset, std::string_view name,
+    const SnapshotModulePathResolver& module_paths);
 
 }  // namespace mdbg

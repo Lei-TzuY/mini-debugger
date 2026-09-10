@@ -166,9 +166,15 @@ class CoreInspectionSession {
   }
 
   [[nodiscard]] LocalScalarValue dereference_value(std::string_view name) const {
-    require_physical_value_context();
     const auto& frame = selected_frame();
     validate_selected_frame(frame);
+    if (selected_inline_context_) {
+      if (selected_inline_context_->module_path != frame.module_path) {
+        throw std::logic_error("selected inline context belongs to a different module");
+      }
+      return dereference_inline_local_pointer(
+          snapshot_, frame, selected_inline_context_->die_offset, name, module_paths_);
+    }
     return dereference_local_pointer(snapshot_, frame, name, module_paths_);
   }
 

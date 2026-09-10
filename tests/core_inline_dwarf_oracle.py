@@ -71,6 +71,21 @@ def symbol_address(path, name):
     raise RuntimeError(f"missing probe symbol: {name}")
 
 
+def resolved_name(record, by_offset):
+    current = record
+    for _ in range(8):
+        name = clean_name(current["attrs"].get("name", ""))
+        if name:
+            return name
+        origin_text = current["attrs"].get("abstract_origin")
+        if not origin_text:
+            return None
+        current = by_offset.get(ref_offset(origin_text, "abstract_origin"))
+        if current is None:
+            return None
+    raise RuntimeError("abstract-origin name chain is too deep")
+
+
 def origin_name(record, by_offset):
     origin_text = record["attrs"].get("abstract_origin")
     if not origin_text:
@@ -78,8 +93,41 @@ def origin_name(record, by_offset):
     origin = by_offset.get(ref_offset(origin_text, "inline abstract_origin"))
     if origin is None or origin["tag"] != "DW_TAG_subprogram":
         raise RuntimeError("inline abstract origin does not reference a subprogram")
-    name = clean_name(origin["attrs"].get("name", ""))
-    return name or None
+    return resolved_name(origin, by_offset)
+
+
+def inline_scalar_location_evidence(path, records, by_offset):
+    wanted = {"seed", "outer_only", "inner_only", "shadow_value"}
+    evidence = []
+    for position, record in enumerate(records):
+        if record["tag"] != "DW_TAG_inlined_subroutine":
+            continue
+        inline_name = origin_name(record, by_offset)
+        if inline_name not in {"inline_outer", "inline_inner"}:
+            continue
+        for child in records[position + 1 :]:
+            if child["depth"] <= record["depth"]:
+                break
+            if child["tag"] not in {"DW_TAG_variable", "DW_TAG_formal_parameter"}:
+                continue
+            name = resolved_name(child, by_offset)
+            if name not in wanted:
+                continue
+            location = child["attrs"].get("location", "<no DW_AT_location>")
+            evidence.append(
+                f"{inline_name}:{name}: die=0x{child['offset']:x} depth={child['depth']} "
+                f"location={location}"
+            )
+    print("inline scalar DWARF DIE locations:")
+    for line in evidence:
+        print("  " + line)
+    try:
+        loc_dump = run("readelf", "--debug-dump=loc", path)
+    except subprocess.CalledProcessError as error:
+        loc_dump = error.output
+    print("inline fixture location-list dump (bounded):")
+    print(loc_dump[:12000])
+    return evidence
 
 
 def addr2line_contexts(path, probe):
@@ -233,6 +281,7 @@ def main():
             + ", ".join(sorted(source_basenames))
         )
 
+    inline_scalar_location_evidence(path, records, by_offset)
     require_mdbg_core_callsite_ownership(path)
 
     for name in ("inline_outer", "inline_inner"):

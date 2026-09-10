@@ -23,13 +23,11 @@ def fail(message: str) -> None:
 
 
 def parse_number(text: str) -> Optional[int]:
-    text = text.strip().split()[0] if text.strip() else ""
-    if not text:
-        return None
-    try:
-        return int(text, 0)
-    except ValueError:
-        return None
+    for token in reversed(text.strip().split()):
+        cleaned = token.strip(",;()[]")
+        if re.fullmatch(r"(?:0x[0-9a-fA-F]+|[0-9]+)", cleaned):
+            return int(cleaned, 0)
+    return None
 
 
 def parse_dies(text: str) -> list[Die]:

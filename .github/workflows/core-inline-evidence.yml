@@ -33,6 +33,14 @@ jobs:
             tests/fixtures/caller_inline_core_fixture.c \
             tests/fixtures/caller_inline_crash_leaf.c -pthread \
             -o /tmp/caller-inline-nopie
+          "$CC" -O2 -g -gdwarf-4 -fPIE -pie \
+            tests/fixtures/caller_inline_typed_aggregate_fixture.c \
+            tests/fixtures/caller_inline_typed_aggregate_crash_leaf.c \
+            -o /tmp/caller-inline-typed-aggregate-pie
+          "$CC" -O2 -g -gdwarf-4 -fno-pie -no-pie \
+            tests/fixtures/caller_inline_typed_aggregate_fixture.c \
+            tests/fixtures/caller_inline_typed_aggregate_crash_leaf.c \
+            -o /tmp/caller-inline-typed-aggregate-nopie
       - name: Verify compiler-produced inline typed bindings
         run: |
           python3 tests/core_caller_inline_dwarf_oracle.py /tmp/caller-inline-pie
@@ -43,8 +51,10 @@ jobs:
           python3 tests/core_caller_inline_bitfield_dwarf_oracle.py /tmp/caller-inline-nopie
           python3 tests/core_caller_inline_enum_dwarf_oracle.py /tmp/caller-inline-pie
           python3 tests/core_caller_inline_enum_dwarf_oracle.py /tmp/caller-inline-nopie
-          python3 tests/core_caller_inline_typed_aggregate_dwarf_oracle.py /tmp/caller-inline-pie
-          python3 tests/core_caller_inline_typed_aggregate_dwarf_oracle.py /tmp/caller-inline-nopie
+          python3 tests/core_caller_inline_typed_aggregate_dwarf_oracle.py \
+            /tmp/caller-inline-typed-aggregate-pie
+          python3 tests/core_caller_inline_typed_aggregate_dwarf_oracle.py \
+            /tmp/caller-inline-typed-aggregate-nopie
       - name: Build core inspection surface
         run: |
           cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
@@ -87,5 +97,7 @@ jobs:
           /tmp/core-inline-bitfield-session /tmp/caller-inline-nopie build/mdbg-core
           /tmp/core-inline-enum-session /tmp/caller-inline-pie build/mdbg-core
           /tmp/core-inline-enum-session /tmp/caller-inline-nopie build/mdbg-core
-          /tmp/core-inline-typed-aggregate-enum-session /tmp/caller-inline-pie build/mdbg-core
-          /tmp/core-inline-typed-aggregate-enum-session /tmp/caller-inline-nopie build/mdbg-core
+          /tmp/core-inline-typed-aggregate-enum-session \
+            /tmp/caller-inline-typed-aggregate-pie build/mdbg-core
+          /tmp/core-inline-typed-aggregate-enum-session \
+            /tmp/caller-inline-typed-aggregate-nopie build/mdbg-core

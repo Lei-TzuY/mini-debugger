@@ -10,6 +10,11 @@ union CallerInlineUnion {
   unsigned int unsigned_value;
 };
 
+struct CallerInlineBitFields {
+  signed int signed_bits : 5;
+  unsigned int unsigned_bits : 6;
+};
+
 extern int caller_inline_pointee;
 extern int caller_inline_member_pointee;
 extern struct CallerInlineAggregate caller_inline_aggregate;
@@ -29,17 +34,24 @@ static __attribute__((always_inline)) inline int caller_inline_inner(int seed) {
       0x55667788, &caller_inline_pointee};
   int caller_fixed_array[3] = {0x10203040, 0x22334455, 0x33445566};
   union CallerInlineUnion caller_union = {.signed_value = 0x44556677};
+  struct CallerInlineBitFields caller_bit_fields = {
+      .signed_bits = -7, .unsigned_bits = 41};
+  __asm__ volatile("" : : "m"(caller_bit_fields) : "memory");
   int crashed = caller_inline_crash_leaf(
-      seed + 5, &caller_shadow, &caller_pointer, &caller_aggregate_pointer,
+      seed + 5 + caller_bit_fields.signed_bits + caller_bit_fields.unsigned_bits,
+      &caller_shadow, &caller_pointer, &caller_aggregate_pointer,
       &caller_direct_aggregate, caller_fixed_array, &caller_union);
   __asm__ volatile(
       ".globl snapshot_caller_inline_resume_probe\n"
       "snapshot_caller_inline_resume_probe:\n"
-      ::: "memory");
+      :
+      : "m"(caller_bit_fields)
+      : "memory");
   return crashed + caller_shadow + *caller_pointer +
          caller_aggregate_pointer->direct + *caller_aggregate_pointer->linked +
          caller_direct_aggregate.direct + *caller_direct_aggregate.linked +
-         caller_fixed_array[1] + caller_union.signed_value;
+         caller_fixed_array[1] + caller_union.signed_value +
+         caller_bit_fields.signed_bits + caller_bit_fields.unsigned_bits;
 }
 
 static __attribute__((always_inline)) inline int caller_inline_outer(int seed) {

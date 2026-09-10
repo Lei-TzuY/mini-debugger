@@ -90,16 +90,25 @@ inline const LocalStructMember& aggregate_member(
         "selected-inline aggregate member has an unsupported scalar width");
   }
   if (member->kind == LocalValueKind::Integer) {
-    if (member->pointee_type) {
+    if (member->pointee_type || member->enum_type) {
       throw std::logic_error(
-          "selected-inline aggregate integer member unexpectedly has pointee metadata");
+          "selected-inline aggregate integer member retained incompatible type metadata");
     }
   } else if (member->kind == LocalValueKind::Pointer) {
     if (member->byte_size != sizeof(std::uintptr_t) || member->is_signed ||
-        !member->pointee_type || member->pointee_type->byte_size == 0 ||
+        !member->pointee_type || member->enum_type ||
+        member->pointee_type->byte_size == 0 ||
         member->pointee_type->byte_size > sizeof(std::uint64_t)) {
       throw std::logic_error(
           "selected-inline aggregate pointer member has invalid bounded pointee metadata");
+    }
+  } else if (member->kind == LocalValueKind::Enumeration) {
+    if (member->pointee_type || member->bit_slice || !member->enum_type ||
+        member->enum_type->byte_size != member->byte_size ||
+        member->enum_type->is_signed != member->is_signed ||
+        member->enum_type->enumerators.empty()) {
+      throw std::logic_error(
+          "selected-inline aggregate enum member has invalid bounded enum metadata");
     }
   } else {
     throw std::runtime_error(
@@ -253,6 +262,8 @@ inline LocalScalarValue inspect_inline_local_aggregate_member(
     result.pointee_type = LocalPointeeType{
         member.pointee_type->byte_size, member.pointee_type->is_signed,
         LocalValueKind::Integer, {}};
+  } else if (member.kind == LocalValueKind::Enumeration) {
+    result.enum_type = member.enum_type;
   }
   return result;
 }

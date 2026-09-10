@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import os
 import re
+import signal
 import subprocess
 import sys
 
@@ -96,6 +97,52 @@ def location_basename(location):
     return os.path.basename(source)
 
 
+def require_mdbg_core_callsite_ownership(path):
+    mdbg_core = os.environ.get("MDBG_CORE", "build/mdbg-core")
+    if not os.path.isfile(mdbg_core) or not os.access(mdbg_core, os.X_OK):
+        raise RuntimeError(f"mdbg-core executable is unavailable: {mdbg_core}")
+
+    process = subprocess.Popen([path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    status = process.wait()
+    if status != -signal.SIGSEGV:
+        raise RuntimeError(
+            f"cross-file inline fixture did not terminate with SIGSEGV: {status}"
+        )
+    core_path = f"/tmp/mdbg-core-{process.pid}"
+    if not os.path.exists(core_path):
+        raise RuntimeError("cross-file inline fixture did not produce a genuine core")
+
+    try:
+        output = subprocess.check_output(
+            [mdbg_core, core_path],
+            input="inline\nquit\n",
+            text=True,
+            stderr=subprocess.STDOUT,
+        )
+    finally:
+        try:
+            os.remove(core_path)
+        except FileNotFoundError:
+            pass
+
+    outer_line = next(
+        (line for line in output.splitlines() if "!inline_outer called at " in line),
+        None,
+    )
+    inner_line = next(
+        (line for line in output.splitlines() if "!inline_inner called at " in line),
+        None,
+    )
+    if outer_line is None or "inline_core_fixture.c:" not in outer_line:
+        raise RuntimeError(
+            "mdbg-core did not resolve inline_outer DW_AT_call_file to the source file"
+        )
+    if inner_line is None or "inline_core_fixture.h:" not in inner_line:
+        raise RuntimeError(
+            "mdbg-core did not resolve inline_inner DW_AT_call_file to the header file"
+        )
+
+
 def main():
     if len(sys.argv) != 2:
         raise SystemExit("usage: core_inline_dwarf_oracle.py <fixture>")
@@ -154,6 +201,8 @@ def main():
             "addr2line did not prove header/source inline ownership: "
             + ", ".join(sorted(source_basenames))
         )
+
+    require_mdbg_core_callsite_ownership(path)
 
     for name in ("inline_outer", "inline_inner"):
         depth, file_index, line, evidence = expected[name]

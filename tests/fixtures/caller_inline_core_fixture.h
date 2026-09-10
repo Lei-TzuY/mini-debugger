@@ -21,6 +21,11 @@ enum CallerInlineMode {
   CallerInlineBusy = 42,
 };
 
+struct CallerInlineTypedAggregate {
+  int direct;
+  enum CallerInlineMode mode;
+};
+
 extern int caller_inline_pointee;
 extern int caller_inline_member_pointee;
 extern struct CallerInlineAggregate caller_inline_aggregate;
@@ -29,6 +34,7 @@ int caller_inline_crash_leaf(
     int token, const int* observed, const int* const* selected,
     const struct CallerInlineAggregate* const* selected_aggregate,
     const struct CallerInlineAggregate* direct_aggregate,
+    const struct CallerInlineTypedAggregate* typed_aggregate,
     const int* fixed_array, const union CallerInlineUnion* selected_union);
 
 static __attribute__((always_inline)) inline int caller_inline_inner(int seed) {
@@ -43,21 +49,29 @@ static __attribute__((always_inline)) inline int caller_inline_inner(int seed) {
   struct CallerInlineBitFields caller_bit_fields = {
       .signed_bits = -7, .unsigned_bits = 41};
   enum CallerInlineMode caller_mode = CallerInlineBusy;
-  __asm__ volatile("" : : "m"(caller_bit_fields), "m"(caller_mode) : "memory");
+  struct CallerInlineTypedAggregate caller_typed_aggregate = {
+      0x31415926, CallerInlineBusy};
+  __asm__ volatile(""
+                   :
+                   : "m"(caller_bit_fields), "m"(caller_mode),
+                     "m"(caller_typed_aggregate)
+                   : "memory");
   int crashed = caller_inline_crash_leaf(
       seed + 5 + caller_bit_fields.signed_bits + caller_bit_fields.unsigned_bits +
           (int)caller_mode,
       &caller_shadow, &caller_pointer, &caller_aggregate_pointer,
-      &caller_direct_aggregate, caller_fixed_array, &caller_union);
+      &caller_direct_aggregate, &caller_typed_aggregate, caller_fixed_array,
+      &caller_union);
   __asm__ volatile(
       ".globl snapshot_caller_inline_resume_probe\n"
       "snapshot_caller_inline_resume_probe:\n"
       :
-      : "m"(caller_bit_fields), "m"(caller_mode)
+      : "m"(caller_bit_fields), "m"(caller_mode), "m"(caller_typed_aggregate)
       : "memory");
   return crashed + caller_shadow + *caller_pointer +
          caller_aggregate_pointer->direct + *caller_aggregate_pointer->linked +
          caller_direct_aggregate.direct + *caller_direct_aggregate.linked +
+         caller_typed_aggregate.direct + (int)caller_typed_aggregate.mode +
          caller_fixed_array[1] + caller_union.signed_value +
          caller_bit_fields.signed_bits + caller_bit_fields.unsigned_bits +
          (int)caller_mode;

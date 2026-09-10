@@ -16,6 +16,7 @@
 namespace {
 
 constexpr std::uint64_t kInnerShadowValue = 0xaaaabbbbccccddddULL;
+constexpr std::uint64_t kInlineInnerShadowValue = 0x141ULL;
 
 void require(bool condition, const std::string& message) {
   if (!condition) throw std::runtime_error(message);
@@ -216,14 +217,18 @@ void test_inline_artifact_gate(const std::string& integration_path,
   require(has_name(inner, "inner_only") && has_name(inner, "shadow_value") &&
               !has_name(inner, "outer_only") && count_name(inner, "shadow_value") == 1,
           "inner inline local ownership/shadowing is incorrect");
-  bool materialization_rejected = false;
+  const auto inline_shadow = inline_session.inspect_value("shadow_value");
+  require(inline_shadow.raw_value == kInlineInnerShadowValue &&
+              inline_shadow.byte_size == 4 && inline_shadow.is_signed,
+          "selected inner inline scalar did not materialize the exact compiler-owned binding");
+  bool pointer_traversal_rejected = false;
   try {
-    (void)inline_session.inspect_value("shadow_value");
+    (void)inline_session.dereference_value("shadow_value");
   } catch (const std::logic_error&) {
-    materialization_rejected = true;
+    pointer_traversal_rejected = true;
   }
-  require(materialization_rejected,
-          "inline selection silently reused physical value materialization semantics");
+  require(pointer_traversal_rejected,
+          "selected inline context unexpectedly enabled pointer traversal");
 
   inline_session.select_frame(0);
   require(!inline_session.selected_inline_context_index(),
@@ -238,8 +243,8 @@ void test_inline_artifact_gate(const std::string& integration_path,
   const auto mdbg_core =
       std::filesystem::absolute(integration_path).parent_path() / "mdbg-core";
   const std::string script =
-      "inline\\ninline 0\\nlocals\\ninline 1\\nlocals\\ninline physical\\nlocals\\n"
-      "inline 1\\nframe 0\\ninline\\nquit\\n";
+      "inline\\ninline 0\\nlocals\\ninline 1\\nlocals\\nprint shadow_value\\n"
+      "inline physical\\nlocals\\ninline 1\\nframe 0\\ninline\\nquit\\n";
   const std::string command = "printf '" + script + "' | " +
                               shell_quote(mdbg_core.string()) + " " +
                               shell_quote(core_path.string()) + " 2>&1";
@@ -258,8 +263,10 @@ void test_inline_artifact_gate(const std::string& integration_path,
           "mdbg-core did not list the compiler-proven inline call chain");
   require_inline_cli_scope(output.substr(outer_marker, inner_marker - outer_marker),
                            "outer_only", "inner_only", "outer inline CLI scope");
-  require_inline_cli_scope(output.substr(inner_marker, physical_marker - inner_marker),
-                           "inner_only", "outer_only", "inner inline CLI scope");
+  const auto inner_segment = output.substr(inner_marker, physical_marker - inner_marker);
+  require_inline_cli_scope(inner_segment, "inner_only", "outer_only", "inner inline CLI scope");
+  require(inner_segment.find("!shadow_value = 0x141 [4-byte signed]") != std::string::npos,
+          "mdbg-core did not print the exact selected inner inline scalar binding");
   const auto physical_segment = output.substr(physical_marker, frame_marker - physical_marker);
   require(physical_segment.find("variable physical_only") != std::string::npos &&
               physical_segment.find("variable outer_only") == std::string::npos &&

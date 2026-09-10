@@ -8,6 +8,10 @@ constexpr std::uint64_t kInlineDwAtRanges = 0x55;
 constexpr std::uint64_t kInlineDwAtCallColumn = 0x57;
 constexpr std::uint64_t kInlineDwAtCallFile = 0x58;
 constexpr std::uint64_t kInlineDwAtCallLine = 0x59;
+constexpr std::uint8_t kInlineDwOpRdx =
+    static_cast<std::uint8_t>(kDwOpReg0 + 1U);
+constexpr std::uint8_t kInlineDwOpRcx =
+    static_cast<std::uint8_t>(kDwOpReg0 + 2U);
 constexpr std::size_t kMaxInlineContexts = 8;
 constexpr std::size_t kMaxInlineRangeEntries = 64;
 constexpr std::size_t kMaxDiscoveredLocals = 64;
@@ -350,6 +354,117 @@ std::optional<std::vector<LocalDiscoveryEntry>> discover_inline_locals_unit(
   return result;
 }
 
+std::optional<LocalScalarValue> inspect_inline_scalar_unit(
+    const DebugSections& sections, const std::vector<std::byte>& ranges,
+    const CoreSnapshot& snapshot, const SnapshotInspectionFrameContext& frame,
+    const SnapshotModuleAddress& owner, std::uint64_t virtual_pc,
+    std::size_t inline_die_offset, std::string_view requested_name,
+    std::size_t unit_start, std::size_t& next_unit) {
+  std::uint16_t unit_version = 0;
+  const auto dies = parse_unit_dies(sections, unit_start, next_unit, unit_version);
+  const auto selected_inline = die_index_by_offset(dies, inline_die_offset);
+  if (!selected_inline) return std::nullopt;
+  if (dies[*selected_inline].tag != kDwTagInlinedSubroutine) {
+    throw std::runtime_error("selected inline context does not reference an inline DIE");
+  }
+
+  const auto unit_base = compilation_unit_base(dies);
+  if (!inline_scope_contains_pc(dies[*selected_inline], virtual_pc, ranges, unit_base,
+                                unit_version)) {
+    throw std::runtime_error("selected inline context no longer owns the physical frame PC");
+  }
+  const auto subprogram =
+      find_physical_subprogram(dies, virtual_pc, ranges, unit_base, unit_version);
+  if (!subprogram || !is_descendant_of(dies, *selected_inline, *subprogram)) {
+    throw std::runtime_error("selected inline context lost physical-frame ownership");
+  }
+
+  std::optional<std::size_t> value_index;
+  std::optional<std::size_t> best_depth;
+  bool owned_name = false;
+  for (std::size_t index = 0; index < dies.size(); ++index) {
+    const bool variable = dies[index].tag == kDwTagVariable;
+    const bool parameter = dies[index].tag == kDwTagFormalParameter;
+    if (!variable && !parameter) continue;
+    const auto* name = attribute_with_abstract_origin(dies, index, kDwAtName);
+    if (name == nullptr || name->text != requested_name) continue;
+    const auto depth = inline_local_scope_depth(
+        dies, index, *selected_inline, virtual_pc, ranges, unit_base, unit_version);
+    if (!depth) continue;
+    owned_name = true;
+    if (!value_index || *depth > *best_depth) {
+      value_index = index;
+      best_depth = *depth;
+      continue;
+    }
+    if (*depth == *best_depth) {
+      throw std::runtime_error(
+          "ambiguous selected-inline local at equal lexical depth: " +
+          std::string(requested_name));
+    }
+  }
+  if (!value_index) {
+    throw std::runtime_error(
+        owned_name ? "selected-inline local has no active value binding: " +
+                         std::string(requested_name)
+                   : "local value is not owned by the selected inline context: " +
+                         std::string(requested_name));
+  }
+
+  const auto& value_die = dies[*value_index];
+  const auto* location = attribute(value_die, kDwAtLocation);
+  const auto* type = attribute_with_abstract_origin(dies, *value_index, kDwAtType);
+  if (location == nullptr) {
+    throw std::runtime_error("selected-inline local has no DW_AT_location");
+  }
+  if (type == nullptr || type->form != kDwFormRef4) {
+    throw std::runtime_error(
+        "selected-inline local has no supported DW_FORM_ref4 type");
+  }
+
+  const auto value_type = resolve_value_type(dies, type->number);
+  if (value_type.kind != LocalValueKind::Integer || value_type.byte_size == 0 ||
+      value_type.byte_size > sizeof(std::uint64_t)) {
+    throw std::runtime_error(
+        "selected-inline scalar materialization requires a bounded integer value");
+  }
+
+  std::vector<std::byte> expression;
+  if (location->form == kDwFormExprloc) {
+    expression = location->expression;
+  } else if (location->form == kDwFormSecOffset || location->form == kDwFormLoclistx) {
+    expression = active_location_expression(sections, location->number, virtual_pc,
+                                            unit_base, unit_version);
+  } else {
+    throw std::runtime_error(
+        "selected-inline scalar has no supported DW_AT_location form");
+  }
+  if (expression.size() != 1) {
+    throw std::runtime_error(
+        "selected-inline scalar requires one exact compiler-proven register operation");
+  }
+
+  const auto opcode = std::to_integer<std::uint8_t>(expression.front());
+  const auto& regs = snapshot.thread(frame.thread_tid).registers;
+  std::uint64_t raw = 0;
+  if (opcode == kInlineDwOpRdx) {
+    raw = regs.rdx;
+  } else if (opcode == kInlineDwOpRcx) {
+    raw = regs.rcx;
+  } else {
+    throw std::runtime_error(
+        "selected-inline scalar currently requires compiler-proven DW_OP_reg1 (rdx) or "
+        "DW_OP_reg2 (rcx)");
+  }
+
+  LocalScalarValue result{owner.module_path, std::string(requested_name),
+                          truncate_integer(raw, value_type.byte_size),
+                          value_type.byte_size, value_type.is_signed,
+                          LocalValueKind::Integer};
+  result.storage = LocalValueStorage::SnapshotCoreRegister;
+  return result;
+}
+
 }  // namespace
 
 std::vector<InlineCallsiteContext> discover_inline_call_chain(
@@ -435,6 +550,46 @@ std::vector<LocalDiscoveryEntry> discover_inline_local_values(
     if (result) return *result;
     if (next <= unit) {
       throw std::runtime_error("DWARF inline-local parser did not advance to the next unit");
+    }
+    unit = next;
+  }
+  throw std::runtime_error("selected inline DIE is unavailable in the owning debug file");
+}
+
+LocalScalarValue inspect_inline_local_value(
+    const CoreSnapshot& snapshot, const SnapshotInspectionFrameContext& frame,
+    std::size_t inline_die_offset, std::string_view name,
+    const SnapshotModulePathResolver& module_paths) {
+  if (name.empty()) {
+    throw std::invalid_argument("selected-inline local name must not be empty");
+  }
+  validate_snapshot_inspection_frame(snapshot, frame);
+  validate_snapshot_frame_lookup_pc(frame);
+  if (frame.index != 0) {
+    throw std::runtime_error(
+        "selected-inline scalar materialization is currently bounded to exact frame zero");
+  }
+
+  const auto lookup_runtime_pc = snapshot_frame_lookup_pc(frame);
+  const auto owner =
+      resolve_snapshot_module_address(snapshot, lookup_runtime_pc, module_paths);
+  if (owner.module_path != frame.module_path) {
+    throw std::logic_error("selected-inline scalar module ownership changed");
+  }
+  const auto debug_path = module_paths.resolve_debug_file(owner.module_path);
+  const auto sections = read_debug_sections(debug_path);
+  const auto ranges = read_debug_ranges(debug_path);
+
+  std::size_t unit = 0;
+  while (unit < sections.info.size()) {
+    std::size_t next = unit;
+    const auto result = inspect_inline_scalar_unit(
+        sections, ranges, snapshot, frame, owner, owner.virtual_address,
+        inline_die_offset, name, unit, next);
+    if (result) return *result;
+    if (next <= unit) {
+      throw std::runtime_error(
+          "DWARF selected-inline scalar parser did not advance to the next unit");
     }
     unit = next;
   }

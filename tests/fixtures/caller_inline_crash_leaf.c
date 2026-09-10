@@ -1,9 +1,9 @@
 #include <stdint.h>
 
 __attribute__((noinline)) int caller_inline_crash_leaf(int token, const int* observed,
-                                                       const int* selected) {
+                                                       const int* const* selected) {
   const int observed_value = *observed;
-  const int selected_value = *selected;
+  const int selected_value = **selected;
   __asm__ volatile(
       ".globl snapshot_caller_inline_crash_probe\n"
       "snapshot_caller_inline_crash_probe:\n"

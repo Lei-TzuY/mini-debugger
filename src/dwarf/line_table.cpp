@@ -383,22 +383,19 @@ void read_v5_directory_and_file_tables(
   }
 }
 
-std::optional<SourceLocation> source_location(const State& state,
-                                              const std::vector<std::string>& directories,
-                                              const std::vector<FileEntry>& files,
-                                              bool dwarf5) {
-  if (state.line <= 0) return std::nullopt;
-
-  std::size_t file_index = 0;
+std::optional<std::size_t> file_entry_offset(std::uint64_t file_index,
+                                             std::size_t file_count, bool dwarf5) {
   if (dwarf5) {
-    if (state.file >= files.size()) return std::nullopt;
-    file_index = static_cast<std::size_t>(state.file);
-  } else {
-    if (state.file == 0 || state.file > files.size()) return std::nullopt;
-    file_index = static_cast<std::size_t>(state.file - 1);
+    if (file_index >= file_count) return std::nullopt;
+    return static_cast<std::size_t>(file_index);
   }
+  if (file_index == 0 || file_index > file_count) return std::nullopt;
+  return static_cast<std::size_t>(file_index - 1);
+}
 
-  const auto& file = files[file_index];
+std::string resolved_file_path(const FileEntry& file,
+                               const std::vector<std::string>& directories,
+                               bool dwarf5) {
   std::filesystem::path path(file.name);
   if (!path.is_absolute()) {
     if (dwarf5) {
@@ -413,7 +410,18 @@ std::optional<SourceLocation> source_location(const State& state,
              path;
     }
   }
-  return SourceLocation{path.string(), static_cast<std::uint64_t>(state.line), state.column};
+  return path.string();
+}
+
+std::optional<SourceLocation> source_location(const State& state,
+                                              const std::vector<std::string>& directories,
+                                              const std::vector<FileEntry>& files,
+                                              bool dwarf5) {
+  if (state.line <= 0) return std::nullopt;
+  const auto file_index = file_entry_offset(state.file, files.size(), dwarf5);
+  if (!file_index) return std::nullopt;
+  return SourceLocation{resolved_file_path(files[*file_index], directories, dwarf5),
+                        static_cast<std::uint64_t>(state.line), state.column};
 }
 
 }  // namespace
@@ -522,11 +530,15 @@ void DwarfLineTable::parse() {
     }
     cursor = header_end;
 
+    const auto file_table_index = file_tables_.size();
+    file_tables_.push_back(FileTable{dwarf5, {}});
+
     State state;
     std::optional<Row> previous;
     auto emit = [&](bool end_sequence) {
       if (previous && state.address > previous->address && previous->location) {
-        ranges_.push_back({previous->address, state.address, *previous->location});
+        ranges_.push_back(
+            {previous->address, state.address, *previous->location, file_table_index});
       }
       if (end_sequence) {
         previous.reset();
@@ -630,6 +642,12 @@ void DwarfLineTable::parse() {
                     static_cast<std::int64_t>(adjusted % line_range);
       emit(false);
     }
+
+    auto& retained = file_tables_[file_table_index].files;
+    retained.reserve(files.size());
+    for (const auto& file : files) {
+      retained.push_back(resolved_file_path(file, directories, dwarf5));
+    }
   }
 
   std::sort(ranges_.begin(), ranges_.end(), [](const Range& left, const Range& right) {
@@ -654,6 +672,30 @@ std::optional<SourceLocation> DwarfLineTable::find_runtime_address(
   const auto bias = elf.load_bias(pid);
   if (address < bias) return std::nullopt;
   return find_virtual_address(address - bias);
+}
+
+std::optional<std::string> DwarfLineTable::find_virtual_file(
+    std::uint64_t address, std::uint64_t file_index) const {
+  std::optional<std::size_t> owner;
+  for (const auto& range : ranges_) {
+    if (address < range.begin || address >= range.end) continue;
+    if (!owner) {
+      owner = range.file_table_index;
+      continue;
+    }
+    if (*owner != range.file_table_index) {
+      throw std::runtime_error(
+          "virtual address is owned by multiple DWARF line-table units");
+    }
+  }
+  if (!owner) return std::nullopt;
+  if (*owner >= file_tables_.size()) {
+    throw std::logic_error("DWARF line range lost its owning file table");
+  }
+  const auto& table = file_tables_[*owner];
+  const auto offset = file_entry_offset(file_index, table.files.size(), table.dwarf5);
+  if (!offset) return std::nullopt;
+  return table.files[*offset];
 }
 
 }  // namespace mdbg

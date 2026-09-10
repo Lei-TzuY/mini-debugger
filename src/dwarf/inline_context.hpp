@@ -5,6 +5,7 @@
 
 #include <cstddef>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace mdbg {
@@ -28,5 +29,10 @@ std::vector<InlineCallsiteContext> discover_inline_call_chain(
 std::vector<LocalDiscoveryEntry> discover_inline_local_values(
     const CoreSnapshot& snapshot, const SnapshotInspectionFrameContext& frame,
     std::size_t inline_die_offset, const SnapshotModulePathResolver& module_paths);
+
+LocalScalarValue inspect_inline_local_value(
+    const CoreSnapshot& snapshot, const SnapshotInspectionFrameContext& frame,
+    std::size_t inline_die_offset, std::string_view name,
+    const SnapshotModulePathResolver& module_paths);
 
 }  // namespace mdbg

@@ -51,6 +51,10 @@ jobs:
             tests/core_inline_array_session_integration.cpp \
             build/libmdbg_core.a -pthread \
             -o /tmp/core-inline-array-session
+          "$CXX" -std=c++17 -Wall -Wextra -Wpedantic -Werror -Isrc \
+            tests/core_inline_union_session_integration.cpp \
+            build/libmdbg_core.a -pthread \
+            -o /tmp/core-inline-union-session
       - name: Verify selected-inline aggregate session and CLI
         run: |
           sudo sysctl -w kernel.core_pattern=/tmp/mdbg-core-%p
@@ -59,3 +63,5 @@ jobs:
           /tmp/core-inline-aggregate-session /tmp/caller-inline-nopie build/mdbg-core
           /tmp/core-inline-array-session /tmp/caller-inline-pie build/mdbg-core
           /tmp/core-inline-array-session /tmp/caller-inline-nopie build/mdbg-core
+          /tmp/core-inline-union-session /tmp/caller-inline-pie build/mdbg-core
+          /tmp/core-inline-union-session /tmp/caller-inline-nopie build/mdbg-core

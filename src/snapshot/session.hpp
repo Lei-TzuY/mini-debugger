@@ -211,6 +211,39 @@ class CoreInspectionSession {
         snapshot_, frame, name, member_name, module_paths_);
   }
 
+  [[nodiscard]] LocalScalarValue inspect_aggregate_member(
+      std::string_view name, std::string_view member_name) const {
+    const auto& frame = selected_frame();
+    validate_selected_frame(frame);
+    if (!selected_inline_context_) {
+      throw std::logic_error(
+          "direct aggregate member traversal requires a selected inline context");
+    }
+    if (selected_inline_context_->module_path != frame.module_path) {
+      throw std::logic_error("selected inline context belongs to a different module");
+    }
+    const auto aggregate = inspect_inline_local_value(
+        snapshot_, frame, selected_inline_context_->die_offset, name, module_paths_);
+    return inspect_inline_local_aggregate_member(aggregate, member_name);
+  }
+
+  [[nodiscard]] LocalScalarValue dereference_aggregate_member(
+      std::string_view name, std::string_view member_name) const {
+    const auto& frame = selected_frame();
+    validate_selected_frame(frame);
+    if (!selected_inline_context_) {
+      throw std::logic_error(
+          "direct aggregate member traversal requires a selected inline context");
+    }
+    if (selected_inline_context_->module_path != frame.module_path) {
+      throw std::logic_error("selected inline context belongs to a different module");
+    }
+    const auto aggregate = inspect_inline_local_value(
+        snapshot_, frame, selected_inline_context_->die_offset, name, module_paths_);
+    return dereference_inline_local_aggregate_member(
+        snapshot_, aggregate, member_name, module_paths_);
+  }
+
  private:
   void validate_selected_frame(const SnapshotInspectionFrameContext& frame) const {
     validate_snapshot_inspection_frame(snapshot_, frame);

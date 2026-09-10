@@ -274,7 +274,9 @@ void print_help() {
                "  frame <index>        select an immutable snapshot frame\n"
                "  list | l             show source context for the selected frame\n"
                "  print <name> | p <name>  inspect a source value in the selected frame\n"
-               "  deref <name>         dereference one bounded integer pointer value\n"
+               "  deref <name>         dereference one bounded pointer value\n"
+               "  member <name> <member>  inspect one bounded pointer-valued direct member\n"
+               "  deref-member <name> <member>  dereference that member once\n"
                "  x <address> <length> inspect immutable snapshot memory\n"
                "  help                 show this help\n"
                "  quit | q             exit the core session\n";
@@ -379,6 +381,26 @@ int run_session(const std::string& core_path, mdbg::SnapshotModulePathResolver m
           throw std::invalid_argument("usage: deref <name>");
         }
         print_value(session.dereference_value(name));
+        continue;
+      }
+      if (command == "member") {
+        std::string name;
+        std::string member;
+        std::string extra;
+        if (!(input >> name >> member) || (input >> extra)) {
+          throw std::invalid_argument("usage: member <name> <member>");
+        }
+        print_value(session.inspect_pointer_member(name, member));
+        continue;
+      }
+      if (command == "deref-member") {
+        std::string name;
+        std::string member;
+        std::string extra;
+        if (!(input >> name >> member) || (input >> extra)) {
+          throw std::invalid_argument("usage: deref-member <name> <member>");
+        }
+        print_value(session.dereference_pointer_member(name, member));
         continue;
       }
       if (command == "x") {

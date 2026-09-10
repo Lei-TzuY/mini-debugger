@@ -39,6 +39,8 @@ jobs:
           python3 tests/core_caller_inline_dwarf_oracle.py /tmp/caller-inline-nopie
           python3 tests/core_caller_inline_union_dwarf_oracle.py /tmp/caller-inline-pie
           python3 tests/core_caller_inline_union_dwarf_oracle.py /tmp/caller-inline-nopie
+          python3 tests/core_caller_inline_bitfield_dwarf_oracle.py /tmp/caller-inline-pie
+          python3 tests/core_caller_inline_bitfield_dwarf_oracle.py /tmp/caller-inline-nopie
       - name: Build core inspection surface
         run: |
           cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug

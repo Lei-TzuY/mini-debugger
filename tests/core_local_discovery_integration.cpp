@@ -132,6 +132,16 @@ void test_core_cli(const std::string& integration_path, const std::string& core_
           "sibling frame CLI leaked a crash-frame shadowed local");
 }
 
+void require_inline_cli_scope(const std::string& segment, const std::string& present,
+                              const std::string& absent, const std::string& context) {
+  require(segment.find("variable " + present) != std::string::npos,
+          context + " did not expose its owned local");
+  require(segment.find("variable shadow_value") != std::string::npos,
+          context + " did not expose its shadowed binding");
+  require(segment.find("variable " + absent) == std::string::npos,
+          context + " leaked a nested/sibling inline local");
+}
+
 void test_inline_artifact_gate(const std::string& integration_path,
                                const mdbg::CoreInspectionSession& baseline_session) {
   const char* compiler_env = std::getenv("CC");
@@ -167,15 +177,92 @@ void test_inline_artifact_gate(const std::string& integration_path,
   require(std::filesystem::exists(core_path),
           "optimized inline fixture did not produce the expected genuine core");
 
+  mdbg::CoreInspectionSession inline_session(core_path.string());
+  const auto contexts = inline_session.inline_contexts();
+  require(contexts.size() == 2, "optimized core did not expose exactly two inline contexts");
+  require(contexts[0].name == "inline_outer" && contexts[0].depth == 0 &&
+              contexts[1].name == "inline_inner" && contexts[1].depth == 1,
+          "inline contexts were not ordered outer-to-inner with bounded depth");
+  require(contexts[0].module_path == inline_session.selected_frame().module_path &&
+              contexts[1].module_path == inline_session.selected_frame().module_path,
+          "inline contexts lost physical-frame module ownership");
+  require(contexts[0].call_site.line != 0 && contexts[1].call_site.line != 0,
+          "inline contexts lost compiler call-site line metadata");
+
+  const auto physical = inline_session.locals();
+  require(has_name(physical, "physical_only"),
+          "physical frame did not retain its compiler-owned local");
+  require(!has_name(physical, "outer_only") && !has_name(physical, "inner_only") &&
+              !has_name(physical, "shadow_value"),
+          "physical local discovery flattened inline descendants");
+
+  inline_session.select_inline_context(0);
+  require(inline_session.selected_inline_context_index() == 0,
+          "outer inline selection was not recorded");
+  const auto outer = inline_session.locals();
+  require(has_name(outer, "outer_only") && has_name(outer, "shadow_value") &&
+              !has_name(outer, "inner_only") && count_name(outer, "shadow_value") == 1,
+          "outer inline local ownership/shadowing is incorrect");
+
+  inline_session.select_inline_context(1);
+  require(inline_session.selected_inline_context_index() == 1,
+          "inner inline selection was not recorded");
+  const auto inner = inline_session.locals();
+  require(has_name(inner, "inner_only") && has_name(inner, "shadow_value") &&
+              !has_name(inner, "outer_only") && count_name(inner, "shadow_value") == 1,
+          "inner inline local ownership/shadowing is incorrect");
+  bool materialization_rejected = false;
+  try {
+    (void)inline_session.inspect_value("shadow_value");
+  } catch (const std::logic_error&) {
+    materialization_rejected = true;
+  }
+  require(materialization_rejected,
+          "inline selection silently reused physical value materialization semantics");
+
+  inline_session.select_frame(0);
+  require(!inline_session.selected_inline_context_index(),
+          "physical frame selection did not invalidate inline ownership");
+  inline_session.select_inline_context(1);
+  const auto selected_tid = inline_session.selected_thread_tid();
+  inline_session.select_thread(selected_tid);
+  require(!inline_session.selected_inline_context_index() &&
+              inline_session.selected_frame_index() == 0,
+          "thread selection did not invalidate inline ownership and reset frame zero");
+
   const auto mdbg_core =
       std::filesystem::absolute(integration_path).parent_path() / "mdbg-core";
-  const std::string command = "printf 'inline\\nquit\\n' | " +
+  const std::string script =
+      "inline\\ninline 0\\nlocals\\ninline 1\\nlocals\\ninline physical\\nlocals\\n"
+      "inline 1\\nframe 0\\ninline\\nquit\\n";
+  const std::string command = "printf '" + script + "' | " +
                               shell_quote(mdbg_core.string()) + " " +
                               shell_quote(core_path.string()) + " 2>&1";
   const auto output = run_command(command);
-  require(output.find("inline_outer") != std::string::npos &&
-              output.find("inline_inner") != std::string::npos,
-          "mdbg-core did not expose the compiler-proven inline call chain");
+  const auto outer_marker = output.find("selected inline 0");
+  const auto inner_marker = output.find("selected inline 1", outer_marker);
+  const auto physical_marker = output.find("selected physical frame 0", inner_marker);
+  const auto frame_marker = output.find("selected frame 0", physical_marker);
+  require(outer_marker != std::string::npos && inner_marker != std::string::npos &&
+              physical_marker != std::string::npos && frame_marker != std::string::npos &&
+              outer_marker < inner_marker && inner_marker < physical_marker &&
+              physical_marker < frame_marker,
+          "mdbg-core inline/physical/frame selection markers are incomplete");
+  require(output.substr(0, outer_marker).find("inline_outer") != std::string::npos &&
+              output.substr(0, outer_marker).find("inline_inner") != std::string::npos,
+          "mdbg-core did not list the compiler-proven inline call chain");
+  require_inline_cli_scope(output.substr(outer_marker, inner_marker - outer_marker),
+                           "outer_only", "inner_only", "outer inline CLI scope");
+  require_inline_cli_scope(output.substr(inner_marker, physical_marker - inner_marker),
+                           "inner_only", "outer_only", "inner inline CLI scope");
+  const auto physical_segment = output.substr(physical_marker, frame_marker - physical_marker);
+  require(physical_segment.find("variable physical_only") != std::string::npos &&
+              physical_segment.find("variable outer_only") == std::string::npos &&
+              physical_segment.find("variable inner_only") == std::string::npos &&
+              physical_segment.find("variable shadow_value") == std::string::npos,
+          "mdbg-core physical scope did not exclude inline descendants");
+  require(output.substr(frame_marker).find("* inline") == std::string::npos,
+          "frame selection retained stale inline selection");
 
   std::error_code error;
   std::filesystem::remove(core_path, error);

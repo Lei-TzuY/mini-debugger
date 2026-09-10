@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   patch-production:
-    if: github.event.head_commit.message != 'feat: compose enum identity through aggregate members'
+    if: "github.event.head_commit.message != 'feat: compose enum identity through aggregate members'"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

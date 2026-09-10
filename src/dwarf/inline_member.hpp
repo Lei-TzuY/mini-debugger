@@ -108,6 +108,33 @@ inline const LocalStructMember& aggregate_member(
   return *member;
 }
 
+inline const LocalStructMember& union_member(
+    const LocalScalarValue& value, std::string_view member_name) {
+  if (member_name.empty()) {
+    throw std::invalid_argument("selected-inline union member name must not be empty");
+  }
+  if (value.kind != LocalValueKind::Union || value.members.empty()) {
+    throw std::runtime_error(
+        "selected-inline local is not a materialized bounded union: " + value.name);
+  }
+  const auto member = std::find_if(
+      value.members.begin(), value.members.end(),
+      [member_name](const LocalStructMember& candidate) {
+        return candidate.name == member_name;
+      });
+  if (member == value.members.end()) {
+    throw std::runtime_error(
+        "bounded selected-inline union has no member named: " +
+        std::string(member_name));
+  }
+  if (member->kind != LocalValueKind::Integer || member->pointee_type ||
+      member->byte_size == 0 || member->byte_size > sizeof(std::uint64_t)) {
+    throw std::runtime_error(
+        "selected-inline union member kind is outside the bounded explicit-selection model");
+  }
+  return *member;
+}
+
 }  // namespace inline_member_detail
 
 inline LocalScalarValue inspect_inline_local_pointer_member(
@@ -227,6 +254,17 @@ inline LocalScalarValue inspect_inline_local_aggregate_member(
         member.pointee_type->byte_size, member.pointee_type->is_signed,
         LocalValueKind::Integer, {}};
   }
+  return result;
+}
+
+inline LocalScalarValue inspect_inline_local_union_member(
+    const LocalScalarValue& value, std::string_view member_name) {
+  const auto& member = inline_member_detail::union_member(value, member_name);
+  LocalScalarValue result{value.module_path,
+                value.name + "." + std::string(member_name),
+                member.raw_value, member.byte_size,
+                member.is_signed, member.kind};
+  inline_member_detail::copy_storage(result, value);
   return result;
 }
 

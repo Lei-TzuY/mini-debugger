@@ -16,7 +16,7 @@ class SnapshotModulePathResolver;
 struct InspectionFrameContext;
 struct SnapshotInspectionFrameContext;
 
-enum class LocalValueKind { Integer, Pointer, Floating, Structure, Array };
+enum class LocalValueKind { Integer, Pointer, Floating, Structure, Union, Array };
 enum class LocalDiscoveryKind { Variable, FormalParameter };
 enum class LocalValueStorage {
   Computed,

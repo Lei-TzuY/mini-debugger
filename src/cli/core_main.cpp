@@ -208,7 +208,14 @@ void print_floating_value(const mdbg::LocalScalarValue& value) {
 
 void print_value(const mdbg::LocalScalarValue& value) {
   std::cout << value.module_path << '!' << value.name << " = ";
-  if (value.kind == mdbg::LocalValueKind::Structure) {
+  if (value.kind == mdbg::LocalValueKind::Union) {
+    std::cout << "union{";
+    for (std::size_t index = 0; index < value.members.size(); ++index) {
+      if (index != 0) std::cout << ", ";
+      std::cout << value.members[index].name;
+    }
+    std::cout << '}';
+  } else if (value.kind == mdbg::LocalValueKind::Structure) {
     std::cout << "{ ";
     for (std::size_t index = 0; index < value.members.size(); ++index) {
       if (index != 0) std::cout << ", ";
@@ -234,6 +241,8 @@ void print_value(const mdbg::LocalScalarValue& value) {
   std::cout << " [" << value.byte_size << "-byte ";
   if (value.kind == mdbg::LocalValueKind::Floating) {
     std::cout << "floating";
+  } else if (value.kind == mdbg::LocalValueKind::Union) {
+    std::cout << "union";
   } else if (value.kind == mdbg::LocalValueKind::Array) {
     if (!value.array_type) {
       throw std::logic_error("bounded fixed-array value lost its type metadata");
@@ -324,6 +333,7 @@ void print_help() {
                "  member <name> <member>  inspect one bounded pointer-valued direct member\n"
                "  deref-member <name> <member>  dereference that member once\n"
                "  aggregate-member <name> <member>  select one by-value aggregate member\n"
+               "  union-member <name> <member>  explicitly select one overlapping union member\n"
                "  deref-aggregate-member <name> <member>  dereference that member once\n"
                "  array-element <name> <index>  select one bounded fixed-array element\n"
                "  x <address> <length> inspect immutable snapshot memory\n"
@@ -487,6 +497,16 @@ int run_session(const std::string& core_path, mdbg::SnapshotModulePathResolver m
           throw std::invalid_argument("usage: aggregate-member <name> <member>");
         }
         print_value(session.inspect_aggregate_member(name, member));
+        continue;
+      }
+      if (command == "union-member") {
+        std::string name;
+        std::string member;
+        std::string extra;
+        if (!(input >> name >> member) || (input >> extra)) {
+throw std::invalid_argument("usage: union-member <name> <member>");
+        }
+        print_value(session.inspect_union_member(name, member));
         continue;
       }
       if (command == "deref-aggregate-member") {

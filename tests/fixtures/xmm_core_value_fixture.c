@@ -8,6 +8,8 @@
 #include <unistd.h>
 
 #define TYPED_OBJECT_MARKER_VALUE UINT64_C(0x13579bdf2468ace0)
+#define SHADOW_OUTER_VALUE UINT64_C(0x1111222233334444)
+#define SHADOW_INNER_VALUE UINT64_C(0xaaaabbbbccccdddd)
 
 static volatile sig_atomic_t sibling_ready = 0;
 static volatile sig_atomic_t sibling_tid = 0;
@@ -51,21 +53,28 @@ __attribute__((noinline, noreturn)) static void crash_with_xmm(void) {
       &pointee_value, TYPED_OBJECT_MARKER_VALUE};
   static struct TypedObjectPointee* typed_pointer = &typed_value;
   uint64_t stack_local = UINT64_C(0x4f3e2d1c0b9a8877);
-  double xmm_value = 1234.25;
-  __asm__ volatile("" : "+m"(stack_local), "+x"(xmm_value)
-                   : "m"(scalar_pointer), "m"(pointee_value),
-                     "m"(aggregate_pointer), "m"(aggregate_value),
-                     "m"(typed_pointer), "m"(typed_value)
-                   : "memory");
-  __asm__ volatile(
-      ".globl snapshot_xmm_crash_probe\n"
-      "snapshot_xmm_crash_probe:\n"
-      "movl $0, (%%rax)\n"
-      : "+x"(xmm_value)
-      : "a"(0), "m"(stack_local), "m"(scalar_pointer), "m"(pointee_value),
-        "m"(aggregate_pointer), "m"(aggregate_value), "m"(typed_pointer),
-        "m"(typed_value)
-      : "memory");
+  uint64_t shadow_value = SHADOW_OUTER_VALUE;
+  uint64_t* outer_shadow = &shadow_value;
+  __asm__ volatile("" : "+m"(shadow_value) : : "memory");
+  {
+    uint64_t shadow_value = SHADOW_INNER_VALUE;
+    double xmm_value = 1234.25;
+    __asm__ volatile("" : "+m"(stack_local), "+m"(shadow_value), "+m"(*outer_shadow),
+                     "+x"(xmm_value)
+                     : "m"(scalar_pointer), "m"(pointee_value),
+                       "m"(aggregate_pointer), "m"(aggregate_value),
+                       "m"(typed_pointer), "m"(typed_value)
+                     : "memory");
+    __asm__ volatile(
+        ".globl snapshot_xmm_crash_probe\n"
+        "snapshot_xmm_crash_probe:\n"
+        "movl $0, (%%rax)\n"
+        : "+x"(xmm_value)
+        : "a"(0), "m"(stack_local), "m"(shadow_value), "m"(*outer_shadow),
+          "m"(scalar_pointer), "m"(pointee_value), "m"(aggregate_pointer),
+          "m"(aggregate_value), "m"(typed_pointer), "m"(typed_value)
+        : "memory");
+  }
   __builtin_unreachable();
 }
 

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "dwarf/inline_context.hpp"
 #include "dwarf/local_value.hpp"
 #include "snapshot/frame_lookup.hpp"
 #include "snapshot/inspection.hpp"
@@ -8,6 +9,7 @@
 #include "snapshot/startup.hpp"
 
 #include <cstddef>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -52,6 +54,9 @@ class CoreInspectionSession {
     return snapshot_.threads();
   }
   [[nodiscard]] std::size_t selected_frame_index() const noexcept { return selected_frame_; }
+  [[nodiscard]] std::optional<std::size_t> selected_inline_context_index() const noexcept {
+    return selected_inline_context_index_;
+  }
 
   [[nodiscard]] const SnapshotInspectionFrameContext& selected_frame() const {
     return trace_.frames.at(selected_frame_);
@@ -84,6 +89,26 @@ class CoreInspectionSession {
     return read_snapshot_memory(snapshot_, module_paths_, address, length);
   }
 
+  [[nodiscard]] std::vector<InlineCallsiteContext> inline_contexts() const {
+    const auto& frame = selected_frame();
+    validate_selected_frame(frame);
+    return discover_inline_call_chain(snapshot_, frame, module_paths_);
+  }
+
+  void select_inline_context(std::size_t index) {
+    const auto contexts = inline_contexts();
+    if (index >= contexts.size()) {
+      throw std::out_of_range("core inline-context index is out of range");
+    }
+    selected_inline_context_ = contexts[index];
+    selected_inline_context_index_ = index;
+  }
+
+  void clear_inline_context() noexcept {
+    selected_inline_context_.reset();
+    selected_inline_context_index_.reset();
+  }
+
   void select_thread(pid_t tid) {
     const auto& thread = snapshot_.thread(tid);
     auto next_trace =
@@ -96,6 +121,7 @@ class CoreInspectionSession {
     trace_ = std::move(next_trace);
     selected_thread_tid_ = tid;
     selected_frame_ = 0;
+    clear_inline_context();
   }
 
   void select_frame(std::size_t index) {
@@ -108,21 +134,32 @@ class CoreInspectionSession {
       throw std::logic_error("core frame belongs to a different selected thread");
     }
     selected_frame_ = index;
+    clear_inline_context();
   }
 
   [[nodiscard]] std::vector<LocalDiscoveryEntry> locals() const {
     const auto& frame = selected_frame();
     validate_selected_frame(frame);
+    if (selected_inline_context_) {
+      if (selected_inline_context_->module_path != frame.module_path) {
+        throw std::logic_error("selected inline context belongs to a different module");
+      }
+      return discover_inline_local_values(snapshot_, frame,
+                                          selected_inline_context_->die_offset,
+                                          module_paths_);
+    }
     return discover_local_values(snapshot_, frame, module_paths_);
   }
 
   [[nodiscard]] LocalScalarValue inspect_value(std::string_view name) const {
+    require_physical_value_context();
     const auto& frame = selected_frame();
     validate_selected_frame(frame);
     return inspect_local_value(snapshot_, frame, name, module_paths_);
   }
 
   [[nodiscard]] LocalScalarValue dereference_value(std::string_view name) const {
+    require_physical_value_context();
     const auto& frame = selected_frame();
     validate_selected_frame(frame);
     return dereference_local_pointer(snapshot_, frame, name, module_paths_);
@@ -130,6 +167,7 @@ class CoreInspectionSession {
 
   [[nodiscard]] LocalScalarValue inspect_pointer_member(
       std::string_view name, std::string_view member_name) const {
+    require_physical_value_context();
     const auto& frame = selected_frame();
     validate_selected_frame(frame);
     return inspect_local_pointer_member(
@@ -138,6 +176,7 @@ class CoreInspectionSession {
 
   [[nodiscard]] LocalScalarValue dereference_pointer_member(
       std::string_view name, std::string_view member_name) const {
+    require_physical_value_context();
     const auto& frame = selected_frame();
     validate_selected_frame(frame);
     return dereference_local_pointer_member(
@@ -145,6 +184,13 @@ class CoreInspectionSession {
   }
 
  private:
+  void require_physical_value_context() const {
+    if (selected_inline_context_) {
+      throw std::logic_error(
+          "inline-context value materialization is not supported; use locals or select physical");
+    }
+  }
+
   void validate_selected_frame(const SnapshotInspectionFrameContext& frame) const {
     validate_snapshot_inspection_frame(snapshot_, frame);
     validate_snapshot_frame_lookup_pc(frame);
@@ -173,6 +219,8 @@ class CoreInspectionSession {
   pid_t selected_thread_tid_{-1};
   SnapshotInspectionTrace trace_;
   std::size_t selected_frame_{0};
+  std::optional<InlineCallsiteContext> selected_inline_context_;
+  std::optional<std::size_t> selected_inline_context_index_;
 };
 
 }  // namespace mdbg

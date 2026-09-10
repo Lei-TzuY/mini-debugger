@@ -216,6 +216,130 @@ def require_mdbg_core_callsite_ownership(path):
         )
 
 
+def caller_shadow_location_evidence(path, records, by_offset):
+    evidence = []
+    for position, record in enumerate(records):
+        if record["tag"] != "DW_TAG_inlined_subroutine":
+            continue
+        if origin_name(record, by_offset) != "caller_inline_inner":
+            continue
+        for child in records[position + 1 :]:
+            if child["depth"] <= record["depth"]:
+                break
+            if child["tag"] not in {"DW_TAG_variable", "DW_TAG_formal_parameter"}:
+                continue
+            if resolved_name(child, by_offset) != "caller_shadow":
+                continue
+            location = child["attrs"].get("location")
+            if location:
+                evidence.append(
+                    f"caller_inline_inner:caller_shadow: die=0x{child['offset']:x} "
+                    f"depth={child['depth']} location={location}"
+                )
+    print("caller-frame inline scalar DWARF locations:")
+    for line in evidence:
+        print("  " + line)
+    if not evidence:
+        raise RuntimeError("caller_shadow has no compiler-produced concrete DW_AT_location")
+    try:
+        loc_dump = run("readelf", "--debug-dump=loc", path)
+    except subprocess.CalledProcessError as error:
+        loc_dump = error.output
+    print("caller-frame inline location-list dump (bounded):")
+    print(loc_dump[:12000])
+    return evidence
+
+
+def require_caller_inline_materialization(reference_path):
+    compiler = os.environ.get("CC")
+    if not compiler:
+        raise RuntimeError("CC is unavailable for caller-inline compiler evidence")
+    non_pie = "nopie-" in os.path.basename(reference_path)
+    mode = ["-fno-pie", "-no-pie"] if non_pie else ["-fPIE", "-pie"]
+    fixture = f"/tmp/mdbg-caller-inline-{'nopie' if non_pie else 'pie'}-{os.getpid()}"
+    command = [
+        compiler,
+        "-O2",
+        "-g",
+        "-gdwarf-4",
+        *mode,
+        "tests/fixtures/caller_inline_core_fixture.c",
+        "tests/fixtures/caller_inline_crash_leaf.c",
+        "-o",
+        fixture,
+    ]
+    subprocess.check_output(command, text=True, stderr=subprocess.STDOUT)
+
+    core_path = None
+    try:
+        records = parse_dies(run("readelf", "--debug-dump=info", fixture))
+        by_offset = {record["offset"]: record for record in records}
+        resume = symbol_address(fixture, "snapshot_caller_inline_resume_probe")
+        contexts = addr2line_contexts(fixture, resume)
+        wanted = ["caller_inline_inner", "caller_inline_outer", "caller_physical_frame"]
+        chain = [name for name, _ in contexts]
+        if chain[: len(wanted)] != wanted:
+            raise RuntimeError(f"unexpected caller-frame inline chain: {chain}")
+        caller_shadow_location_evidence(fixture, records, by_offset)
+        print(
+            "caller-frame inline addr2line chain: "
+            + " -> ".join(
+                f"{name}@{location}" for name, location in contexts[: len(wanted)]
+            )
+        )
+
+        process = subprocess.Popen(
+            [fixture], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        )
+        status = process.wait()
+        if status != -signal.SIGSEGV:
+            raise RuntimeError(
+                f"caller-inline fixture did not terminate with SIGSEGV: {status}"
+            )
+        core_path = f"/tmp/mdbg-core-{process.pid}"
+        if not os.path.exists(core_path):
+            raise RuntimeError("caller-inline fixture did not produce a genuine core")
+
+        mdbg_core = os.environ.get("MDBG_CORE", "build/mdbg-core")
+        output = subprocess.check_output(
+            [mdbg_core, core_path],
+            input=(
+                "bt\n"
+                "frame 1\n"
+                "inline\n"
+                "inline 1\n"
+                "locals\n"
+                "print caller_shadow\n"
+                "inline physical\n"
+                "locals\n"
+                "quit\n"
+            ),
+            text=True,
+            stderr=subprocess.STDOUT,
+        )
+        print("mdbg-core caller-frame selected-inline scalar probe:\n" + output)
+        selected = output.find("selected inline 1")
+        if selected == -1:
+            raise RuntimeError("mdbg-core did not select caller-frame inner inline context")
+        selected_output = output[selected:]
+        if "variable caller_shadow" not in selected_output:
+            raise RuntimeError("caller-frame inline catalogue lost caller_shadow ownership")
+        if "!caller_shadow = 0x6b [4-byte signed]" not in selected_output:
+            raise RuntimeError(
+                "caller-frame selected inline context did not materialize caller_shadow as 0x6b"
+            )
+    finally:
+        if core_path:
+            try:
+                os.remove(core_path)
+            except FileNotFoundError:
+                pass
+        try:
+            os.remove(fixture)
+        except FileNotFoundError:
+            pass
+
+
 def main():
     if len(sys.argv) != 2:
         raise SystemExit("usage: core_inline_dwarf_oracle.py <fixture>")
@@ -277,6 +401,7 @@ def main():
 
     inline_scalar_location_evidence(path, records, by_offset)
     require_mdbg_core_callsite_ownership(path)
+    require_caller_inline_materialization(path)
 
     for name in ("inline_outer", "inline_inner"):
         depth, file_index, line, evidence = expected[name]

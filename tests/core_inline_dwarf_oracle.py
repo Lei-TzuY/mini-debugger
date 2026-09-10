@@ -281,6 +281,12 @@ def require_caller_inline_materialization(reference_path):
         if chain[: len(wanted)] != wanted:
             raise RuntimeError(f"unexpected caller-frame inline chain: {chain}")
         caller_shadow_location_evidence(fixture, records, by_offset)
+        pointer_evidence = subprocess.check_output(
+            [sys.executable, "tests/core_caller_inline_dwarf_oracle.py", fixture],
+            text=True,
+            stderr=subprocess.STDOUT,
+        )
+        print(pointer_evidence)
         print(
             "caller-frame inline addr2line chain: "
             + " -> ".join(
@@ -301,6 +307,20 @@ def require_caller_inline_materialization(reference_path):
             raise RuntimeError("caller-inline fixture did not produce a genuine core")
 
         mdbg_core = os.environ.get("MDBG_CORE", "build/mdbg-core")
+        cxx = os.environ.get("CXX", "c++")
+        session_probe = f"/tmp/mdbg-inline-pointer-session-{os.getpid()}"
+        subprocess.check_output(
+            [
+                cxx, "-std=c++17", "-Wall", "-Wextra", "-Wpedantic", "-Werror",
+                "-Isrc", "tests/core_inline_pointer_session_probe.cpp",
+                "build/libmdbg_core.a", "-pthread", "-o", session_probe,
+            ],
+            text=True,
+            stderr=subprocess.STDOUT,
+        )
+        subprocess.check_output(
+            [session_probe, core_path], text=True, stderr=subprocess.STDOUT
+        )
         output = subprocess.check_output(
             [mdbg_core, core_path],
             input=(
@@ -310,6 +330,8 @@ def require_caller_inline_materialization(reference_path):
                 "inline 1\n"
                 "locals\n"
                 "print caller_shadow\n"
+                "print caller_pointer\n"
+                "deref caller_pointer\n"
                 "inline physical\n"
                 "locals\n"
                 "quit\n"
@@ -324,9 +346,19 @@ def require_caller_inline_materialization(reference_path):
         selected_output = output[selected:]
         if "variable caller_shadow" not in selected_output:
             raise RuntimeError("caller-frame inline catalogue lost caller_shadow ownership")
+        if "variable caller_pointer" not in selected_output:
+            raise RuntimeError("caller-frame inline catalogue lost caller_pointer ownership")
         if "!caller_shadow = 0x6b [4-byte signed]" not in selected_output:
             raise RuntimeError(
                 "caller-frame selected inline context did not materialize caller_shadow as 0x6b"
+            )
+        if "!caller_pointer = 0x" not in selected_output or "[8-byte unsigned]" not in selected_output:
+            raise RuntimeError(
+                "caller-frame selected inline context did not materialize caller_pointer as an x86-64 pointer"
+            )
+        if "!*caller_pointer = 0x2468ace [4-byte signed]" not in selected_output:
+            raise RuntimeError(
+                "caller-frame selected inline context did not dereference caller_pointer to 0x2468ace"
             )
     finally:
         if core_path:
@@ -336,6 +368,10 @@ def require_caller_inline_materialization(reference_path):
                 pass
         try:
             os.remove(fixture)
+        except FileNotFoundError:
+            pass
+        try:
+            os.remove(f"/tmp/mdbg-inline-pointer-session-{os.getpid()}")
         except FileNotFoundError:
             pass
 

@@ -42,11 +42,20 @@ inline void attach_storage(LocalScalarValue& result,
 }
 
 inline void copy_storage(LocalScalarValue& result,
-                         const LocalScalarValue& owner) {
+                         const LocalScalarValue& owner,
+                         std::size_t byte_offset = 0) {
   result.storage = owner.storage;
   result.storage_module_path = owner.storage_module_path;
   result.storage_file_path = owner.storage_file_path;
   result.storage_file_offset = owner.storage_file_offset;
+  if (owner.storage == LocalValueStorage::SnapshotRuntimeArtifact) {
+    if (byte_offset > std::numeric_limits<std::uint64_t>::max() -
+                          result.storage_file_offset) {
+      throw std::overflow_error(
+          "selected-inline aggregate artifact provenance offset overflows");
+    }
+    result.storage_file_offset += static_cast<std::uint64_t>(byte_offset);
+  }
 }
 
 inline std::uintptr_t checked_address(std::uint64_t base, std::size_t offset,
@@ -62,6 +71,40 @@ inline std::uintptr_t checked_address(std::uint64_t base, std::size_t offset,
     throw std::overflow_error(std::string(context) + " member address overflows");
   }
   return address + offset;
+}
+
+inline void validate_terminal_member(const LocalStructMember& member,
+                                     const char* context) {
+  if (member.byte_size == 0 || member.byte_size > sizeof(std::uint64_t) ||
+      !member.members.empty()) {
+    throw std::logic_error(std::string(context) +
+                           " has an unsupported terminal width or nested metadata");
+  }
+  if (member.kind == LocalValueKind::Integer) {
+    if (member.pointee_type || member.enum_type) {
+      throw std::logic_error(std::string(context) +
+                             " integer retained incompatible type metadata");
+    }
+  } else if (member.kind == LocalValueKind::Pointer) {
+    if (member.byte_size != sizeof(std::uintptr_t) || member.is_signed ||
+        !member.pointee_type || member.enum_type || member.bit_slice ||
+        member.pointee_type->byte_size == 0 ||
+        member.pointee_type->byte_size > sizeof(std::uint64_t)) {
+      throw std::logic_error(std::string(context) +
+                             " pointer has invalid bounded pointee metadata");
+    }
+  } else if (member.kind == LocalValueKind::Enumeration) {
+    if (member.pointee_type || member.bit_slice || !member.enum_type ||
+        member.enum_type->byte_size != member.byte_size ||
+        member.enum_type->is_signed != member.is_signed ||
+        member.enum_type->enumerators.empty()) {
+      throw std::logic_error(std::string(context) +
+                             " enum has invalid bounded enum metadata");
+    }
+  } else {
+    throw std::runtime_error(std::string(context) +
+                             " kind is outside the bounded terminal model");
+  }
 }
 
 inline const LocalStructMember& aggregate_member(
@@ -85,34 +128,27 @@ inline const LocalStructMember& aggregate_member(
         "bounded selected-inline aggregate has no member named: " +
         std::string(member_name));
   }
-  if (member->byte_size == 0 || member->byte_size > sizeof(std::uint64_t)) {
+  if (member->byte_size == 0 || member->offset > aggregate.byte_size ||
+      member->byte_size > aggregate.byte_size - member->offset) {
     throw std::logic_error(
-        "selected-inline aggregate member has an unsupported scalar width");
+        "selected-inline aggregate member exceeds bounded owner layout");
   }
-  if (member->kind == LocalValueKind::Integer) {
-    if (member->pointee_type || member->enum_type) {
+  if (member->kind == LocalValueKind::Structure) {
+    if (member->is_signed || member->pointee_type || member->bit_slice ||
+        member->enum_type || member->members.empty()) {
       throw std::logic_error(
-          "selected-inline aggregate integer member retained incompatible type metadata");
+          "selected-inline nested structure member has invalid bounded metadata");
     }
-  } else if (member->kind == LocalValueKind::Pointer) {
-    if (member->byte_size != sizeof(std::uintptr_t) || member->is_signed ||
-        !member->pointee_type || member->enum_type ||
-        member->pointee_type->byte_size == 0 ||
-        member->pointee_type->byte_size > sizeof(std::uint64_t)) {
-      throw std::logic_error(
-          "selected-inline aggregate pointer member has invalid bounded pointee metadata");
-    }
-  } else if (member->kind == LocalValueKind::Enumeration) {
-    if (member->pointee_type || member->bit_slice || !member->enum_type ||
-        member->enum_type->byte_size != member->byte_size ||
-        member->enum_type->is_signed != member->is_signed ||
-        member->enum_type->enumerators.empty()) {
-      throw std::logic_error(
-          "selected-inline aggregate enum member has invalid bounded enum metadata");
+    for (const auto& child : member->members) {
+      if (child.offset > member->byte_size ||
+          child.byte_size > member->byte_size - child.offset) {
+        throw std::logic_error(
+            "selected-inline nested child exceeds bounded inner layout");
+      }
+      validate_terminal_member(child, "selected-inline nested child");
     }
   } else {
-    throw std::runtime_error(
-        "selected-inline aggregate member kind is outside the bounded traversal model");
+    validate_terminal_member(*member, "selected-inline aggregate member");
   }
   return *member;
 }
@@ -137,7 +173,8 @@ inline const LocalStructMember& union_member(
         std::string(member_name));
   }
   if (member->kind != LocalValueKind::Integer || member->pointee_type ||
-      member->byte_size == 0 || member->byte_size > sizeof(std::uint64_t)) {
+      !member->members.empty() || member->byte_size == 0 ||
+      member->byte_size > sizeof(std::uint64_t)) {
     throw std::runtime_error(
         "selected-inline union member kind is outside the bounded explicit-selection model");
   }
@@ -179,7 +216,8 @@ inline LocalScalarValue inspect_inline_local_pointer_member(
   }
   if (member->byte_size == 0 || member->byte_size > sizeof(std::uint64_t) ||
       member->offset > pointer.pointee_type->byte_size ||
-      member->byte_size > pointer.pointee_type->byte_size - member->offset) {
+      member->byte_size > pointer.pointee_type->byte_size - member->offset ||
+      !member->members.empty()) {
     throw std::logic_error(
         "selected-inline structure member exceeds bounded pointee layout");
   }
@@ -257,15 +295,36 @@ inline LocalScalarValue inspect_inline_local_aggregate_member(
       member.byte_size,
       member.is_signed,
       member.kind};
-  inline_member_detail::copy_storage(result, aggregate);
+  inline_member_detail::copy_storage(result, aggregate, member.offset);
   if (member.kind == LocalValueKind::Pointer) {
     result.pointee_type = LocalPointeeType{
         member.pointee_type->byte_size, member.pointee_type->is_signed,
         LocalValueKind::Integer, {}};
   } else if (member.kind == LocalValueKind::Enumeration) {
     result.enum_type = member.enum_type;
+  } else if (member.kind == LocalValueKind::Structure) {
+    result.members = member.members;
   }
   return result;
+}
+
+inline LocalScalarValue inspect_inline_local_nested_aggregate_member(
+    const LocalScalarValue& aggregate, std::string_view aggregate_member_name,
+    std::string_view terminal_member_name) {
+  const auto inner =
+      inspect_inline_local_aggregate_member(aggregate, aggregate_member_name);
+  if (inner.kind != LocalValueKind::Structure) {
+    throw std::runtime_error(
+        "selected-inline outer member is not a bounded nested structure: " +
+        inner.name);
+  }
+  auto terminal =
+      inspect_inline_local_aggregate_member(inner, terminal_member_name);
+  if (terminal.kind == LocalValueKind::Structure) {
+    throw std::runtime_error(
+        "selected-inline nested aggregate depth exceeds the bounded one-hop model");
+  }
+  return terminal;
 }
 
 inline LocalScalarValue inspect_inline_local_union_member(
@@ -275,7 +334,7 @@ inline LocalScalarValue inspect_inline_local_union_member(
                 value.name + "." + std::string(member_name),
                 member.raw_value, member.byte_size,
                 member.is_signed, member.kind};
-  inline_member_detail::copy_storage(result, value);
+  inline_member_detail::copy_storage(result, value, member.offset);
   return result;
 }
 

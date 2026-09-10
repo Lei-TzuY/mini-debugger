@@ -115,7 +115,14 @@ def require_mdbg_core_callsite_ownership(path):
     try:
         output = subprocess.check_output(
             [mdbg_core, core_path],
-            input="inline\nquit\n",
+            input=(
+                "print shadow_value\n"
+                "inline\n"
+                "inline 1\n"
+                "locals\n"
+                "print shadow_value\n"
+                "quit\n"
+            ),
             text=True,
             stderr=subprocess.STDOUT,
         )
@@ -140,6 +147,28 @@ def require_mdbg_core_callsite_ownership(path):
     if inner_line is None or "inline_core_fixture.h:" not in inner_line:
         raise RuntimeError(
             "mdbg-core did not resolve inline_inner DW_AT_call_file to the header file"
+        )
+
+    selected = output.find("selected inline 1")
+    if selected == -1:
+        raise RuntimeError("mdbg-core did not select the compiler-proven inner inline context")
+    selected_output = output[selected:]
+    if "variable shadow_value" not in selected_output:
+        raise RuntimeError(
+            "selected inner inline context did not expose compiler-owned shadow_value"
+        )
+
+    scalar_marker = "!shadow_value = 0x141 [4-byte signed]"
+    before_selection = output[:selected]
+    if scalar_marker not in before_selection:
+        raise RuntimeError(
+            "existing snapshot evaluator could not materialize compiler-produced inner "
+            "shadow_value from the immutable physical frame"
+        )
+    if scalar_marker not in selected_output:
+        raise RuntimeError(
+            "selected inline context could not materialize its compiler-produced "
+            "shadow_value through mdbg-core print"
         )
 
 
@@ -216,6 +245,7 @@ def main():
             f"{name}@{location}" for name, location in contexts[: len(wanted)]
         )
     )
+    print("inline scalar: shadow_value=0x141 via existing snapshot evaluator")
 
 
 if __name__ == "__main__":

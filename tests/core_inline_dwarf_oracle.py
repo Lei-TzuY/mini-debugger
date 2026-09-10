@@ -73,7 +73,7 @@ def die_range(record, context):
     low_text = record["attrs"].get("low_pc")
     high_text = record["attrs"].get("high_pc")
     if not low_text or not high_text:
-        raise RuntimeError(f"{context}: low_pc/high_pc is unavailable")
+        return None
     low = numeric_attr(low_text, f"{context}: low_pc")
     raw_high = numeric_attr(high_text, f"{context}: high_pc")
     high = raw_high if raw_high > low else low + raw_high
@@ -94,7 +94,10 @@ def main():
     for record in records:
         if record["tag"] != "DW_TAG_inlined_subroutine":
             continue
-        low, high = die_range(record, "inline DIE")
+        concrete_range = die_range(record, "inline DIE")
+        if concrete_range is None:
+            continue
+        low, high = concrete_range
         if not (low <= probe < high):
             continue
         origin_text = record["attrs"].get("abstract_origin")

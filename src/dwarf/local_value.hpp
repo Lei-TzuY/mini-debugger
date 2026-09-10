@@ -81,6 +81,7 @@ struct LocalStructMember {
   std::optional<LocalBitSlice> bit_slice{};
   std::optional<LocalEnumType> enum_type{};
   std::vector<LocalStructMember> members{};
+  std::size_t offset{0};
 };
 
 struct LocalArrayElement {

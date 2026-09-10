@@ -306,6 +306,8 @@ void print_help() {
                "  deref <name>         dereference one bounded pointer value\n"
                "  member <name> <member>  inspect one bounded pointer-valued direct member\n"
                "  deref-member <name> <member>  dereference that member once\n"
+               "  aggregate-member <name> <member>  select one by-value aggregate member\n"
+               "  deref-aggregate-member <name> <member>  dereference that member once\n"
                "  x <address> <length> inspect immutable snapshot memory\n"
                "  help                 show this help\n"
                "  quit | q             exit the core session\n";
@@ -457,6 +459,27 @@ int run_session(const std::string& core_path, mdbg::SnapshotModulePathResolver m
           throw std::invalid_argument("usage: deref-member <name> <member>");
         }
         print_value(session.dereference_pointer_member(name, member));
+        continue;
+      }
+      if (command == "aggregate-member") {
+        std::string name;
+        std::string member;
+        std::string extra;
+        if (!(input >> name >> member) || (input >> extra)) {
+          throw std::invalid_argument("usage: aggregate-member <name> <member>");
+        }
+        print_value(session.inspect_aggregate_member(name, member));
+        continue;
+      }
+      if (command == "deref-aggregate-member") {
+        std::string name;
+        std::string member;
+        std::string extra;
+        if (!(input >> name >> member) || (input >> extra)) {
+          throw std::invalid_argument(
+              "usage: deref-aggregate-member <name> <member>");
+        }
+        print_value(session.dereference_aggregate_member(name, member));
         continue;
       }
       if (command == "x") {

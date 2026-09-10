@@ -24,6 +24,13 @@ bool has_name(const std::vector<mdbg::LocalDiscoveryEntry>& entries,
   });
 }
 
+bool has_entry(const std::vector<mdbg::LocalDiscoveryEntry>& entries,
+               const std::string& name, mdbg::LocalDiscoveryKind kind) {
+  return std::any_of(entries.begin(), entries.end(), [&](const auto& entry) {
+    return entry.name == name && entry.kind == kind;
+  });
+}
+
 void require_bounded_catalogue(const std::vector<mdbg::LocalDiscoveryEntry>& entries,
                                const std::string& context) {
   require(!entries.empty(), context + " unexpectedly discovered no active locals");
@@ -93,6 +100,8 @@ void test_core_cli(const std::string& integration_path, const std::string& core_
   require_cli_catalogue(crash_segment, "xmm_value", "caller_stack_local", "crash frame");
   require_cli_catalogue(caller_segment, "caller_stack_local", "xmm_value", "caller frame");
   require_cli_catalogue(sibling_segment, "xmm_value", "stack_local", "sibling frame");
+  require(sibling_segment.find("parameter seed") != std::string::npos,
+          "sibling frame CLI did not classify seed as a formal parameter");
 }
 
 }  // namespace
@@ -133,6 +142,8 @@ int main(int argc, char** argv) {
     require_bounded_catalogue(sibling_locals, "sibling frame");
     require(has_name(sibling_locals, "xmm_value"),
             "sibling frame did not discover its compiler-owned xmm_value");
+    require(has_entry(sibling_locals, "seed", mdbg::LocalDiscoveryKind::FormalParameter),
+            "sibling frame did not classify compiler-owned seed as a formal parameter");
     require(!has_name(sibling_locals, "stack_local") &&
                 !has_name(sibling_locals, "caller_stack_local"),
             "sibling frame leaked locals from the crash-thread selection");

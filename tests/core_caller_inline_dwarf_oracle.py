@@ -122,7 +122,12 @@ def referenced_type(record, by_offset, context):
 
 def selected_inner_bindings(records, by_offset):
     result = {}
-    wanted = {"caller_shadow", "caller_pointer", "caller_aggregate_pointer"}
+    wanted = {
+        "caller_shadow",
+        "caller_pointer",
+        "caller_aggregate_pointer",
+        "caller_direct_aggregate",
+    }
     for pos, record in enumerate(records):
         if record["tag"] != "DW_TAG_inlined_subroutine":
             continue
@@ -218,6 +223,31 @@ def validate_aggregate_pointer(records, by_offset, bindings):
     return structure, members
 
 
+def validate_direct_aggregate(records, by_offset, bindings, expected_structure):
+    entries = bindings.get("caller_direct_aggregate", [])
+    if not entries:
+        raise RuntimeError(
+            "caller_direct_aggregate has no compiler-produced concrete DW_AT_location"
+        )
+    binding_offsets = {entry[0] for entry in entries}
+    structures = []
+    for record in records:
+        if record["offset"] not in binding_offsets:
+            continue
+        value_type = referenced_type(record, by_offset, "caller_direct_aggregate type")
+        if value_type["tag"] == "DW_TAG_structure_type":
+            structures.append(value_type)
+    if not structures:
+        raise RuntimeError(
+            "caller_direct_aggregate does not resolve to a compiler-owned structure type"
+        )
+    if any(structure["offset"] != expected_structure["offset"] for structure in structures):
+        raise RuntimeError(
+            "caller_direct_aggregate does not reuse the proven CallerInlineAggregate type"
+        )
+    return structures[0]
+
+
 def main():
     if len(sys.argv) != 2:
         raise SystemExit("usage: core_caller_inline_dwarf_oracle.py <fixture>")
@@ -235,6 +265,7 @@ def main():
     shadow = bindings.get("caller_shadow", [])
     pointer = bindings.get("caller_pointer", [])
     aggregate_pointer = bindings.get("caller_aggregate_pointer", [])
+    direct_aggregate = bindings.get("caller_direct_aggregate", [])
     if not shadow:
         raise RuntimeError("caller_shadow has no compiler-produced concrete DW_AT_location")
     if not pointer:
@@ -243,19 +274,29 @@ def main():
         raise RuntimeError(
             "caller_aggregate_pointer has no compiler-produced concrete DW_AT_location"
         )
+    if not direct_aggregate:
+        raise RuntimeError(
+            "caller_direct_aggregate has no compiler-produced concrete DW_AT_location"
+        )
     if not any(entry[3] == "DW_TAG_pointer_type" for entry in pointer):
         raise RuntimeError(
             "caller_pointer compiler binding does not resolve to a DW_TAG_pointer_type"
         )
 
     structure, members = validate_aggregate_pointer(records, by_offset, bindings)
+    direct_structure = validate_direct_aggregate(records, by_offset, bindings, structure)
 
     print(f"caller-inline resume probe: 0x{resume:x}")
     print("caller-inline addr2line chain: " + " -> ".join(
         f"{name}@{location}" for name, location in contexts[: len(wanted)]
     ))
     print("caller_inline_inner concrete DWARF bindings:")
-    for name in ("caller_shadow", "caller_pointer", "caller_aggregate_pointer"):
+    for name in (
+        "caller_shadow",
+        "caller_pointer",
+        "caller_aggregate_pointer",
+        "caller_direct_aggregate",
+    ):
         for offset, depth, location, type_tag, type_offset in bindings[name]:
             print(
                 f"  {name}: die=0x{offset:x} depth={depth} location={location} "
@@ -265,6 +306,10 @@ def main():
         "caller_aggregate_pointer structure: "
         f"die=0x{structure['offset']:x} direct={members['direct']['attrs']['data_member_location']} "
         f"linked={members['linked']['attrs']['data_member_location']}"
+    )
+    print(
+        "caller_direct_aggregate structure: "
+        f"die=0x{direct_structure['offset']:x}"
     )
 
     try:

@@ -354,6 +354,72 @@ std::optional<std::vector<LocalDiscoveryEntry>> discover_inline_locals_unit(
   return result;
 }
 
+std::optional<LocalPointeeType> selected_inline_direct_structure_type(
+    const std::vector<Die>& dies, std::uint64_t type_offset) {
+  for (unsigned depth = 0; depth < 16; ++depth) {
+    const auto index = die_index_by_offset(dies, type_offset);
+    if (!index) {
+      throw std::runtime_error("selected-inline local type references an unknown DIE");
+    }
+    const auto& die = dies[*index];
+    if (die.tag == kDwTagTypedef || die.tag == kDwTagConstType) {
+      const auto* wrapped = attribute(die, kDwAtType);
+      if (wrapped == nullptr || wrapped->form != kDwFormRef4) {
+        throw std::runtime_error(
+            "selected-inline local type wrapper does not use DW_FORM_ref4");
+      }
+      type_offset = wrapped->number;
+      continue;
+    }
+    if (die.tag != kDwTagStructureType) return std::nullopt;
+    return resolve_snapshot_structure_pointee_type(dies, type_offset);
+  }
+  throw std::runtime_error("selected-inline local type chain is too deep");
+}
+
+LocalScalarValue materialize_selected_inline_structure(
+    const SnapshotModuleAddress& owner, std::string_view name,
+    const LocalPointeeType& aggregate, const SnapshotMemoryRead& memory) {
+  if (aggregate.kind != LocalValueKind::Structure || aggregate.byte_size == 0 ||
+      aggregate.byte_size > kMaxLocalStructSize ||
+      aggregate.members.size() > kMaxLocalStructMembers ||
+      memory.bytes.size() != aggregate.byte_size) {
+    throw std::runtime_error(
+        "selected-inline aggregate bytes exceed the bounded structure model");
+  }
+
+  LocalScalarValue result{owner.module_path, std::string(name), 0,
+                          aggregate.byte_size, false,
+                          LocalValueKind::Structure};
+  result.members.reserve(aggregate.members.size());
+  for (const auto& member : aggregate.members) {
+    if (member.byte_size == 0 || member.byte_size > sizeof(std::uint64_t) ||
+        member.offset > aggregate.byte_size ||
+        member.byte_size > aggregate.byte_size - member.offset) {
+      throw std::logic_error(
+          "selected-inline aggregate member exceeds aggregate storage");
+    }
+    result.members.push_back(LocalStructMember{
+        member.name,
+        decode_integer(memory.bytes, member.offset, member.byte_size),
+        member.byte_size, member.is_signed, member.kind, member.pointee_type});
+  }
+
+  if (memory.provenance == SnapshotMemoryProvenance::Core) {
+    result.storage = LocalValueStorage::SnapshotCoreMemory;
+  } else {
+    if (memory.module_path != owner.module_path) {
+      throw std::logic_error(
+          "selected-inline aggregate artifact ownership changed during value read");
+    }
+    result.storage = LocalValueStorage::SnapshotRuntimeArtifact;
+    result.storage_module_path = memory.module_path;
+    result.storage_file_path = memory.module_file_path;
+    result.storage_file_offset = memory.artifact_file_offset;
+  }
+  return result;
+}
+
 std::optional<LocalScalarValue> inspect_inline_scalar_unit(
     const DebugSections& sections, const std::vector<std::byte>& ranges,
     const CoreSnapshot& snapshot, const SnapshotInspectionFrameContext& frame,
@@ -424,13 +490,21 @@ std::optional<LocalScalarValue> inspect_inline_scalar_unit(
   }
 
   const auto pointee_type = resolve_pointer_pointee_type(dies, type->number);
+  const auto direct_structure =
+      pointee_type ? std::optional<LocalPointeeType>{}
+                   : selected_inline_direct_structure_type(dies, type->number);
   const auto value_type =
       pointee_type ? ValueType{sizeof(std::uintptr_t), false,
                                LocalValueKind::Pointer, {}}
-                   : resolve_value_type(dies, type->number);
-  if ((value_type.kind != LocalValueKind::Integer &&
-       value_type.kind != LocalValueKind::Pointer) ||
-      value_type.byte_size == 0 || value_type.byte_size > sizeof(std::uint64_t)) {
+                   : direct_structure
+                         ? ValueType{direct_structure->byte_size, false,
+                                     LocalValueKind::Structure, {}}
+                         : resolve_value_type(dies, type->number);
+  if (!direct_structure &&
+      ((value_type.kind != LocalValueKind::Integer &&
+        value_type.kind != LocalValueKind::Pointer) ||
+       value_type.byte_size == 0 ||
+       value_type.byte_size > sizeof(std::uint64_t))) {
     throw std::runtime_error(
         "selected-inline value materialization requires a bounded integer/pointer scalar");
   }
@@ -443,18 +517,18 @@ std::optional<LocalScalarValue> inspect_inline_scalar_unit(
                                             unit_base, unit_version);
   } else {
     throw std::runtime_error(
-        "selected-inline scalar has no supported DW_AT_location form");
+        "selected-inline value has no supported DW_AT_location form");
   }
   if (expression.empty()) {
     throw std::runtime_error(
-        "selected-inline scalar requires one exact compiler-proven location operation");
+        "selected-inline value requires one exact compiler-proven location operation");
   }
 
   const auto opcode = std::to_integer<std::uint8_t>(expression.front());
   if (frame.index != 0) {
     if (opcode != kDwOpFbreg) {
       throw std::runtime_error(
-          "caller-frame selected-inline scalar currently requires compiler-proven DW_OP_fbreg");
+          "caller-frame selected-inline value currently requires compiler-proven DW_OP_fbreg");
     }
     const auto base = snapshot_frame_base(
         dies, *subprogram, snapshot, frame, module_paths, owner);
@@ -468,12 +542,20 @@ std::optional<LocalScalarValue> inspect_inline_scalar_unit(
     const auto memory = read_snapshot_memory(
         snapshot, module_paths, static_cast<std::uintptr_t>(runtime_address),
         value_type.byte_size);
+    if (direct_structure) {
+      return materialize_selected_inline_structure(owner, requested_name,
+                                                   *direct_structure, memory);
+    }
     auto result =
         materialize_snapshot_memory_value(owner, requested_name, value_type, memory);
     attach_pointer_metadata(result, pointee_type);
     return result;
   }
 
+  if (direct_structure) {
+    throw std::runtime_error(
+        "frame-zero selected-inline aggregate materialization is outside current compiler evidence");
+  }
   if (value_type.kind == LocalValueKind::Pointer) {
     throw std::runtime_error(
         "frame-zero selected-inline pointer materialization is outside current compiler evidence");

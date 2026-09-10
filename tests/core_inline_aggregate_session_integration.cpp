@@ -141,8 +141,8 @@ bool supported_snapshot_storage(mdbg::LocalValueStorage storage) {
          storage == mdbg::LocalValueStorage::SnapshotRuntimeArtifact;
 }
 
-const mdbg::LocalStructMember& member_named(const mdbg::LocalScalarValue& value,
-                                            const std::string& name) {
+mdbg::LocalStructMember member_named(const mdbg::LocalScalarValue& value,
+                                     const std::string& name) {
   const auto it = std::find_if(value.members.begin(), value.members.end(),
                                [&name](const mdbg::LocalStructMember& member) {
                                  return member.name == name;
@@ -179,12 +179,12 @@ void exercise(const std::string& fixture, const std::string& cli) {
               "selected-inline by-value aggregate was not materialized as the bounded structure");
       require(supported_snapshot_storage(direct_aggregate.storage),
               "selected-inline by-value aggregate lost immutable snapshot provenance");
-      const auto& direct_member = member_named(direct_aggregate, "direct");
+      const auto direct_member = member_named(direct_aggregate, "direct");
       require(direct_member.kind == mdbg::LocalValueKind::Integer &&
                   direct_member.raw_value == UINT64_C(0x55667788) &&
                   direct_member.byte_size == sizeof(int) && direct_member.is_signed,
               "selected-inline by-value integer member was not materialized exactly");
-      const auto& linked_member = member_named(direct_aggregate, "linked");
+      const auto linked_member = member_named(direct_aggregate, "linked");
       require(linked_member.kind == mdbg::LocalValueKind::Pointer &&
                   linked_member.raw_value != 0 && linked_member.byte_size == sizeof(void*) &&
                   linked_member.pointee_type &&

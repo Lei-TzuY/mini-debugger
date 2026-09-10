@@ -152,9 +152,16 @@ class CoreInspectionSession {
   }
 
   [[nodiscard]] LocalScalarValue inspect_value(std::string_view name) const {
-    require_physical_value_context();
     const auto& frame = selected_frame();
     validate_selected_frame(frame);
+    if (selected_inline_context_) {
+      if (selected_inline_context_->module_path != frame.module_path) {
+        throw std::logic_error("selected inline context belongs to a different module");
+      }
+      return inspect_inline_local_value(snapshot_, frame,
+                                        selected_inline_context_->die_offset,
+                                        name, module_paths_);
+    }
     return inspect_local_value(snapshot_, frame, name, module_paths_);
   }
 
@@ -187,7 +194,7 @@ class CoreInspectionSession {
   void require_physical_value_context() const {
     if (selected_inline_context_) {
       throw std::logic_error(
-          "inline-context value materialization is not supported; use locals or select physical");
+          "inline-context pointer traversal is not supported; select physical first");
     }
   }
 

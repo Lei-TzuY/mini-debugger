@@ -20,7 +20,7 @@ volatile uint64_t signal_piece_seed_second = SIGNAL_PAIR_SECOND;
 volatile uint64_t signal_piece_sink = 0;
 volatile uintptr_t signal_piece_ucontext_address = 0;
 
-__attribute__((noinline, noreturn)) void signal_piece_crash_from_handler(void) {
+__attribute__((noinline)) void signal_piece_crash_from_handler(void) {
   __asm__ volatile(
       ".globl signal_piece_crash_probe\n"
       "signal_piece_crash_probe:\n"
@@ -28,15 +28,16 @@ __attribute__((noinline, noreturn)) void signal_piece_crash_from_handler(void) {
       :
       : "a"(0), "D"(SIGNAL_CRASH_RDI), "S"(SIGNAL_CRASH_RSI)
       : "memory");
-  __builtin_unreachable();
 }
 
-static void signal_piece_handler(int signal_number, siginfo_t* info,
-                                 void* raw_context) {
+__attribute__((noinline)) static void signal_piece_handler(int signal_number,
+                                                           siginfo_t* info,
+                                                           void* raw_context) {
   (void)signal_number;
   (void)info;
   signal_piece_ucontext_address = (uintptr_t)raw_context;
   signal_piece_crash_from_handler();
+  __asm__ volatile("" ::: "memory");
 }
 
 __attribute__((noinline)) void signal_piece_interrupted_application(

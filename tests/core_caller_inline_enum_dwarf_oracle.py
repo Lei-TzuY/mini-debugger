@@ -57,6 +57,27 @@ def direct_enumerators(records, enum_type):
     return result
 
 
+def validate_signed_representation(enum_type, by_offset):
+    encoding = enum_type["attrs"].get("encoding")
+    if encoding:
+        if numeric_attr(encoding, "caller_mode encoding") != 5:
+            raise RuntimeError("caller_mode direct compiler encoding is not signed integer")
+        return "direct-encoding"
+
+    underlying = referenced_type(enum_type, by_offset, "caller_mode underlying type")
+    if underlying["tag"] != "DW_TAG_base_type":
+        raise RuntimeError("caller_mode compiler representation is neither encoded nor base-typed")
+    size = underlying["attrs"].get("byte_size")
+    underlying_encoding = underlying["attrs"].get("encoding")
+    if not size or numeric_attr(size, "caller_mode underlying byte size") != 4:
+        raise RuntimeError("caller_mode underlying compiler type is not four bytes")
+    if not underlying_encoding or numeric_attr(
+        underlying_encoding, "caller_mode underlying encoding"
+    ) != 5:
+        raise RuntimeError("caller_mode underlying compiler type is not signed integer")
+    return "underlying-type"
+
+
 def main():
     if len(sys.argv) != 2:
         raise SystemExit("usage: core_caller_inline_enum_dwarf_oracle.py <fixture>")
@@ -86,13 +107,11 @@ def main():
     size = enum_type["attrs"].get("byte_size")
     if not size or numeric_attr(size, "caller_mode byte size") != 4:
         raise RuntimeError("caller_mode compiler enum type is not exactly four bytes")
-    encoding = enum_type["attrs"].get("encoding")
-    if not encoding or numeric_attr(encoding, "caller_mode encoding") != 5:
-        raise RuntimeError("caller_mode compiler enum type is not signed integer encoded")
+    representation = validate_signed_representation(enum_type, by_offset)
 
     enumerators = direct_enumerators(records, enum_type)
     expected = {
-        "CallerInlineIdle": -3,
+        "CallerInlineIdle": 3,
         "CallerInlineReady": 7,
         "CallerInlineBusy": 42,
     }
@@ -109,7 +128,8 @@ def main():
     print(
         "caller_mode compiler evidence: "
         f"binding-count={len(bindings)} type=DW_TAG_enumeration_type byte-size=4 signed "
-        "CallerInlineIdle=-3 CallerInlineReady=7 CallerInlineBusy=42"
+        f"representation={representation} "
+        "CallerInlineIdle=3 CallerInlineReady=7 CallerInlineBusy=42"
     )
 
 

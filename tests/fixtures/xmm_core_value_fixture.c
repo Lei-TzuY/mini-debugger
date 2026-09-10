@@ -7,6 +7,8 @@
 #include <sys/syscall.h>
 #include <unistd.h>
 
+#define TYPED_OBJECT_MARKER_VALUE UINT64_C(0x13579bdf2468ace0)
+
 static volatile sig_atomic_t sibling_ready = 0;
 static volatile sig_atomic_t sibling_tid = 0;
 
@@ -36,16 +38,24 @@ __attribute__((noinline, noreturn)) static void crash_with_xmm(void) {
     uint64_t first;
     uint64_t second;
   };
+  struct TypedObjectPointee {
+    uint64_t* payload;
+    uint64_t marker;
+  };
   static uint64_t pointee_value = UINT64_C(0x8877665544332211);
   static uint64_t* scalar_pointer = &pointee_value;
   static struct AggregatePointee aggregate_value = {
       UINT64_C(0x0123456789abcdef), UINT64_C(0xfedcba9876543210)};
   static struct AggregatePointee* aggregate_pointer = &aggregate_value;
+  static struct TypedObjectPointee typed_value = {
+      &pointee_value, TYPED_OBJECT_MARKER_VALUE};
+  static struct TypedObjectPointee* typed_pointer = &typed_value;
   uint64_t stack_local = UINT64_C(0x4f3e2d1c0b9a8877);
   double xmm_value = 1234.25;
   __asm__ volatile("" : "+m"(stack_local), "+x"(xmm_value)
                    : "m"(scalar_pointer), "m"(pointee_value),
-                     "m"(aggregate_pointer), "m"(aggregate_value)
+                     "m"(aggregate_pointer), "m"(aggregate_value),
+                     "m"(typed_pointer), "m"(typed_value)
                    : "memory");
   __asm__ volatile(
       ".globl snapshot_xmm_crash_probe\n"
@@ -53,7 +63,8 @@ __attribute__((noinline, noreturn)) static void crash_with_xmm(void) {
       "movl $0, (%%rax)\n"
       : "+x"(xmm_value)
       : "a"(0), "m"(stack_local), "m"(scalar_pointer), "m"(pointee_value),
-        "m"(aggregate_pointer), "m"(aggregate_value)
+        "m"(aggregate_pointer), "m"(aggregate_value), "m"(typed_pointer),
+        "m"(typed_value)
       : "memory");
   __builtin_unreachable();
 }

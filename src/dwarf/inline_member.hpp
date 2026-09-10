@@ -41,6 +41,14 @@ inline void attach_storage(LocalScalarValue& result,
   result.storage_file_offset = memory.artifact_file_offset;
 }
 
+inline void copy_storage(LocalScalarValue& result,
+                         const LocalScalarValue& owner) {
+  result.storage = owner.storage;
+  result.storage_module_path = owner.storage_module_path;
+  result.storage_file_path = owner.storage_file_path;
+  result.storage_file_offset = owner.storage_file_offset;
+}
+
 inline std::uintptr_t checked_address(std::uint64_t base, std::size_t offset,
                                       const char* context) {
   if (base == 0) {
@@ -54,6 +62,50 @@ inline std::uintptr_t checked_address(std::uint64_t base, std::size_t offset,
     throw std::overflow_error(std::string(context) + " member address overflows");
   }
   return address + offset;
+}
+
+inline const LocalStructMember& aggregate_member(
+    const LocalScalarValue& aggregate, std::string_view member_name) {
+  if (member_name.empty()) {
+    throw std::invalid_argument(
+        "selected-inline aggregate member name must not be empty");
+  }
+  if (aggregate.kind != LocalValueKind::Structure || aggregate.members.empty()) {
+    throw std::runtime_error(
+        "selected-inline local is not a materialized bounded structure: " +
+        aggregate.name);
+  }
+  const auto member = std::find_if(
+      aggregate.members.begin(), aggregate.members.end(),
+      [member_name](const LocalStructMember& candidate) {
+        return candidate.name == member_name;
+      });
+  if (member == aggregate.members.end()) {
+    throw std::runtime_error(
+        "bounded selected-inline aggregate has no member named: " +
+        std::string(member_name));
+  }
+  if (member->byte_size == 0 || member->byte_size > sizeof(std::uint64_t)) {
+    throw std::logic_error(
+        "selected-inline aggregate member has an unsupported scalar width");
+  }
+  if (member->kind == LocalValueKind::Integer) {
+    if (member->pointee_type) {
+      throw std::logic_error(
+          "selected-inline aggregate integer member unexpectedly has pointee metadata");
+    }
+  } else if (member->kind == LocalValueKind::Pointer) {
+    if (member->byte_size != sizeof(std::uintptr_t) || member->is_signed ||
+        !member->pointee_type || member->pointee_type->byte_size == 0 ||
+        member->pointee_type->byte_size > sizeof(std::uint64_t)) {
+      throw std::logic_error(
+          "selected-inline aggregate pointer member has invalid bounded pointee metadata");
+    }
+  } else {
+    throw std::runtime_error(
+        "selected-inline aggregate member kind is outside the bounded traversal model");
+  }
+  return *member;
 }
 
 }  // namespace inline_member_detail
@@ -147,6 +199,53 @@ inline LocalScalarValue dereference_inline_local_pointer_member(
   }
   const auto address = inline_member_detail::checked_address(
       member.raw_value, 0, "selected-inline pointer-valued member");
+  const auto memory = read_snapshot_memory(
+      snapshot, module_paths, address, member.pointee_type->byte_size);
+  LocalScalarValue result{
+      member.module_path, "*(" + member.name + ")",
+      inline_member_detail::decode_scalar(memory, member.pointee_type->byte_size),
+      member.pointee_type->byte_size, member.pointee_type->is_signed,
+      LocalValueKind::Integer};
+  inline_member_detail::attach_storage(result, memory);
+  return result;
+}
+
+inline LocalScalarValue inspect_inline_local_aggregate_member(
+    const LocalScalarValue& aggregate, std::string_view member_name) {
+  const auto& member =
+      inline_member_detail::aggregate_member(aggregate, member_name);
+  LocalScalarValue result{
+      aggregate.module_path,
+      aggregate.name + "." + std::string(member_name),
+      member.raw_value,
+      member.byte_size,
+      member.is_signed,
+      member.kind};
+  inline_member_detail::copy_storage(result, aggregate);
+  if (member.kind == LocalValueKind::Pointer) {
+    result.pointee_type = LocalPointeeType{
+        member.pointee_type->byte_size, member.pointee_type->is_signed,
+        LocalValueKind::Integer, {}};
+  }
+  return result;
+}
+
+inline LocalScalarValue dereference_inline_local_aggregate_member(
+    const CoreSnapshot& snapshot, const LocalScalarValue& aggregate,
+    std::string_view member_name,
+    const SnapshotModulePathResolver& module_paths) {
+  const auto member =
+      inspect_inline_local_aggregate_member(aggregate, member_name);
+  if (member.kind != LocalValueKind::Pointer || !member.pointee_type ||
+      member.pointee_type->kind != LocalValueKind::Integer ||
+      member.pointee_type->byte_size == 0 ||
+      member.pointee_type->byte_size > sizeof(std::uint64_t) ||
+      !member.pointee_type->members.empty()) {
+    throw std::runtime_error(
+        "selected-inline aggregate pointer member does not have a bounded integer pointee");
+  }
+  const auto address = inline_member_detail::checked_address(
+      member.raw_value, 0, "selected-inline aggregate pointer-valued member");
   const auto memory = read_snapshot_memory(
       snapshot, module_paths, address, member.pointee_type->byte_size);
   LocalScalarValue result{

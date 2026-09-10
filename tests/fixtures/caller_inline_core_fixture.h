@@ -10,6 +10,11 @@ union CallerInlineUnion {
   unsigned int unsigned_value;
 };
 
+struct CallerInlineBitFields {
+  signed int signed_bits : 5;
+  unsigned int unsigned_bits : 6;
+};
+
 extern int caller_inline_pointee;
 extern int caller_inline_member_pointee;
 extern struct CallerInlineAggregate caller_inline_aggregate;
@@ -18,7 +23,8 @@ int caller_inline_crash_leaf(
     int token, const int* observed, const int* const* selected,
     const struct CallerInlineAggregate* const* selected_aggregate,
     const struct CallerInlineAggregate* direct_aggregate,
-    const int* fixed_array, const union CallerInlineUnion* selected_union);
+    const int* fixed_array, const union CallerInlineUnion* selected_union,
+    const struct CallerInlineBitFields* selected_bit_fields);
 
 static __attribute__((always_inline)) inline int caller_inline_inner(int seed) {
   int caller_shadow = seed + 43;
@@ -29,9 +35,12 @@ static __attribute__((always_inline)) inline int caller_inline_inner(int seed) {
       0x55667788, &caller_inline_pointee};
   int caller_fixed_array[3] = {0x10203040, 0x22334455, 0x33445566};
   union CallerInlineUnion caller_union = {.signed_value = 0x44556677};
+  struct CallerInlineBitFields caller_bit_fields = {
+      .signed_bits = -7, .unsigned_bits = 41};
   int crashed = caller_inline_crash_leaf(
       seed + 5, &caller_shadow, &caller_pointer, &caller_aggregate_pointer,
-      &caller_direct_aggregate, caller_fixed_array, &caller_union);
+      &caller_direct_aggregate, caller_fixed_array, &caller_union,
+      &caller_bit_fields);
   __asm__ volatile(
       ".globl snapshot_caller_inline_resume_probe\n"
       "snapshot_caller_inline_resume_probe:\n"
@@ -39,7 +48,8 @@ static __attribute__((always_inline)) inline int caller_inline_inner(int seed) {
   return crashed + caller_shadow + *caller_pointer +
          caller_aggregate_pointer->direct + *caller_aggregate_pointer->linked +
          caller_direct_aggregate.direct + *caller_direct_aggregate.linked +
-         caller_fixed_array[1] + caller_union.signed_value;
+         caller_fixed_array[1] + caller_union.signed_value +
+         caller_bit_fields.signed_bits + caller_bit_fields.unsigned_bits;
 }
 
 static __attribute__((always_inline)) inline int caller_inline_outer(int seed) {

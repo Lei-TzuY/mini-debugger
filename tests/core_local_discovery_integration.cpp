@@ -2,9 +2,11 @@
 #include "snapshot/session.hpp"
 
 #include <sys/wait.h>
+#include <unistd.h>
 
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <iostream>
 #include <stdexcept>
@@ -66,13 +68,13 @@ std::string shell_quote(const std::string& value) {
 
 std::string run_command(const std::string& command) {
   FILE* pipe = ::popen(command.c_str(), "r");
-  if (pipe == nullptr) throw std::runtime_error("failed to start mdbg-core subprocess");
+  if (pipe == nullptr) throw std::runtime_error("failed to start subprocess");
   std::string output;
   char buffer[512];
   while (::fgets(buffer, sizeof(buffer), pipe) != nullptr) output += buffer;
   const int status = ::pclose(pipe);
   if (status == -1 || !WIFEXITED(status) || WEXITSTATUS(status) != 0) {
-    throw std::runtime_error("mdbg-core subprocess failed:\n" + output);
+    throw std::runtime_error("subprocess failed:\n" + output);
   }
   return output;
 }
@@ -130,6 +132,56 @@ void test_core_cli(const std::string& integration_path, const std::string& core_
           "sibling frame CLI leaked a crash-frame shadowed local");
 }
 
+void test_inline_artifact_gate(const std::string& integration_path,
+                               const mdbg::CoreInspectionSession& baseline_session) {
+  const char* compiler_env = std::getenv("CC");
+  require(compiler_env != nullptr && *compiler_env != '\0',
+          "CC is unavailable for optimized inline compiler evidence");
+  const std::string compiler(compiler_env);
+  const bool non_pie = baseline_session.selected_frame().module_path.find("_nopie") !=
+                       std::string::npos;
+  const auto tag = std::string(non_pie ? "nopie-" : "pie-") + std::to_string(::getpid());
+  const auto fixture = std::filesystem::path("/tmp") / ("mdbg-inline-" + tag);
+  const std::string mode = non_pie ? " -fno-pie -no-pie " : " -fPIE -pie ";
+  const std::string compile = shell_quote(compiler) +
+                              " -O2 -g -gdwarf-4 " + mode +
+                              " tests/fixtures/inline_core_fixture.c -o " +
+                              shell_quote(fixture.string()) + " 2>&1";
+  (void)run_command(compile);
+  (void)run_command("python3 tests/core_inline_dwarf_oracle.py " +
+                    shell_quote(fixture.string()) + " 2>&1");
+
+  const pid_t child = ::fork();
+  if (child == -1) throw std::runtime_error("failed to fork optimized inline fixture");
+  if (child == 0) {
+    ::execl(fixture.c_str(), fixture.c_str(), nullptr);
+    _exit(127);
+  }
+  int status = 0;
+  while (::waitpid(child, &status, 0) == -1) {
+  }
+  require(WIFSIGNALED(status) && WTERMSIG(status) == SIGSEGV,
+          "optimized inline fixture did not terminate with SIGSEGV");
+  const auto core_path = std::filesystem::path("/tmp") /
+                         ("mdbg-core-" + std::to_string(child));
+  require(std::filesystem::exists(core_path),
+          "optimized inline fixture did not produce the expected genuine core");
+
+  const auto mdbg_core =
+      std::filesystem::absolute(integration_path).parent_path() / "mdbg-core";
+  const std::string command = "printf 'inline\\nquit\\n' | " +
+                              shell_quote(mdbg_core.string()) + " " +
+                              shell_quote(core_path.string()) + " 2>&1";
+  const auto output = run_command(command);
+  require(output.find("inline_outer") != std::string::npos &&
+              output.find("inline_inner") != std::string::npos,
+          "mdbg-core did not expose the compiler-proven inline call chain");
+
+  std::error_code error;
+  std::filesystem::remove(core_path, error);
+  std::filesystem::remove(fixture, error);
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -181,6 +233,7 @@ int main(int argc, char** argv) {
             "sibling frame leaked locals from the crash-thread selection");
 
     test_core_cli(argv[0], argv[1], sibling_tid);
+    test_inline_artifact_gate(argv[0], session);
 
     std::cout << "bounded core local discovery integration passed\n";
   } catch (const std::exception& error) {

@@ -33,10 +33,12 @@ jobs:
             tests/fixtures/caller_inline_core_fixture.c \
             tests/fixtures/caller_inline_crash_leaf.c -pthread \
             -o /tmp/caller-inline-nopie
-      - name: Verify compiler-produced inline aggregate binding
+      - name: Verify compiler-produced inline typed bindings
         run: |
           python3 tests/core_caller_inline_dwarf_oracle.py /tmp/caller-inline-pie
           python3 tests/core_caller_inline_dwarf_oracle.py /tmp/caller-inline-nopie
+          python3 tests/core_caller_inline_union_dwarf_oracle.py /tmp/caller-inline-pie
+          python3 tests/core_caller_inline_union_dwarf_oracle.py /tmp/caller-inline-nopie
       - name: Build core inspection surface
         run: |
           cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug

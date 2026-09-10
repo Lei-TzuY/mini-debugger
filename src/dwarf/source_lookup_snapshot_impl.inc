@@ -17,6 +17,9 @@ constexpr std::uint8_t kSnapshotDwOpR12 =
 constexpr std::uint8_t kSnapshotDwOpXmm0 =
     static_cast<std::uint8_t>(kDwOpReg0 + 17U);
 
+std::optional<LocalEnumType> selected_inline_enum_type(
+    const std::vector<Die>& dies, std::uint64_t type_offset);
+
 struct SnapshotRegisterPieceSource {
   struct Registers {
     std::uint64_t rdi;
@@ -215,6 +218,18 @@ LocalStructMemberType resolve_snapshot_struct_member_type(
           member_name->text, offset, pointer_size, false, LocalValueKind::Pointer,
           LocalPointerPointeeType{pointee_integer.byte_size,
                                   pointee_integer.is_signed}};
+    }
+
+    if (const auto enum_type = selected_inline_enum_type(dies, type_offset)) {
+      if (offset > struct_size || enum_type->byte_size > struct_size - offset) {
+        throw std::runtime_error(
+            "snapshot enum structure member exceeds aggregate storage");
+      }
+      LocalStructMemberType result{member_name->text, offset, enum_type->byte_size,
+                                   enum_type->is_signed,
+                                   LocalValueKind::Enumeration};
+      result.enum_type = *enum_type;
+      return result;
     }
 
     const auto integer = resolve_integer_type(dies, type_offset);

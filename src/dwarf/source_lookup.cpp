@@ -890,7 +890,8 @@ LocalScalarValue materialize_selected_inline_structure(
                                                member.is_signed,
                                                member.kind,
                                                member.pointee_type,
-                                               member.bit_slice});
+                                               member.bit_slice,
+                                               member.enum_type});
   }
 
   if (memory.provenance == SnapshotMemoryProvenance::Core) {

@@ -40,6 +40,18 @@ struct LocalBitSlice {
   std::size_t bit_size;
 };
 
+struct LocalEnumEntry {
+  std::string name;
+  std::uint64_t raw_value;
+};
+
+struct LocalEnumType {
+  std::string name;
+  std::size_t byte_size;
+  bool is_signed;
+  std::vector<LocalEnumEntry> enumerators{};
+};
+
 struct LocalStructMemberType {
   std::string name;
   std::size_t offset;
@@ -48,6 +60,7 @@ struct LocalStructMemberType {
   LocalValueKind kind{LocalValueKind::Integer};
   std::optional<LocalPointerPointeeType> pointee_type{};
   std::optional<LocalBitSlice> bit_slice{};
+  std::optional<LocalEnumType> enum_type{};
 };
 
 struct LocalPointeeType {
@@ -65,6 +78,7 @@ struct LocalStructMember {
   LocalValueKind kind{LocalValueKind::Integer};
   std::optional<LocalPointerPointeeType> pointee_type{};
   std::optional<LocalBitSlice> bit_slice{};
+  std::optional<LocalEnumType> enum_type{};
 };
 
 struct LocalArrayElement {
@@ -79,18 +93,6 @@ struct LocalArrayType {
   std::size_t element_byte_size;
   bool element_is_signed;
   LocalValueKind element_kind{LocalValueKind::Integer};
-};
-
-struct LocalEnumEntry {
-  std::string name;
-  std::uint64_t raw_value;
-};
-
-struct LocalEnumType {
-  std::string name;
-  std::size_t byte_size;
-  bool is_signed;
-  std::vector<LocalEnumEntry> enumerators{};
 };
 
 struct LocalIntegerValue {

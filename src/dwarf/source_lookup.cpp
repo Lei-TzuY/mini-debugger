@@ -429,6 +429,124 @@ std::optional<LocalBitSlice> selected_inline_bit_slice(
   return LocalBitSlice{absolute_bit_offset, width};
 }
 
+std::optional<LocalStructMemberType> selected_inline_nested_structure_member_type(
+    const std::vector<Die>& dies, const Die& member, std::size_t outer_size) {
+  const auto* member_type = attribute(member, kDwAtType);
+  if (member_type == nullptr || member_type->form != kDwFormRef4) return std::nullopt;
+
+  std::uint64_t type_offset = member_type->number;
+  std::optional<std::size_t> structure_index;
+  for (unsigned depth = 0; depth < 16; ++depth) {
+    const auto index = die_index_by_offset(dies, type_offset);
+    if (!index) {
+      throw std::runtime_error("selected-inline nested member type references an unknown DIE");
+    }
+    const auto& type_die = dies[*index];
+    if (type_die.tag == kDwTagTypedef || type_die.tag == kDwTagConstType) {
+      const auto* wrapped = attribute(type_die, kDwAtType);
+      if (wrapped == nullptr || wrapped->form != kDwFormRef4) {
+        throw std::runtime_error(
+            "selected-inline nested member wrapper does not use DW_FORM_ref4");
+      }
+      type_offset = wrapped->number;
+      continue;
+    }
+    if (type_die.tag != kDwTagStructureType) return std::nullopt;
+    structure_index = *index;
+    break;
+  }
+  if (!structure_index) {
+    throw std::runtime_error("selected-inline nested member type chain is too deep");
+  }
+
+  const auto* member_name = attribute(member, kDwAtName);
+  const auto* member_offset = attribute(member, kDwAtDataMemberLocation);
+  if (member_name == nullptr || member_name->text.empty()) {
+    throw std::runtime_error("selected-inline nested structure member has no supported name");
+  }
+  if (member_offset == nullptr ||
+      !is_constant_member_offset_form(member_offset->form) ||
+      member_offset->number > std::numeric_limits<std::size_t>::max()) {
+    throw std::runtime_error(
+        "selected-inline nested structure member has no supported constant offset");
+  }
+  const auto offset = static_cast<std::size_t>(member_offset->number);
+  const auto& structure = dies[*structure_index];
+  const auto* size = attribute(structure, kDwAtByteSize);
+  if (size == nullptr || size->number == 0 || size->number > kMaxLocalStructSize) {
+    throw std::runtime_error(
+        "selected-inline nested structure has an unsupported byte size");
+  }
+  const auto nested_size = static_cast<std::size_t>(size->number);
+  if (offset > outer_size || nested_size > outer_size - offset) {
+    throw std::runtime_error(
+        "selected-inline nested structure exceeds outer aggregate storage");
+  }
+
+  LocalStructMemberType result{member_name->text, offset, nested_size, false,
+                               LocalValueKind::Structure};
+  for (std::size_t child = 0; child < dies.size(); ++child) {
+    if (dies[child].parent != *structure_index) continue;
+    if (dies[child].tag != kDwTagMember) {
+      throw std::runtime_error(
+          "selected-inline nested structure has an unsupported direct child DIE");
+    }
+    if (result.members.size() >= kMaxLocalStructMembers) {
+      throw std::runtime_error(
+          "selected-inline nested structure has too many direct members");
+    }
+    const auto& terminal_die = dies[child];
+    if (attribute(terminal_die, kInlineDwAtBitSize) != nullptr ||
+        attribute(terminal_die, kInlineDwAtBitOffset) != nullptr ||
+        attribute(terminal_die, kInlineDwAtDataBitOffset) != nullptr) {
+      throw std::runtime_error(
+          "selected-inline nested structure terminal bit-fields are unsupported");
+    }
+    const auto* terminal_name = attribute(terminal_die, kDwAtName);
+    const auto* terminal_type = attribute(terminal_die, kDwAtType);
+    const auto* terminal_offset = attribute(terminal_die, kDwAtDataMemberLocation);
+    if (terminal_name == nullptr || terminal_name->text.empty()) {
+      throw std::runtime_error(
+          "selected-inline nested structure terminal has no supported name");
+    }
+    if (terminal_type == nullptr || terminal_type->form != kDwFormRef4) {
+      throw std::runtime_error(
+          "selected-inline nested structure terminal has no supported DW_FORM_ref4 type");
+    }
+    if (terminal_offset == nullptr ||
+        !is_constant_member_offset_form(terminal_offset->form) ||
+        terminal_offset->number > std::numeric_limits<std::size_t>::max()) {
+      throw std::runtime_error(
+          "selected-inline nested structure terminal has no supported constant offset");
+    }
+    const auto terminal_byte_offset =
+        static_cast<std::size_t>(terminal_offset->number);
+    const auto integer = resolve_integer_type(dies, terminal_type->number);
+    if (terminal_byte_offset > nested_size ||
+        integer.byte_size > nested_size - terminal_byte_offset) {
+      throw std::runtime_error(
+          "selected-inline nested structure terminal exceeds inner storage");
+    }
+    const auto duplicate = std::find_if(
+        result.members.begin(), result.members.end(),
+        [&](const LocalStructMemberType& existing) {
+          return existing.name == terminal_name->text;
+        });
+    if (duplicate != result.members.end()) {
+      throw std::runtime_error(
+          "selected-inline nested structure has duplicate terminal member names");
+    }
+    result.members.push_back(LocalStructMemberType{
+        terminal_name->text, terminal_byte_offset, integer.byte_size,
+        integer.is_signed, LocalValueKind::Integer});
+  }
+  if (result.members.empty()) {
+    throw std::runtime_error(
+        "selected-inline nested structure has no bounded terminal scalar members");
+  }
+  return result;
+}
+
 std::optional<LocalPointeeType> selected_inline_direct_structure_type(
     const std::vector<Die>& dies, std::uint64_t type_offset) {
   for (unsigned depth = 0; depth < 16; ++depth) {
@@ -470,7 +588,11 @@ std::optional<LocalPointeeType> selected_inline_direct_structure_type(
                              attribute(member_die, kInlineDwAtDataBitOffset) != nullptr;
       LocalStructMemberType member;
       if (!bit_field) {
-        member = resolve_snapshot_struct_member_type(dies, member_die, struct_size);
+        const auto nested = selected_inline_nested_structure_member_type(
+            dies, member_die, struct_size);
+        member = nested ? std::move(*nested)
+                        : resolve_snapshot_struct_member_type(dies, member_die,
+                                                              struct_size);
       } else {
         const auto* member_name = attribute(member_die, kDwAtName);
         const auto* member_type = attribute(member_die, kDwAtType);
@@ -537,30 +659,30 @@ LocalStructMemberType selected_inline_union_member_type(
     const auto index = die_index_by_offset(dies, type_offset);
     if (!index) {
       throw std::runtime_error(
-"selected-inline union member type references an unknown DIE");
+          "selected-inline union member type references an unknown DIE");
     }
     const auto& type_die = dies[*index];
     if (type_die.tag == kDwTagTypedef || type_die.tag == kDwTagConstType) {
       const auto* wrapped = attribute(type_die, kDwAtType);
       if (wrapped == nullptr || wrapped->form != kDwFormRef4) {
         throw std::runtime_error(
-  "selected-inline union member wrapper does not use DW_FORM_ref4");
+            "selected-inline union member wrapper does not use DW_FORM_ref4");
       }
       type_offset = wrapped->number;
       continue;
     }
     if (type_die.tag != kDwTagBaseType) {
       throw std::runtime_error(
-"selected-inline union member is not a bounded integer scalar");
+          "selected-inline union member is not a bounded integer scalar");
     }
     const auto integer = resolve_integer_type(dies, type_offset);
     if (integer.byte_size == 0 || integer.byte_size > sizeof(std::uint64_t) ||
         integer.byte_size > union_size) {
       throw std::runtime_error(
-"selected-inline union integer member exceeds bounded shared storage");
+          "selected-inline union integer member exceeds bounded shared storage");
     }
     return LocalStructMemberType{member_name->text, 0, integer.byte_size,
-                       integer.is_signed};
+                                 integer.is_signed};
   }
   throw std::runtime_error("selected-inline union member type chain is too deep");
 }
@@ -577,7 +699,7 @@ std::optional<LocalPointeeType> selected_inline_direct_union_type(
       const auto* wrapped = attribute(die, kDwAtType);
       if (wrapped == nullptr || wrapped->form != kDwFormRef4) {
         throw std::runtime_error(
-  "selected-inline union wrapper does not use DW_FORM_ref4");
+            "selected-inline union wrapper does not use DW_FORM_ref4");
       }
       type_offset = wrapped->number;
       continue;
@@ -594,17 +716,17 @@ std::optional<LocalPointeeType> selected_inline_direct_union_type(
       if (dies[child].parent != *index) continue;
       if (dies[child].tag != kDwTagMember) {
         throw std::runtime_error(
-  "selected-inline union has an unsupported direct child DIE");
+            "selected-inline union has an unsupported direct child DIE");
       }
       if (result.members.size() >= kMaxLocalStructMembers) {
         throw std::runtime_error("selected-inline union has too many direct members");
       }
       auto resolved = selected_inline_union_member_type(dies, dies[child], union_size);
       const auto duplicate = std::find_if(
-result.members.begin(), result.members.end(),
-[&resolved](const LocalStructMemberType& existing) {
-  return existing.name == resolved.name;
-});
+          result.members.begin(), result.members.end(),
+          [&resolved](const LocalStructMemberType& existing) {
+            return existing.name == resolved.name;
+          });
       if (duplicate != result.members.end()) {
         throw std::runtime_error("selected-inline union has duplicate member names");
       }
@@ -785,7 +907,7 @@ LocalScalarValue materialize_selected_inline_union(
         "selected-inline union bytes exceed the bounded overlapping-storage model");
   }
   LocalScalarValue result{owner.module_path, std::string(name), 0,
-                union_type.byte_size, false, LocalValueKind::Union};
+                          union_type.byte_size, false, LocalValueKind::Union};
   result.members.reserve(union_type.members.size());
   for (const auto& member : union_type.members) {
     if (member.offset != 0 || member.kind != LocalValueKind::Integer ||
@@ -793,7 +915,7 @@ LocalScalarValue materialize_selected_inline_union(
         member.byte_size > sizeof(std::uint64_t) ||
         member.byte_size > union_type.byte_size) {
       throw std::logic_error(
-"selected-inline union member violates bounded shared-storage semantics");
+          "selected-inline union member violates bounded shared-storage semantics");
     }
     result.members.push_back(LocalStructMember{
         member.name, decode_integer(memory.bytes, 0, member.byte_size),
@@ -804,11 +926,11 @@ LocalScalarValue materialize_selected_inline_union(
   } else {
     if (memory.module_path != owner.module_path) {
       throw std::logic_error(
-"selected-inline union artifact ownership changed during value read");
+          "selected-inline union artifact ownership changed during value read");
     }
     result.storage = LocalValueStorage::SnapshotRuntimeArtifact;
     result.storage_module_path = memory.module_path;
-    result.storage_file_path = memory.module_file_path;
+    result.storage_file_path = memory.artifact_file_path;
     result.storage_file_offset = memory.artifact_file_offset;
   }
   return result;
@@ -872,6 +994,53 @@ LocalScalarValue materialize_selected_inline_structure(
                           LocalValueKind::Structure};
   result.members.reserve(aggregate.members.size());
   for (const auto& member : aggregate.members) {
+    if (member.kind == LocalValueKind::Structure) {
+      if (member.byte_size == 0 || member.byte_size > kMaxLocalStructSize ||
+          member.offset > aggregate.byte_size ||
+          member.byte_size > aggregate.byte_size - member.offset ||
+          member.pointee_type || member.bit_slice || member.enum_type ||
+          member.members.empty() ||
+          member.members.size() > kMaxLocalStructMembers) {
+        throw std::logic_error(
+            "selected-inline nested aggregate member violates bounded layout ownership");
+      }
+      LocalStructMember nested{member.name, 0, member.byte_size, false,
+                               LocalValueKind::Structure};
+      nested.members.reserve(member.members.size());
+      for (const auto& terminal : member.members) {
+        if (terminal.kind != LocalValueKind::Integer || terminal.pointee_type ||
+            terminal.bit_slice || terminal.enum_type ||
+            !terminal.members.empty() || terminal.byte_size == 0 ||
+            terminal.byte_size > sizeof(std::uint64_t) ||
+            terminal.offset > member.byte_size ||
+            terminal.byte_size > member.byte_size - terminal.offset) {
+          throw std::logic_error(
+              "selected-inline nested aggregate terminal is outside the bounded scalar model");
+        }
+        if (terminal.offset >
+            std::numeric_limits<std::size_t>::max() - member.offset) {
+          throw std::overflow_error(
+              "selected-inline nested aggregate terminal offset overflows");
+        }
+        const auto absolute_offset = member.offset + terminal.offset;
+        if (absolute_offset > aggregate.byte_size ||
+            terminal.byte_size > aggregate.byte_size - absolute_offset) {
+          throw std::logic_error(
+              "selected-inline nested aggregate terminal exceeds outer storage");
+        }
+        nested.members.push_back(LocalStructMember{
+            terminal.name,
+            decode_integer(memory.bytes, absolute_offset, terminal.byte_size),
+            terminal.byte_size, terminal.is_signed, LocalValueKind::Integer});
+      }
+      result.members.push_back(std::move(nested));
+      continue;
+    }
+
+    if (!member.members.empty()) {
+      throw std::logic_error(
+          "selected-inline non-structure member unexpectedly carries nested metadata");
+    }
     std::uint64_t raw = 0;
     if (member.bit_slice) {
       raw = decode_selected_inline_bit_field(memory.bytes, member);
@@ -934,9 +1103,9 @@ std::optional<LocalEnumType> selected_inline_enum_type(
     }
     if (die.tag != kInlineDwTagEnumerationType) return std::nullopt;
 
-    const auto* name = attribute(die, kDwAtName);
+    const auto* enum_name = attribute(die, kDwAtName);
     const auto* size = attribute(die, kDwAtByteSize);
-    if (name == nullptr || name->text.empty()) {
+    if (enum_name == nullptr || enum_name->text.empty()) {
       throw std::runtime_error("selected-inline enum has no supported name");
     }
     if (size == nullptr || size->number == 0 ||
@@ -981,7 +1150,7 @@ std::optional<LocalEnumType> selected_inline_enum_type(
       is_signed = underlying.is_signed;
     }
 
-    LocalEnumType result{name->text, byte_size, is_signed, {}};
+    LocalEnumType result{enum_name->text, byte_size, is_signed, {}};
     for (std::size_t child = 0; child < dies.size(); ++child) {
       if (dies[child].parent != *index) continue;
       if (dies[child].tag != kInlineDwTagEnumerator) {
@@ -1059,8 +1228,8 @@ std::optional<LocalScalarValue> inspect_inline_scalar_unit(
     const bool variable = dies[index].tag == kDwTagVariable;
     const bool parameter = dies[index].tag == kDwTagFormalParameter;
     if (!variable && !parameter) continue;
-    const auto* name = attribute_with_abstract_origin(dies, index, kDwAtName);
-    if (name == nullptr || name->text != requested_name) continue;
+    const auto* local_name = attribute_with_abstract_origin(dies, index, kDwAtName);
+    if (local_name == nullptr || local_name->text != requested_name) continue;
     const auto depth = inline_local_scope_depth(
         dies, index, *selected_inline, virtual_pc, ranges, unit_base, unit_version);
     if (!depth) continue;
@@ -1098,35 +1267,36 @@ std::optional<LocalScalarValue> inspect_inline_scalar_unit(
   const auto pointee_type = resolve_pointer_pointee_type(dies, type->number);
   const auto direct_structure =
       pointee_type ? std::optional<LocalPointeeType>{}
-         : selected_inline_direct_structure_type(dies, type->number);
+                   : selected_inline_direct_structure_type(dies, type->number);
   const auto direct_union =
       (pointee_type || direct_structure)
-? std::optional<LocalPointeeType>{}
-: selected_inline_direct_union_type(dies, type->number);
+          ? std::optional<LocalPointeeType>{}
+          : selected_inline_direct_union_type(dies, type->number);
   const auto direct_array =
       (pointee_type || direct_structure || direct_union)
-? std::optional<SelectedInlineFixedArrayType>{}
-: selected_inline_fixed_array_type(dies, type->number);
+          ? std::optional<SelectedInlineFixedArrayType>{}
+          : selected_inline_fixed_array_type(dies, type->number);
   const auto direct_enum =
-    (pointee_type || direct_structure || direct_union || direct_array)
-        ? std::optional<LocalEnumType>{}
-        : selected_inline_enum_type(dies, type->number);
+      (pointee_type || direct_structure || direct_union || direct_array)
+          ? std::optional<LocalEnumType>{}
+          : selected_inline_enum_type(dies, type->number);
   const auto value_type =
       pointee_type
-? ValueType{sizeof(std::uintptr_t), false, LocalValueKind::Pointer, {}}
-: direct_structure
-      ? ValueType{direct_structure->byte_size, false,
-                  LocalValueKind::Structure, {}}
-      : direct_union
-            ? ValueType{direct_union->byte_size, false,
-                        LocalValueKind::Union, {}}
-            : direct_array
-                  ? ValueType{direct_array->byte_size, false,
-                              LocalValueKind::Array, {}}
-                  : direct_enum
-                  ? ValueType{direct_enum->byte_size, direct_enum->is_signed,
-                              LocalValueKind::Enumeration, {}}
-                  : resolve_value_type(dies, type->number);
+          ? ValueType{sizeof(std::uintptr_t), false, LocalValueKind::Pointer, {}}
+          : direct_structure
+                ? ValueType{direct_structure->byte_size, false,
+                            LocalValueKind::Structure, {}}
+                : direct_union
+                      ? ValueType{direct_union->byte_size, false,
+                                  LocalValueKind::Union, {}}
+                      : direct_array
+                            ? ValueType{direct_array->byte_size, false,
+                                        LocalValueKind::Array, {}}
+                            : direct_enum
+                                  ? ValueType{direct_enum->byte_size,
+                                              direct_enum->is_signed,
+                                              LocalValueKind::Enumeration, {}}
+                                  : resolve_value_type(dies, type->number);
   if (!direct_structure && !direct_union && !direct_array && !direct_enum &&
       ((value_type.kind != LocalValueKind::Integer &&
         value_type.kind != LocalValueKind::Pointer) ||
@@ -1168,19 +1338,20 @@ std::optional<LocalScalarValue> inspect_inline_scalar_unit(
     }
     const auto memory = read_snapshot_memory(
         snapshot, module_paths, static_cast<std::uintptr_t>(runtime_address),
-        value_type.byte_size);    if (direct_structure) {
-    return materialize_selected_inline_structure(owner, requested_name,
-                                                 *direct_structure, memory);
-  }
-  if (direct_union) {
-    return materialize_selected_inline_union(owner, requested_name,
-                                             *direct_union, memory);
-  }
-  if (direct_array) {
-    return materialize_selected_inline_array(owner, requested_name,
-                                             *direct_array, memory);
-  }
-  auto result =
+        value_type.byte_size);
+    if (direct_structure) {
+      return materialize_selected_inline_structure(owner, requested_name,
+                                                   *direct_structure, memory);
+    }
+    if (direct_union) {
+      return materialize_selected_inline_union(owner, requested_name,
+                                               *direct_union, memory);
+    }
+    if (direct_array) {
+      return materialize_selected_inline_array(owner, requested_name,
+                                               *direct_array, memory);
+    }
+    auto result =
         materialize_snapshot_memory_value(owner, requested_name, value_type, memory);
     attach_pointer_metadata(result, pointee_type);
     if (direct_enum) result.enum_type = *direct_enum;

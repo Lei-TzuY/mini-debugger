@@ -41,6 +41,14 @@ jobs:
             tests/fixtures/caller_inline_typed_aggregate_fixture.c \
             tests/fixtures/caller_inline_typed_aggregate_crash_leaf.c \
             -o /tmp/caller-inline-typed-aggregate-nopie
+          "$CC" -O2 -g -gdwarf-4 -fPIE -pie \
+            tests/fixtures/caller_inline_nested_aggregate_fixture.c \
+            tests/fixtures/caller_inline_nested_aggregate_crash_leaf.c \
+            -o /tmp/caller-inline-nested-aggregate-pie
+          "$CC" -O2 -g -gdwarf-4 -fno-pie -no-pie \
+            tests/fixtures/caller_inline_nested_aggregate_fixture.c \
+            tests/fixtures/caller_inline_nested_aggregate_crash_leaf.c \
+            -o /tmp/caller-inline-nested-aggregate-nopie
       - name: Verify compiler-produced inline typed bindings
         run: |
           python3 tests/core_caller_inline_dwarf_oracle.py /tmp/caller-inline-pie
@@ -55,6 +63,10 @@ jobs:
             /tmp/caller-inline-typed-aggregate-pie
           python3 tests/core_caller_inline_typed_aggregate_dwarf_oracle.py \
             /tmp/caller-inline-typed-aggregate-nopie
+          python3 tests/core_caller_inline_nested_aggregate_dwarf_oracle.py \
+            /tmp/caller-inline-nested-aggregate-pie
+          python3 tests/core_caller_inline_nested_aggregate_dwarf_oracle.py \
+            /tmp/caller-inline-nested-aggregate-nopie
       - name: Build core inspection surface
         run: |
           cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
@@ -83,6 +95,10 @@ jobs:
             tests/core_inline_typed_aggregate_enum_session_integration.cpp \
             build/libmdbg_core.a -pthread \
             -o /tmp/core-inline-typed-aggregate-enum-session
+          "$CXX" -std=c++17 -Wall -Wextra -Wpedantic -Werror -Isrc \
+            tests/core_inline_nested_aggregate_session_integration.cpp \
+            build/libmdbg_core.a -pthread \
+            -o /tmp/core-inline-nested-aggregate-session
       - name: Verify selected-inline aggregate session and CLI
         run: |
           sudo sysctl -w kernel.core_pattern=/tmp/mdbg-core-%p
@@ -101,3 +117,7 @@ jobs:
             /tmp/caller-inline-typed-aggregate-pie build/mdbg-core
           /tmp/core-inline-typed-aggregate-enum-session \
             /tmp/caller-inline-typed-aggregate-nopie build/mdbg-core
+          /tmp/core-inline-nested-aggregate-session \
+            /tmp/caller-inline-nested-aggregate-pie build/mdbg-core
+          /tmp/core-inline-nested-aggregate-session \
+            /tmp/caller-inline-nested-aggregate-nopie build/mdbg-core

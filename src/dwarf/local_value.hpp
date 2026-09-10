@@ -17,11 +17,17 @@ struct InspectionFrameContext;
 struct SnapshotInspectionFrameContext;
 
 enum class LocalValueKind { Integer, Pointer, Floating, Structure };
+enum class LocalDiscoveryKind { Variable, FormalParameter };
 enum class LocalValueStorage {
   Computed,
   SnapshotCoreMemory,
   SnapshotCoreRegister,
   SnapshotRuntimeArtifact
+};
+
+struct LocalDiscoveryEntry {
+  std::string name;
+  LocalDiscoveryKind kind;
 };
 
 struct LocalPointerPointeeType {
@@ -85,6 +91,9 @@ LocalScalarValue inspect_local_value(const CoreSnapshot& snapshot,
                                      const SnapshotInspectionFrameContext& frame,
                                      std::string_view name,
                                      const SnapshotModulePathResolver& module_paths);
+std::vector<LocalDiscoveryEntry> discover_local_values(
+    const CoreSnapshot& snapshot, const SnapshotInspectionFrameContext& frame,
+    const SnapshotModulePathResolver& module_paths);
 LocalScalarValue dereference_local_pointer(
     const CoreSnapshot& snapshot, const SnapshotInspectionFrameContext& frame,
     std::string_view name, const SnapshotModulePathResolver& module_paths);

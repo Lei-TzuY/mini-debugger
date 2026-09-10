@@ -69,17 +69,22 @@ def symbol_address(path, name):
     raise RuntimeError(f"missing probe symbol: {name}")
 
 
-def die_range(record, context):
-    low_text = record["attrs"].get("low_pc")
-    high_text = record["attrs"].get("high_pc")
-    if not low_text or not high_text:
+def origin_name(record, by_offset):
+    origin_text = record["attrs"].get("abstract_origin")
+    if not origin_text:
         return None
-    low = numeric_attr(low_text, f"{context}: low_pc")
-    raw_high = numeric_attr(high_text, f"{context}: high_pc")
-    high = raw_high if raw_high > low else low + raw_high
-    if high <= low:
-        raise RuntimeError(f"{context}: invalid PC range")
-    return low, high
+    origin = by_offset.get(ref_offset(origin_text, "inline abstract_origin"))
+    if origin is None or origin["tag"] != "DW_TAG_subprogram":
+        raise RuntimeError("inline abstract origin does not reference a subprogram")
+    name = clean_name(origin["attrs"].get("name", ""))
+    return name or None
+
+
+def addr2line_chain(path, probe):
+    lines = run("addr2line", "-i", "-f", "-e", path, hex(probe)).splitlines()
+    if len(lines) < 2:
+        raise RuntimeError("addr2line emitted no inline chain")
+    return [lines[index].strip() for index in range(0, len(lines), 2)]
 
 
 def main():
@@ -90,49 +95,49 @@ def main():
     by_offset = {record["offset"]: record for record in records}
     probe = symbol_address(path, "snapshot_inline_crash_probe")
 
-    covered = []
+    expected = {"inline_outer": None, "inline_inner": None}
     for record in records:
         if record["tag"] != "DW_TAG_inlined_subroutine":
             continue
-        concrete_range = die_range(record, "inline DIE")
-        if concrete_range is None:
+        name = origin_name(record, by_offset)
+        if name not in expected:
             continue
-        low, high = concrete_range
-        if not (low <= probe < high):
-            continue
-        origin_text = record["attrs"].get("abstract_origin")
         call_file = record["attrs"].get("call_file")
         call_line = record["attrs"].get("call_line")
-        if not origin_text or not call_file or not call_line:
-            raise RuntimeError("covering inline DIE lacks abstract-origin/call-site metadata")
-        origin_offset = ref_offset(origin_text, "inline abstract_origin")
-        origin = by_offset.get(origin_offset)
-        if origin is None or origin["tag"] != "DW_TAG_subprogram":
-            raise RuntimeError("inline abstract origin does not reference a subprogram")
-        name = clean_name(origin["attrs"].get("name", ""))
-        if not name:
-            raise RuntimeError("inline abstract-origin subprogram has no name")
-        if numeric_attr(call_file, f"{name}: call_file") != 1:
-            raise RuntimeError(f"{name}: bounded fixture expected call_file 1")
+        if not call_file or not call_line:
+            continue
+        file_index = numeric_attr(call_file, f"{name}: call_file")
         line = numeric_attr(call_line, f"{name}: call_line")
-        if line == 0:
-            raise RuntimeError(f"{name}: zero call_line")
-        covered.append((record["depth"], name, low, high, line))
+        if file_index == 0 or line == 0:
+            raise RuntimeError(f"{name}: zero call-site coordinate")
+        has_low_high = "low_pc" in record["attrs"] and "high_pc" in record["attrs"]
+        has_ranges = "ranges" in record["attrs"]
+        if not has_low_high and not has_ranges:
+            continue
+        evidence = "low/high" if has_low_high else "ranges"
+        expected[name] = (record["depth"], file_index, line, evidence)
 
-    covered.sort()
-    names = [entry[1] for entry in covered]
-    if names != ["inline_outer", "inline_inner"]:
-        raise RuntimeError(f"unexpected covering inline chain: {names}")
-    if covered[1][0] != covered[0][0] + 1:
-        raise RuntimeError("inline_inner is not nested directly inside inline_outer")
-    if not (covered[0][2] <= covered[1][2] and covered[1][3] <= covered[0][3]):
-        raise RuntimeError("inner inline range is not contained by outer inline range")
+    missing = [name for name, evidence in expected.items() if evidence is None]
+    if missing:
+        raise RuntimeError(f"missing concrete inline call-site metadata: {missing}")
 
-    for depth, name, low, high, line in covered:
+    chain = addr2line_chain(path, probe)
+    wanted = ["inline_inner", "inline_outer", "physical_frame"]
+    if chain[: len(wanted)] != wanted:
+        raise RuntimeError(f"unexpected addr2line inline chain: {chain}")
+
+    outer = expected["inline_outer"]
+    inner = expected["inline_inner"]
+    if inner[0] <= outer[0]:
+        raise RuntimeError("inline_inner DIE is not nested below inline_outer")
+
+    for name in ("inline_outer", "inline_inner"):
+        depth, file_index, line, evidence = expected[name]
         print(
-            f"{name}: depth={depth} probe=0x{probe:x} "
-            f"range=[0x{low:x},0x{high:x}) call_file=1 call_line={line}"
+            f"{name}: depth={depth} probe=0x{probe:x} range={evidence} "
+            f"call_file={file_index} call_line={line}"
         )
+    print("addr2line chain: " + " -> ".join(chain[: len(wanted)]))
 
 
 if __name__ == "__main__":

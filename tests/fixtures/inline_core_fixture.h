@@ -11,7 +11,7 @@ static __attribute__((always_inline)) inline int inline_inner(int seed) {
       "snapshot_inline_crash_probe:\n"
       "movl %0, (%%rax)\n"
       :
-      : "r"(inner_only + shadow_value), "a"((uintptr_t)0)
+      : "r"(shadow_value), "a"((uintptr_t)0)
       : "memory");
   __builtin_unreachable();
 }

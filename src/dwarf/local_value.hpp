@@ -35,6 +35,11 @@ struct LocalPointerPointeeType {
   bool is_signed;
 };
 
+struct LocalBitSlice {
+  std::size_t bit_offset;
+  std::size_t bit_size;
+};
+
 struct LocalStructMemberType {
   std::string name;
   std::size_t offset;
@@ -42,6 +47,7 @@ struct LocalStructMemberType {
   bool is_signed;
   LocalValueKind kind{LocalValueKind::Integer};
   std::optional<LocalPointerPointeeType> pointee_type{};
+  std::optional<LocalBitSlice> bit_slice{};
 };
 
 struct LocalPointeeType {
@@ -58,6 +64,7 @@ struct LocalStructMember {
   bool is_signed;
   LocalValueKind kind{LocalValueKind::Integer};
   std::optional<LocalPointerPointeeType> pointee_type{};
+  std::optional<LocalBitSlice> bit_slice{};
 };
 
 struct LocalArrayElement {

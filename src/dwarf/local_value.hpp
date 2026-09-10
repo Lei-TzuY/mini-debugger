@@ -16,7 +16,7 @@ class SnapshotModulePathResolver;
 struct InspectionFrameContext;
 struct SnapshotInspectionFrameContext;
 
-enum class LocalValueKind { Integer, Pointer, Floating, Structure, Union, Array };
+enum class LocalValueKind { Integer, Pointer, Floating, Structure, Union, Array, Enumeration };
 enum class LocalDiscoveryKind { Variable, FormalParameter };
 enum class LocalValueStorage {
   Computed,
@@ -81,6 +81,18 @@ struct LocalArrayType {
   LocalValueKind element_kind{LocalValueKind::Integer};
 };
 
+struct LocalEnumEntry {
+  std::string name;
+  std::uint64_t raw_value;
+};
+
+struct LocalEnumType {
+  std::string name;
+  std::size_t byte_size;
+  bool is_signed;
+  std::vector<LocalEnumEntry> enumerators{};
+};
+
 struct LocalIntegerValue {
   std::string module_path;
   std::string name;
@@ -96,9 +108,20 @@ struct LocalIntegerValue {
   std::optional<LocalPointeeType> pointee_type{};
   std::vector<LocalArrayElement> elements{};
   std::optional<LocalArrayType> array_type{};
+  std::optional<LocalEnumType> enum_type{};
 };
 
 using LocalScalarValue = LocalIntegerValue;
+
+inline std::optional<std::string_view> local_enum_symbol(const LocalScalarValue& value) {
+  if (value.kind != LocalValueKind::Enumeration || !value.enum_type) {
+    return std::nullopt;
+  }
+  for (const auto& enumerator : value.enum_type->enumerators) {
+    if (enumerator.raw_value == value.raw_value) return enumerator.name;
+  }
+  return std::nullopt;
+}
 
 LocalScalarValue inspect_local_value(const Debugger& debugger,
                                      const ElfFile& preferred_elf,

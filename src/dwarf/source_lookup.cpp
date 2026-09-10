@@ -198,8 +198,7 @@ std::optional<std::vector<InlineCallsiteContext>> discover_inline_unit(
   }
 
   const DwarfLineTable line_table(debug_path);
-  const auto source = line_table.find_virtual_address(virtual_pc);
-  if (!source) {
+  if (!line_table.find_virtual_address(virtual_pc)) {
     throw std::runtime_error("inline context has no supported source file ownership");
   }
 
@@ -216,9 +215,15 @@ std::optional<std::vector<InlineCallsiteContext>> discover_inline_unit(
       throw std::runtime_error(
           "active inline context lacks bounded name/call-site metadata");
     }
+    const auto call_file_path =
+        line_table.find_virtual_file(virtual_pc, call_file->number);
+    if (!call_file_path) {
+      throw std::runtime_error(
+          "active inline context call-site file index is unavailable in the owning line table");
+    }
     result.push_back(InlineCallsiteContext{
         dies[candidate.index].offset, candidate.depth - 1, module_path, name->text,
-        SourceLocation{source->file, call_line->number,
+        SourceLocation{*call_file_path, call_line->number,
                        call_column == nullptr ? 0 : call_column->number}});
   }
   return result;

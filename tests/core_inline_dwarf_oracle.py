@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
+import os
 import re
+import signal
 import subprocess
 import sys
 
@@ -80,11 +82,65 @@ def origin_name(record, by_offset):
     return name or None
 
 
-def addr2line_chain(path, probe):
+def addr2line_contexts(path, probe):
     lines = run("addr2line", "-i", "-f", "-e", path, hex(probe)).splitlines()
-    if len(lines) < 2:
-        raise RuntimeError("addr2line emitted no inline chain")
-    return [lines[index].strip() for index in range(0, len(lines), 2)]
+    if len(lines) < 2 or len(lines) % 2 != 0:
+        raise RuntimeError("addr2line emitted an incomplete inline chain")
+    return [
+        (lines[index].strip(), lines[index + 1].strip())
+        for index in range(0, len(lines), 2)
+    ]
+
+
+def location_basename(location):
+    source = location.rsplit(":", 1)[0]
+    return os.path.basename(source)
+
+
+def require_mdbg_core_callsite_ownership(path):
+    mdbg_core = os.environ.get("MDBG_CORE", "build/mdbg-core")
+    if not os.path.isfile(mdbg_core) or not os.access(mdbg_core, os.X_OK):
+        raise RuntimeError(f"mdbg-core executable is unavailable: {mdbg_core}")
+
+    process = subprocess.Popen([path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    status = process.wait()
+    if status != -signal.SIGSEGV:
+        raise RuntimeError(
+            f"cross-file inline fixture did not terminate with SIGSEGV: {status}"
+        )
+    core_path = f"/tmp/mdbg-core-{process.pid}"
+    if not os.path.exists(core_path):
+        raise RuntimeError("cross-file inline fixture did not produce a genuine core")
+
+    try:
+        output = subprocess.check_output(
+            [mdbg_core, core_path],
+            input="inline\nquit\n",
+            text=True,
+            stderr=subprocess.STDOUT,
+        )
+    finally:
+        try:
+            os.remove(core_path)
+        except FileNotFoundError:
+            pass
+
+    outer_line = next(
+        (line for line in output.splitlines() if "!inline_outer called at " in line),
+        None,
+    )
+    inner_line = next(
+        (line for line in output.splitlines() if "!inline_inner called at " in line),
+        None,
+    )
+    if outer_line is None or "inline_core_fixture.c:" not in outer_line:
+        raise RuntimeError(
+            "mdbg-core did not resolve inline_outer DW_AT_call_file to the source file"
+        )
+    if inner_line is None or "inline_core_fixture.h:" not in inner_line:
+        raise RuntimeError(
+            "mdbg-core did not resolve inline_inner DW_AT_call_file to the header file"
+        )
 
 
 def main():
@@ -121,8 +177,9 @@ def main():
     if missing:
         raise RuntimeError(f"missing concrete inline call-site metadata: {missing}")
 
-    chain = addr2line_chain(path, probe)
+    contexts = addr2line_contexts(path, probe)
     wanted = ["inline_inner", "inline_outer", "physical_frame"]
+    chain = [name for name, _ in contexts]
     if chain[: len(wanted)] != wanted:
         raise RuntimeError(f"unexpected addr2line inline chain: {chain}")
 
@@ -130,6 +187,22 @@ def main():
     inner = expected["inline_inner"]
     if inner[0] <= outer[0]:
         raise RuntimeError("inline_inner DIE is not nested below inline_outer")
+    if inner[1] == outer[1]:
+        raise RuntimeError(
+            "cross-file fixture did not produce distinct compiler DW_AT_call_file indices"
+        )
+
+    source_basenames = {
+        location_basename(location) for _, location in contexts[: len(wanted)]
+    }
+    required_sources = {"inline_core_fixture.h", "inline_core_fixture.c"}
+    if not required_sources.issubset(source_basenames):
+        raise RuntimeError(
+            "addr2line did not prove header/source inline ownership: "
+            + ", ".join(sorted(source_basenames))
+        )
+
+    require_mdbg_core_callsite_ownership(path)
 
     for name in ("inline_outer", "inline_inner"):
         depth, file_index, line, evidence = expected[name]
@@ -137,7 +210,12 @@ def main():
             f"{name}: depth={depth} probe=0x{probe:x} range={evidence} "
             f"call_file={file_index} call_line={line}"
         )
-    print("addr2line chain: " + " -> ".join(chain[: len(wanted)]))
+    print(
+        "addr2line chain: "
+        + " -> ".join(
+            f"{name}@{location}" for name, location in contexts[: len(wanted)]
+        )
+    )
 
 
 if __name__ == "__main__":

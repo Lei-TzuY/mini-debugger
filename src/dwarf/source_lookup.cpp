@@ -930,7 +930,7 @@ LocalScalarValue materialize_selected_inline_union(
     }
     result.storage = LocalValueStorage::SnapshotRuntimeArtifact;
     result.storage_module_path = memory.module_path;
-    result.storage_file_path = memory.artifact_file_path;
+    result.storage_file_path = memory.module_file_path;
     result.storage_file_offset = memory.artifact_file_offset;
   }
   return result;

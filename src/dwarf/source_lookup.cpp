@@ -549,7 +549,20 @@ std::optional<LocalScalarValue> inspect_inline_scalar_unit(
   }
 
   const auto opcode = std::to_integer<std::uint8_t>(expression.front());
-  if (frame.index != 0) {
+  bool frame_zero_bit_field_structure = false;
+  if (frame.index == 0 && direct_structure &&
+      !value_type.members.empty()) {
+    frame_zero_bit_field_structure = std::all_of(
+        value_type.members.begin(), value_type.members.end(),
+        [](const LocalStructMemberType& member) {
+          return member.kind == LocalValueKind::Integer &&
+                 member.bit_slice.has_value() && !member.pointee_type &&
+                 !member.enum_type && member.members.empty();
+        });
+  }
+
+  if (frame.index != 0 ||
+      (frame_zero_bit_field_structure && opcode == kDwOpFbreg)) {
     if (opcode != kDwOpFbreg) {
       throw std::runtime_error(
           "caller-frame selected-inline value currently requires compiler-proven DW_OP_fbreg");

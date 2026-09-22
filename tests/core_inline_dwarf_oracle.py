@@ -165,7 +165,46 @@ def unwrap_type(record, by_offset, context):
     raise RuntimeError(f"{context}: type wrapper chain is too deep")
 
 
-def require_frame_zero_inline_pointer(records, by_offset):
+def active_debug_loc_expression(path, location_attr, probe, context):
+    list_offset = numeric_attr(location_attr, f"{context} location-list offset")
+    try:
+        loc_dump = run("readelf", "--debug-dump=loc", path)
+    except subprocess.CalledProcessError as error:
+        loc_dump = error.output
+
+    active = False
+    expressions = []
+    for line in loc_dump.splitlines():
+        first = re.match(r"^\s*([0-9a-fA-F]{8})\b", line)
+        if not active and first and int(first.group(1), 16) == list_offset:
+            active = True
+        if not active:
+            continue
+        if "<End of list>" in line:
+            break
+        if "(DW_OP_" not in line:
+            continue
+        prefix, expression = line.split("(", 1)
+        long_hex = re.findall(r"\b[0-9a-fA-F]{16}\b", prefix)
+        if len(long_hex) < 2:
+            continue
+        begin = int(long_hex[-2], 16)
+        end = int(long_hex[-1], 16)
+        expression = expression.rsplit(")", 1)[0]
+        expressions.append((begin, end, expression))
+        if begin <= probe < end:
+            return expression, begin, end, loc_dump
+
+    rendered = ", ".join(
+        f"[0x{begin:x},0x{end:x}) {expr}" for begin, end, expr in expressions
+    )
+    raise RuntimeError(
+        f"{context}: no compiler location-list entry owns probe 0x{probe:x}; "
+        f"entries={rendered or '<none>'}"
+    )
+
+
+def require_frame_zero_inline_pointer(path, probe, records, by_offset):
     candidates = []
     for position, record in enumerate(records):
         if record["tag"] != "DW_TAG_inlined_subroutine":
@@ -189,10 +228,13 @@ def require_frame_zero_inline_pointer(records, by_offset):
     location = pointer_var["attrs"].get("location")
     if not location:
         raise RuntimeError("inline_pointer has no compiler-produced DW_AT_location")
-    if "DW_OP_reg" not in location or "DW_OP_piece" in location or "DW_OP_stack_value" in location:
+    expression, begin, end, _ = active_debug_loc_expression(
+        path, location, probe, "inline_pointer"
+    )
+    if not re.fullmatch(r"DW_OP_reg\d+ \([^)]+\)", expression):
         raise RuntimeError(
-            "inline_pointer is not retained as one exact compiler register operation: "
-            + location
+            "inline_pointer active compiler location is not one exact DW_OP_regN: "
+            + expression
         )
 
     type_text = resolved_attr(pointer_var, by_offset, "type")
@@ -228,8 +270,9 @@ def require_frame_zero_inline_pointer(records, by_offset):
 
     print(
         "frame-zero inline pointer DWARF: "
-        f"die=0x{pointer_var['offset']:x} location={location} "
-        f"type=DW_TAG_pointer_type pointee=4-byte-signed"
+        f"die=0x{pointer_var['offset']:x} "
+        f"range=[0x{begin:x},0x{end:x}) location={expression} "
+        "type=DW_TAG_pointer_type pointee=4-byte-signed"
     )
 
 
@@ -539,7 +582,7 @@ def main():
         )
 
     inline_scalar_location_evidence(path, records, by_offset)
-    require_frame_zero_inline_pointer(records, by_offset)
+    require_frame_zero_inline_pointer(path, probe, records, by_offset)
     require_mdbg_core_callsite_ownership(path)
     require_caller_inline_materialization(path)
 

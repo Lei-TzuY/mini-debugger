@@ -95,6 +95,24 @@ jobs:
             printf '%s\n' "$output" | grep -F 'xmm_value = 9876.5'
           done
 
+          "$CC" -O2 -g -gdwarf-4 -fPIE -pie \
+            tests/fixtures/frame_zero_inline_structure_fixture.c \
+            -o build/frame_zero_inline_structure_fixture_pie
+          "$CC" -O2 -g -gdwarf-4 -fno-pie -no-pie \
+            tests/fixtures/frame_zero_inline_structure_fixture.c \
+            -o build/frame_zero_inline_structure_fixture_nopie
+          "$CXX" -std=c++17 -Wall -Wextra -Wpedantic -Werror -Isrc \
+            tests/core_frame_zero_inline_structure_integration.cpp \
+            build/libmdbg_core.a -pthread \
+            -o build/core_frame_zero_inline_structure_integration
+
+          for fixture in build/frame_zero_inline_structure_fixture_pie \
+                         build/frame_zero_inline_structure_fixture_nopie; do
+            python3 tests/core_frame_zero_inline_structure_dwarf_oracle.py "$fixture"
+            ./build/core_frame_zero_inline_structure_integration \
+              "$fixture" ./build/mdbg-core
+          done
+
           "$CC" -O1 -g -gdwarf-4 -fPIE -pie \
             tests/fixtures/signal_core_fixture.c -pthread \
             -o build/signal_core_fixture_pie

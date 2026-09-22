@@ -70,6 +70,7 @@ constexpr std::uint64_t kDwFormData4 = 0x06;
 constexpr std::uint64_t kDwFormData8 = 0x07;
 constexpr std::uint64_t kDwFormString = 0x08;
 constexpr std::uint64_t kDwFormData1 = 0x0b;
+constexpr std::uint64_t kDwFormSdata = 0x0d;
 constexpr std::uint64_t kDwFormStrp = 0x0e;
 constexpr std::uint64_t kDwFormUdata = 0x0f;
 constexpr std::uint64_t kDwFormRef4 = 0x13;
@@ -95,6 +96,10 @@ constexpr std::uint8_t kDwOpLit8 = 0x38;
 constexpr std::uint8_t kDwOpLit16 = 0x40;
 constexpr std::uint8_t kDwOpLit24 = 0x48;
 constexpr std::uint8_t kDwOpReg0 = 0x50;
+constexpr std::uint8_t kDwOpReg1 =
+    static_cast<std::uint8_t>(kDwOpReg0 + 1U);
+constexpr std::uint8_t kDwOpReg2 =
+    static_cast<std::uint8_t>(kDwOpReg0 + 2U);
 constexpr std::uint8_t kDwOpReg4 = 0x54;
 constexpr std::uint8_t kDwOpReg5 = 0x55;
 constexpr std::uint8_t kDwOpReg6 = 0x56;
@@ -380,6 +385,10 @@ AttributeValue read_attribute(const AttributeSpec& spec, const DebugSections& se
       break;
     case kDwFormData8:
       value.number = read_scalar<std::uint64_t>(sections.info, cursor, unit_end, "DW_FORM_data8");
+      break;
+    case kDwFormSdata:
+      value.number = static_cast<std::uint64_t>(
+          read_sleb(sections.info, cursor, unit_end, "DW_FORM_sdata"));
       break;
     case kDwFormUdata:
       value.number = read_uleb(sections.info, cursor, unit_end, "DW_FORM_udata");
@@ -970,7 +979,7 @@ std::optional<LocalEnumType> resolve_bounded_enum_type(
 
 bool is_constant_member_offset_form(std::uint64_t form) {
   return form == kDwFormData1 || form == kDwFormData2 || form == kDwFormData4 ||
-         form == kDwFormData8;
+         form == kDwFormData8 || form == kDwFormSdata;
 }
 
 std::optional<LocalBitSlice> resolve_bounded_bit_slice(
@@ -1868,46 +1877,119 @@ LocalScalarValue decode_structure(const ElfFile& module, std::string_view name,
   return result;
 }
 
-template <typename RegisterSource>
+template <typename RegisterValue>
 std::vector<std::byte> evaluate_register_piece_structure(
-    const std::vector<std::byte>& expression, const RegisterSource& register_source,
+    const std::vector<std::byte>& expression, RegisterValue register_value,
     const LocalValueType& value_type) {
-  if (value_type.kind != LocalValueKind::Structure || value_type.byte_size != 16) {
+  if (value_type.kind != LocalValueKind::Structure) {
     throw std::runtime_error(
-        "register-piece local requires the compiler-proven 16-byte structure shape");
-  }
-  std::size_t cursor = 0;
-  const auto expect_op = [&](std::uint8_t expected, const char* what) {
-    if (cursor >= expression.size() ||
-        std::to_integer<std::uint8_t>(expression[cursor]) != expected) {
-      throw std::runtime_error(std::string("register-piece local requires ") + what);
-    }
-    ++cursor;
-  };
-  expect_op(kDwOpReg5, "DW_OP_reg5 for the first piece");
-  expect_op(kDwOpPiece, "DW_OP_piece after the first register");
-  if (read_uleb(expression, cursor, expression.size(), "first DW_OP_piece size") != 8) {
-    throw std::runtime_error("register-piece local requires an 8-byte first piece");
-  }
-  expect_op(kDwOpReg4, "DW_OP_reg4 for the second piece");
-  expect_op(kDwOpPiece, "DW_OP_piece after the second register");
-  if (read_uleb(expression, cursor, expression.size(), "second DW_OP_piece size") != 8) {
-    throw std::runtime_error("register-piece local requires an 8-byte second piece");
-  }
-  if (cursor != expression.size()) {
-    throw std::runtime_error("unsupported trailing operations after register-piece local");
+        "register-piece local requires a bounded structure type");
   }
 
-  const auto regs = register_source.registers();
-  std::vector<std::byte> bytes(16);
-  const auto store = [&](std::size_t offset, std::uint64_t value) {
-    for (std::size_t index = 0; index < 8; ++index) {
-      bytes[offset + index] = static_cast<std::byte>((value >> (index * 8U)) & 0xffU);
+  const auto store_piece = [](std::vector<std::byte>& bytes,
+                              std::size_t offset, std::size_t width,
+                              std::uint64_t value) {
+    if ((width != 4 && width != 8) || offset > bytes.size() ||
+        width > bytes.size() - offset) {
+      throw std::logic_error(
+          "register-piece materializer received an invalid proven piece extent");
+    }
+    for (std::size_t index = 0; index < width; ++index) {
+      bytes[offset + index] =
+          static_cast<std::byte>((value >> (index * 8U)) & 0xffU);
     }
   };
-  store(0, regs.rdi);
-  store(8, regs.rsi);
-  return bytes;
+
+  std::size_t cursor = 0;
+  const auto read_op = [&](const char* what) {
+    if (cursor >= expression.size()) {
+      throw std::runtime_error(std::string("register-piece local is missing ") + what);
+    }
+    return std::to_integer<std::uint8_t>(expression[cursor++]);
+  };
+  const auto require_piece = [&](std::size_t expected, const char* what) {
+    if (read_op(what) != kDwOpPiece) {
+      throw std::runtime_error(
+          std::string("register-piece local requires DW_OP_piece after ") + what);
+    }
+    const auto width =
+        read_uleb(expression, cursor, expression.size(), what);
+    if (width != expected) {
+      throw std::runtime_error(
+          std::string("register-piece local has an unsupported ") + what +
+          " width");
+    }
+  };
+
+  if (value_type.byte_size == 16) {
+    const auto first = read_op("the first register");
+    if (first != kDwOpReg5) {
+      throw std::runtime_error(
+          "16-byte register-piece local requires compiler-proven DW_OP_reg5 first");
+    }
+    require_piece(8, "first 8-byte piece");
+    const auto second = read_op("the second register");
+    if (second != kDwOpReg4) {
+      throw std::runtime_error(
+          "16-byte register-piece local requires compiler-proven DW_OP_reg4 second");
+    }
+    require_piece(8, "second 8-byte piece");
+    if (cursor != expression.size()) {
+      throw std::runtime_error(
+          "unsupported trailing operations after 16-byte register-piece local");
+    }
+    std::vector<std::byte> bytes(16);
+    store_piece(bytes, 0, 8, register_value(first));
+    store_piece(bytes, 8, 8, register_value(second));
+    return bytes;
+  }
+
+  if (value_type.byte_size == 8) {
+    if (value_type.members.size() != 2 ||
+        value_type.members[0].kind != LocalValueKind::Integer ||
+        value_type.members[1].kind != LocalValueKind::Integer ||
+        value_type.members[0].offset != 0 ||
+        value_type.members[1].offset != 4 ||
+        value_type.members[0].byte_size != 4 ||
+        value_type.members[1].byte_size != 4 ||
+        value_type.members[0].pointee_type ||
+        value_type.members[1].pointee_type ||
+        value_type.members[0].bit_slice ||
+        value_type.members[1].bit_slice ||
+        value_type.members[0].enum_type ||
+        value_type.members[1].enum_type ||
+        !value_type.members[0].members.empty() ||
+        !value_type.members[1].members.empty()) {
+      throw std::runtime_error(
+          "8-byte register-piece local requires the compiler-proven two-int32 structure shape");
+    }
+
+    const auto first = read_op("the first 4-byte register");
+    if (first != kDwOpReg1 && first != kDwOpReg2) {
+      throw std::runtime_error(
+          "8-byte register-piece local requires compiler-proven RDX/RCX pieces");
+    }
+    require_piece(4, "first 4-byte piece");
+    const auto second = read_op("the second 4-byte register");
+    if ((first == kDwOpReg1 && second != kDwOpReg2) ||
+        (first == kDwOpReg2 && second != kDwOpReg1)) {
+      throw std::runtime_error(
+          "8-byte register-piece local requires the opposite RDX/RCX register second");
+    }
+    require_piece(4, "second 4-byte piece");
+    if (cursor != expression.size()) {
+      throw std::runtime_error(
+          "unsupported trailing operations after 8-byte register-piece local");
+    }
+
+    std::vector<std::byte> bytes(8);
+    store_piece(bytes, 0, 4, register_value(first));
+    store_piece(bytes, 4, 4, register_value(second));
+    return bytes;
+  }
+
+  throw std::runtime_error(
+      "register-piece local is outside the proven 8-byte or 16-byte structure shapes");
 }
 
 std::uint64_t read_integer(const Debugger& debugger, std::uint64_t address,
@@ -2341,9 +2423,17 @@ std::optional<LocalScalarValue> inspect_unit(const DebugSections& sections,
 
   if (value_type.kind == LocalValueKind::Structure && !location_expression.empty() &&
       std::to_integer<std::uint8_t>(location_expression.front()) == kDwOpReg5) {
-    return decode_structure(module, name, value_type,
-                            evaluate_register_piece_structure(location_expression, debugger,
-                                                              value_type));
+    const auto regs = debugger.registers();
+    const auto register_value = [&](std::uint8_t op) -> std::uint64_t {
+      if (op == kDwOpReg5) return regs.rdi;
+      if (op == kDwOpReg4) return regs.rsi;
+      throw std::runtime_error(
+          "live register-piece structure requested an unproven register");
+    };
+    return decode_structure(
+        module, name, value_type,
+        evaluate_register_piece_structure(location_expression, register_value,
+                                          value_type));
   }
 
   if (location_expression.empty() ||

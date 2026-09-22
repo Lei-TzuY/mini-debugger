@@ -256,16 +256,19 @@ class CoreInspectionSession {
       std::string_view name, std::string_view member_name) const {
     const auto& frame = selected_frame();
     validate_selected_frame(frame);
-    if (!selected_inline_context_) {
-      throw std::logic_error(
-"union member selection requires a selected inline context");
+    LocalScalarValue value;
+    if (selected_inline_context_) {
+      if (selected_inline_context_->module_path != frame.module_path) {
+        throw std::logic_error(
+            "selected inline context belongs to a different module");
+      }
+      value = inspect_inline_local_value(
+          snapshot_, frame, selected_inline_context_->die_offset, name,
+          module_paths_);
+    } else {
+      value = inspect_local_value(snapshot_, frame, name, module_paths_);
     }
-    if (selected_inline_context_->module_path != frame.module_path) {
-      throw std::logic_error("selected inline context belongs to a different module");
-    }
-    const auto value = inspect_inline_local_value(
-        snapshot_, frame, selected_inline_context_->die_offset, name, module_paths_);
-    return inspect_inline_local_union_member(value, member_name);
+    return inspect_local_union_member(value, member_name);
   }
 
   [[nodiscard]] LocalScalarValue inspect_array_element(

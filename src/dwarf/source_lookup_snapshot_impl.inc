@@ -446,6 +446,36 @@ LocalScalarValue materialize_snapshot_memory_value(
       materialized.enum_type = member.enum_type;
       result.members.push_back(std::move(materialized));
     }
+  } else if (value_type.kind == LocalValueKind::Union) {
+    if (value_type.byte_size == 0 ||
+        value_type.byte_size > kMaxLocalStructSize ||
+        value_type.members.empty() ||
+        value_type.members.size() > kMaxLocalStructMembers ||
+        value_type.array_type ||
+        memory.bytes.size() != value_type.byte_size) {
+      throw std::runtime_error(
+          "snapshot union bytes exceed the bounded overlapping-storage model");
+    }
+    result = LocalScalarValue{owner.module_path, std::string(name), 0,
+                              value_type.byte_size, false,
+                              LocalValueKind::Union};
+    result.members.reserve(value_type.members.size());
+    for (const auto& member : value_type.members) {
+      if (member.offset != 0 ||
+          member.kind != LocalValueKind::Integer ||
+          member.pointee_type || member.bit_slice || member.enum_type ||
+          !member.members.empty() || member.byte_size == 0 ||
+          member.byte_size > sizeof(std::uint64_t) ||
+          member.byte_size > value_type.byte_size) {
+        throw std::logic_error(
+            "snapshot union member violates bounded shared-storage semantics");
+      }
+      LocalStructMember materialized{
+          member.name, decode_integer(memory.bytes, 0, member.byte_size),
+          member.byte_size, member.is_signed, LocalValueKind::Integer};
+      materialized.offset = 0;
+      result.members.push_back(std::move(materialized));
+    }
   } else if (value_type.kind == LocalValueKind::Array) {
     if (!value_type.array_type || !value_type.members.empty() ||
         value_type.array_type->element_count == 0 ||
@@ -673,6 +703,7 @@ std::optional<LocalScalarValue> inspect_snapshot_unit(
           "snapshot DW_OP_reg5 requires one exact compiler-proven register operation");
     }
     if (value_type.kind == LocalValueKind::Structure ||
+        value_type.kind == LocalValueKind::Union ||
         value_type.kind == LocalValueKind::Array ||
         value_type.kind == LocalValueKind::Floating || value_type.byte_size == 0 ||
         value_type.byte_size > sizeof(std::uint64_t)) {
@@ -698,6 +729,7 @@ std::optional<LocalScalarValue> inspect_snapshot_unit(
           "snapshot DW_OP_reg12 requires one exact compiler-proven register operation");
     }
     if (value_type.kind == LocalValueKind::Structure ||
+        value_type.kind == LocalValueKind::Union ||
         value_type.kind == LocalValueKind::Array ||
         value_type.kind == LocalValueKind::Floating || value_type.byte_size == 0 ||
         value_type.byte_size > sizeof(std::uint64_t)) {
@@ -745,9 +777,18 @@ std::optional<LocalScalarValue> inspect_snapshot_unit(
         throw std::runtime_error(
             "snapshot DW_OP_fbreg fixed array exceeds the bounded array model");
       }
+    } else if (value_type.kind == LocalValueKind::Union) {
+      if (value_type.byte_size == 0 ||
+          value_type.byte_size > kMaxLocalStructSize ||
+          value_type.members.empty() ||
+          value_type.members.size() > kMaxLocalStructMembers ||
+          value_type.array_type) {
+        throw std::runtime_error(
+            "snapshot DW_OP_fbreg union exceeds the bounded overlapping-storage model");
+      }
     } else {
       throw std::runtime_error(
-          "snapshot DW_OP_fbreg requires a bounded integer, structure, or fixed array local");
+          "snapshot DW_OP_fbreg requires a bounded integer, structure, fixed array, or union local");
     }
     const auto base = snapshot_frame_base(
         dies, *subprogram, snapshot, frame, module_paths, owner);
@@ -765,6 +806,7 @@ std::optional<LocalScalarValue> inspect_snapshot_unit(
   }
   if (opcode == kDwOpBreg3) {
     if (value_type.kind == LocalValueKind::Structure ||
+        value_type.kind == LocalValueKind::Union ||
         value_type.kind == LocalValueKind::Array ||
         value_type.kind == LocalValueKind::Floating) {
       throw std::runtime_error(
@@ -795,6 +837,10 @@ std::optional<LocalScalarValue> inspect_snapshot_unit(
   if (value_type.kind == LocalValueKind::Array) {
     throw std::runtime_error(
         "snapshot DW_OP_addr fixed-array materialization is outside current compiler evidence");
+  }
+  if (value_type.kind == LocalValueKind::Union) {
+    throw std::runtime_error(
+        "snapshot DW_OP_addr union materialization is outside current compiler evidence");
   }
   if (value_type.kind != LocalValueKind::Structure &&
       (value_type.byte_size == 0 || value_type.byte_size > sizeof(std::uint64_t))) {

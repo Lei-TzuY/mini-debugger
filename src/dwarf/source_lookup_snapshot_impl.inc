@@ -446,7 +446,40 @@ LocalScalarValue materialize_snapshot_memory_value(
       materialized.enum_type = member.enum_type;
       result.members.push_back(std::move(materialized));
     }
+  } else if (value_type.kind == LocalValueKind::Array) {
+    if (!value_type.array_type || !value_type.members.empty() ||
+        value_type.array_type->element_count == 0 ||
+        value_type.array_type->element_count > kMaxLocalArrayElements ||
+        value_type.array_type->element_byte_size == 0 ||
+        value_type.array_type->element_byte_size > sizeof(std::uint64_t) ||
+        value_type.array_type->element_kind != LocalValueKind::Integer ||
+        value_type.byte_size !=
+            value_type.array_type->element_count *
+                value_type.array_type->element_byte_size ||
+        memory.bytes.size() != value_type.byte_size) {
+      throw std::runtime_error(
+          "snapshot fixed-array bytes exceed the bounded array model");
+    }
+    result = LocalScalarValue{owner.module_path, std::string(name), 0,
+                              value_type.byte_size, false,
+                              LocalValueKind::Array};
+    result.array_type = value_type.array_type;
+    result.elements.reserve(value_type.array_type->element_count);
+    for (std::size_t index = 0;
+         index < value_type.array_type->element_count; ++index) {
+      result.elements.push_back(LocalArrayElement{
+          decode_integer(memory.bytes,
+                         index * value_type.array_type->element_byte_size,
+                         value_type.array_type->element_byte_size),
+          value_type.array_type->element_byte_size,
+          value_type.array_type->element_is_signed,
+          LocalValueKind::Integer});
+    }
   } else {
+    if (value_type.array_type) {
+      throw std::logic_error(
+          "non-array snapshot value unexpectedly carries array metadata");
+    }
     result = LocalScalarValue{
         owner.module_path, std::string(name),
         decode_snapshot_scalar(memory, value_type.byte_size), value_type.byte_size,
@@ -640,6 +673,7 @@ std::optional<LocalScalarValue> inspect_snapshot_unit(
           "snapshot DW_OP_reg5 requires one exact compiler-proven register operation");
     }
     if (value_type.kind == LocalValueKind::Structure ||
+        value_type.kind == LocalValueKind::Array ||
         value_type.kind == LocalValueKind::Floating || value_type.byte_size == 0 ||
         value_type.byte_size > sizeof(std::uint64_t)) {
       throw std::runtime_error(
@@ -664,6 +698,7 @@ std::optional<LocalScalarValue> inspect_snapshot_unit(
           "snapshot DW_OP_reg12 requires one exact compiler-proven register operation");
     }
     if (value_type.kind == LocalValueKind::Structure ||
+        value_type.kind == LocalValueKind::Array ||
         value_type.kind == LocalValueKind::Floating || value_type.byte_size == 0 ||
         value_type.byte_size > sizeof(std::uint64_t)) {
       throw std::runtime_error(
@@ -697,9 +732,22 @@ std::optional<LocalScalarValue> inspect_snapshot_unit(
         throw std::runtime_error(
             "snapshot DW_OP_fbreg structure exceeds the bounded aggregate model");
       }
+    } else if (value_type.kind == LocalValueKind::Array) {
+      if (!value_type.array_type || !value_type.members.empty() ||
+          value_type.array_type->element_count == 0 ||
+          value_type.array_type->element_count > kMaxLocalArrayElements ||
+          value_type.array_type->element_byte_size == 0 ||
+          value_type.array_type->element_byte_size > sizeof(std::uint64_t) ||
+          value_type.array_type->element_kind != LocalValueKind::Integer ||
+          value_type.byte_size !=
+              value_type.array_type->element_count *
+                  value_type.array_type->element_byte_size) {
+        throw std::runtime_error(
+            "snapshot DW_OP_fbreg fixed array exceeds the bounded array model");
+      }
     } else {
       throw std::runtime_error(
-          "snapshot DW_OP_fbreg requires a bounded integer or structure local");
+          "snapshot DW_OP_fbreg requires a bounded integer, structure, or fixed array local");
     }
     const auto base = snapshot_frame_base(
         dies, *subprogram, snapshot, frame, module_paths, owner);
@@ -717,6 +765,7 @@ std::optional<LocalScalarValue> inspect_snapshot_unit(
   }
   if (opcode == kDwOpBreg3) {
     if (value_type.kind == LocalValueKind::Structure ||
+        value_type.kind == LocalValueKind::Array ||
         value_type.kind == LocalValueKind::Floating) {
       throw std::runtime_error(
           "snapshot caller DW_OP_breg3 requires an integer/pointer scalar value");
@@ -742,6 +791,10 @@ std::optional<LocalScalarValue> inspect_snapshot_unit(
     }
     throw std::runtime_error(
         "snapshot caller local requires compiler-proven XMM0, register-piece, DW_OP_fbreg, DW_OP_breg3, DW_OP_reg5, DW_OP_reg12, or DW_OP_addr ownership");
+  }
+  if (value_type.kind == LocalValueKind::Array) {
+    throw std::runtime_error(
+        "snapshot DW_OP_addr fixed-array materialization is outside current compiler evidence");
   }
   if (value_type.kind != LocalValueKind::Structure &&
       (value_type.byte_size == 0 || value_type.byte_size > sizeof(std::uint64_t))) {

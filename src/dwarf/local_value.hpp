@@ -52,6 +52,13 @@ struct LocalEnumType {
   std::vector<LocalEnumEntry> enumerators{};
 };
 
+struct LocalArrayType {
+  std::size_t element_count;
+  std::size_t element_byte_size;
+  bool element_is_signed;
+  LocalValueKind element_kind{LocalValueKind::Integer};
+};
+
 struct LocalStructMemberType {
   std::string name;
   std::size_t offset;
@@ -69,6 +76,7 @@ struct LocalValueType {
   bool is_signed;
   LocalValueKind kind{LocalValueKind::Integer};
   std::vector<LocalStructMemberType> members{};
+  std::optional<LocalArrayType> array_type{};
 };
 
 struct LocalStructMember {
@@ -89,13 +97,6 @@ struct LocalArrayElement {
   std::size_t byte_size;
   bool is_signed;
   LocalValueKind kind{LocalValueKind::Integer};
-};
-
-struct LocalArrayType {
-  std::size_t element_count;
-  std::size_t element_byte_size;
-  bool element_is_signed;
-  LocalValueKind element_kind{LocalValueKind::Integer};
 };
 
 struct LocalIntegerValue {

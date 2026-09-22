@@ -269,54 +269,23 @@ class CoreInspectionSession {
   }
 
   [[nodiscard]] LocalScalarValue inspect_array_element(
-    std::string_view name, std::size_t index) const {
-  const auto& frame = selected_frame();
-  validate_selected_frame(frame);
-  if (!selected_inline_context_) {
-    throw std::logic_error(
-        "fixed-array indexing requires a selected inline context");
-  }
-  if (selected_inline_context_->module_path != frame.module_path) {
-    throw std::logic_error("selected inline context belongs to a different module");
-  }
-  const auto array = inspect_inline_local_value(
-      snapshot_, frame, selected_inline_context_->die_offset, name, module_paths_);
-  if (array.kind != LocalValueKind::Array || !array.array_type) {
-    throw std::logic_error(
-        "selected-inline local value is not a bounded fixed array: " +
-        std::string(name));
-  }
-  if (index >= array.array_type->element_count || index >= array.elements.size()) {
-    throw std::out_of_range("array index is out of range");
-  }
-  const auto& element = array.elements[index];
-  if (element.kind != LocalValueKind::Integer ||
-      element.byte_size != array.array_type->element_byte_size ||
-      element.is_signed != array.array_type->element_is_signed) {
-    throw std::logic_error("bounded fixed-array element metadata is inconsistent");
-  }
-  LocalScalarValue result{array.module_path,
-                          array.name + "[" + std::to_string(index) + "]",
-                          element.raw_value, element.byte_size,
-                          element.is_signed, element.kind};
-  result.storage = array.storage;
-  result.storage_module_path = array.storage_module_path;
-  result.storage_file_path = array.storage_file_path;
-  result.storage_file_offset = array.storage_file_offset;
-  if (array.storage == LocalValueStorage::SnapshotRuntimeArtifact) {
-    if (index > std::numeric_limits<std::uint64_t>::max() /
-                    element.byte_size) {
-      throw std::overflow_error("array element artifact offset overflows");
+      std::string_view name, std::size_t index) const {
+    const auto& frame = selected_frame();
+    validate_selected_frame(frame);
+    LocalScalarValue array;
+    if (selected_inline_context_) {
+      if (selected_inline_context_->module_path != frame.module_path) {
+        throw std::logic_error(
+            "selected inline context belongs to a different module");
+      }
+      array = inspect_inline_local_value(
+          snapshot_, frame, selected_inline_context_->die_offset, name,
+          module_paths_);
+    } else {
+      array = inspect_local_value(snapshot_, frame, name, module_paths_);
     }
-    const auto offset = static_cast<std::uint64_t>(index * element.byte_size);
-    if (offset > std::numeric_limits<std::uint64_t>::max() -
-                     result.storage_file_offset) {
-      throw std::overflow_error("array element artifact offset overflows");
-    }
-    result.storage_file_offset += offset;
+    return inspect_local_array_element(array, index);
   }
-  return result;
-}
 
 [[nodiscard]] LocalScalarValue dereference_aggregate_member(
       std::string_view name, std::string_view member_name) const {

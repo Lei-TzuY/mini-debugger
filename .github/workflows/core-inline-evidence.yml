@@ -32,6 +32,12 @@ jobs:
             tests/fixtures/frame_zero_inline_structure_fixture.c \
             -o /tmp/frame-zero-inline-structure-nopie
           "$CC" -O2 -g -gdwarf-4 -fPIE -pie \
+            tests/fixtures/frame_zero_inline_array_fixture.c \
+            -o /tmp/frame-zero-inline-array-pie
+          "$CC" -O2 -g -gdwarf-4 -fno-pie -no-pie \
+            tests/fixtures/frame_zero_inline_array_fixture.c \
+            -o /tmp/frame-zero-inline-array-nopie
+          "$CC" -O2 -g -gdwarf-4 -fPIE -pie \
             tests/fixtures/caller_inline_core_fixture.c \
             tests/fixtures/caller_inline_crash_leaf.c -pthread \
             -o /tmp/caller-inline-pie
@@ -61,6 +67,10 @@ jobs:
             /tmp/frame-zero-inline-structure-pie
           python3 tests/core_frame_zero_inline_structure_dwarf_oracle.py \
             /tmp/frame-zero-inline-structure-nopie
+          python3 tests/core_frame_zero_inline_array_dwarf_oracle.py \
+            /tmp/frame-zero-inline-array-pie
+          python3 tests/core_frame_zero_inline_array_dwarf_oracle.py \
+            /tmp/frame-zero-inline-array-nopie
           python3 tests/core_caller_inline_dwarf_oracle.py /tmp/caller-inline-pie
           python3 tests/core_caller_inline_dwarf_oracle.py /tmp/caller-inline-nopie
           python3 tests/core_caller_inline_union_dwarf_oracle.py /tmp/caller-inline-pie
@@ -85,6 +95,10 @@ jobs:
             tests/core_frame_zero_inline_structure_integration.cpp \
             build/libmdbg_core.a -pthread \
             -o /tmp/core-frame-zero-inline-structure
+          "$CXX" -std=c++17 -Wall -Wextra -Wpedantic -Werror -Isrc \
+            tests/core_frame_zero_inline_array_integration.cpp \
+            build/libmdbg_core.a -pthread \
+            -o /tmp/core-frame-zero-inline-array
           "$CXX" -std=c++17 -Wall -Wextra -Wpedantic -Werror -Isrc \
             tests/core_inline_aggregate_session_integration.cpp \
             build/libmdbg_core.a -pthread \
@@ -121,6 +135,10 @@ jobs:
             /tmp/frame-zero-inline-structure-pie build/mdbg-core
           /tmp/core-frame-zero-inline-structure \
             /tmp/frame-zero-inline-structure-nopie build/mdbg-core
+          /tmp/core-frame-zero-inline-array \
+            /tmp/frame-zero-inline-array-pie build/mdbg-core
+          /tmp/core-frame-zero-inline-array \
+            /tmp/frame-zero-inline-array-nopie build/mdbg-core
           /tmp/core-inline-aggregate-session /tmp/caller-inline-pie build/mdbg-core
           /tmp/core-inline-aggregate-session /tmp/caller-inline-nopie build/mdbg-core
           /tmp/core-inline-array-session /tmp/caller-inline-pie build/mdbg-core

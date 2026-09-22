@@ -147,19 +147,11 @@ struct IntegerType {
   bool is_signed;
 };
 
-struct AggregateMemberType {
-  std::string name;
-  std::size_t offset;
-  IntegerType integer;
-  LocalValueKind kind{LocalValueKind::Integer};
-  std::optional<LocalPointerPointeeType> pointee_type{};
-};
-
 struct ValueType {
   std::size_t byte_size;
   bool is_signed;
   LocalValueKind kind;
-  std::vector<AggregateMemberType> members;
+  std::vector<LocalStructMemberType> members;
 };
 
 struct LoclistsContribution {
@@ -880,7 +872,7 @@ ValueType resolve_value_type(const std::vector<Die>& dies, std::uint64_t type_of
         throw std::runtime_error("local struct has an unsupported byte size");
       }
       const auto struct_size = static_cast<std::size_t>(size->number);
-      std::vector<AggregateMemberType> members;
+      std::vector<LocalStructMemberType> members;
       for (std::size_t child_index = 0; child_index < dies.size(); ++child_index) {
         if (dies[child_index].parent != *index) continue;
         const auto& member = dies[child_index];
@@ -907,7 +899,7 @@ ValueType resolve_value_type(const std::vector<Die>& dies, std::uint64_t type_of
         }
         const auto offset = static_cast<std::size_t>(member_offset->number);
         std::uint64_t resolved_type_offset = member_type->number;
-        std::optional<AggregateMemberType> resolved_member;
+        std::optional<LocalStructMemberType> resolved_member;
         for (unsigned member_depth = 0; member_depth < 16; ++member_depth) {
           const auto member_type_index =
               die_index_by_offset(dies, resolved_type_offset);
@@ -948,8 +940,8 @@ ValueType resolve_value_type(const std::vector<Die>& dies, std::uint64_t type_of
               throw std::runtime_error(
                   "local struct pointer member extends past aggregate storage");
             }
-            resolved_member = AggregateMemberType{
-                member_name->text, offset, IntegerType{pointer_size, false},
+            resolved_member = LocalStructMemberType{
+                member_name->text, offset, pointer_size, false,
                 LocalValueKind::Pointer,
                 LocalPointerPointeeType{pointee_integer.byte_size,
                                         pointee_integer.is_signed}};
@@ -961,8 +953,8 @@ ValueType resolve_value_type(const std::vector<Die>& dies, std::uint64_t type_of
             throw std::runtime_error(
                 "local struct integer member extends past aggregate storage");
           }
-          resolved_member =
-              AggregateMemberType{member_name->text, offset, integer};
+          resolved_member = LocalStructMemberType{
+              member_name->text, offset, integer.byte_size, integer.is_signed};
           break;
         }
         if (!resolved_member) {
@@ -1147,10 +1139,12 @@ LocalScalarValue decode_structure(const ElfFile& module, std::string_view name,
   result.members.reserve(value_type.members.size());
   for (const auto& member : value_type.members) {
     LocalStructMember materialized{
-        member.name, decode_integer(bytes, member.offset, member.integer.byte_size),
-        member.integer.byte_size, member.integer.is_signed, member.kind};
+        member.name, decode_integer(bytes, member.offset, member.byte_size),
+        member.byte_size, member.is_signed, member.kind};
     materialized.offset = member.offset;
     materialized.pointee_type = member.pointee_type;
+    materialized.bit_slice = member.bit_slice;
+    materialized.enum_type = member.enum_type;
     result.members.push_back(std::move(materialized));
   }
   return result;

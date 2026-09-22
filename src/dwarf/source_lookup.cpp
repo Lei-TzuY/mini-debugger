@@ -547,7 +547,7 @@ std::optional<LocalStructMemberType> selected_inline_nested_structure_member_typ
   return result;
 }
 
-std::optional<LocalPointeeType> selected_inline_direct_structure_type(
+std::optional<LocalValueType> selected_inline_direct_structure_type(
     const std::vector<Die>& dies, std::uint64_t type_offset) {
   for (unsigned depth = 0; depth < 16; ++depth) {
     const auto index = die_index_by_offset(dies, type_offset);
@@ -571,7 +571,7 @@ std::optional<LocalPointeeType> selected_inline_direct_structure_type(
       throw std::runtime_error("selected-inline structure has an unsupported byte size");
     }
     const auto struct_size = static_cast<std::size_t>(size->number);
-    LocalPointeeType result{struct_size, false, LocalValueKind::Structure, {}};
+    LocalValueType result{struct_size, false, LocalValueKind::Structure, {}};
     for (std::size_t child = 0; child < dies.size(); ++child) {
       if (dies[child].parent != *index) continue;
       if (dies[child].tag != kDwTagMember) {
@@ -687,7 +687,7 @@ LocalStructMemberType selected_inline_union_member_type(
   throw std::runtime_error("selected-inline union member type chain is too deep");
 }
 
-std::optional<LocalPointeeType> selected_inline_direct_union_type(
+std::optional<LocalValueType> selected_inline_direct_union_type(
     const std::vector<Die>& dies, std::uint64_t type_offset) {
   for (unsigned depth = 0; depth < 16; ++depth) {
     const auto index = die_index_by_offset(dies, type_offset);
@@ -711,7 +711,7 @@ std::optional<LocalPointeeType> selected_inline_direct_union_type(
       throw std::runtime_error("selected-inline union has an unsupported byte size");
     }
     const auto union_size = static_cast<std::size_t>(size->number);
-    LocalPointeeType result{union_size, false, LocalValueKind::Union, {}};
+    LocalValueType result{union_size, false, LocalValueKind::Union, {}};
     for (std::size_t child = 0; child < dies.size(); ++child) {
       if (dies[child].parent != *index) continue;
       if (dies[child].tag != kDwTagMember) {
@@ -898,7 +898,7 @@ LocalScalarValue materialize_selected_inline_array(
 
 LocalScalarValue materialize_selected_inline_union(
     const SnapshotModuleAddress& owner, std::string_view name,
-    const LocalPointeeType& union_type, const SnapshotMemoryRead& memory) {
+    const LocalValueType& union_type, const SnapshotMemoryRead& memory) {
   if (union_type.kind != LocalValueKind::Union || union_type.byte_size == 0 ||
       union_type.byte_size > kMaxLocalStructSize || union_type.members.empty() ||
       union_type.members.size() > kMaxLocalStructMembers ||
@@ -980,7 +980,7 @@ std::uint64_t decode_selected_inline_bit_field(
 
 LocalScalarValue materialize_selected_inline_structure(
     const SnapshotModuleAddress& owner, std::string_view name,
-    const LocalPointeeType& aggregate, const SnapshotMemoryRead& memory) {
+    const LocalValueType& aggregate, const SnapshotMemoryRead& memory) {
   if (aggregate.kind != LocalValueKind::Structure || aggregate.byte_size == 0 ||
       aggregate.byte_size > kMaxLocalStructSize ||
       aggregate.members.size() > kMaxLocalStructMembers ||
@@ -1269,11 +1269,11 @@ std::optional<LocalScalarValue> inspect_inline_scalar_unit(
 
   const auto pointee_type = resolve_pointer_pointee_type(dies, type->number);
   const auto direct_structure =
-      pointee_type ? std::optional<LocalPointeeType>{}
+      pointee_type ? std::optional<LocalValueType>{}
                    : selected_inline_direct_structure_type(dies, type->number);
   const auto direct_union =
       (pointee_type || direct_structure)
-          ? std::optional<LocalPointeeType>{}
+          ? std::optional<LocalValueType>{}
           : selected_inline_direct_union_type(dies, type->number);
   const auto direct_array =
       (pointee_type || direct_structure || direct_union)
@@ -1285,18 +1285,18 @@ std::optional<LocalScalarValue> inspect_inline_scalar_unit(
           : selected_inline_enum_type(dies, type->number);
   const auto value_type =
       pointee_type
-          ? ValueType{sizeof(std::uintptr_t), false, LocalValueKind::Pointer, {}}
+          ? LocalValueType{sizeof(std::uintptr_t), false, LocalValueKind::Pointer, {}}
           : direct_structure
-                ? ValueType{direct_structure->byte_size, false,
+                ? LocalValueType{direct_structure->byte_size, false,
                             LocalValueKind::Structure, {}}
                 : direct_union
-                      ? ValueType{direct_union->byte_size, false,
+                      ? LocalValueType{direct_union->byte_size, false,
                                   LocalValueKind::Union, {}}
                       : direct_array
-                            ? ValueType{direct_array->byte_size, false,
+                            ? LocalValueType{direct_array->byte_size, false,
                                         LocalValueKind::Array, {}}
                             : direct_enum
-                                  ? ValueType{direct_enum->byte_size,
+                                  ? LocalValueType{direct_enum->byte_size,
                                               direct_enum->is_signed,
                                               LocalValueKind::Enumeration, {}}
                                   : resolve_value_type(dies, type->number);
@@ -1559,7 +1559,7 @@ LocalScalarValue dereference_inline_local_pointer(
   const auto memory = read_snapshot_memory(
       snapshot, module_paths, static_cast<std::uintptr_t>(pointer.raw_value),
       pointer.pointee_type->byte_size);
-  const ValueType value_type{pointer.pointee_type->byte_size,
+  const LocalValueType value_type{pointer.pointee_type->byte_size,
                              pointer.pointee_type->is_signed,
                              LocalValueKind::Integer, {}};
   const SnapshotModuleAddress owner{pointer.module_path, {}, 0};

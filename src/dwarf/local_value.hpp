@@ -64,7 +64,7 @@ struct LocalStructMemberType {
   std::vector<LocalStructMemberType> members{};
 };
 
-struct LocalPointeeType {
+struct LocalValueType {
   std::size_t byte_size;
   bool is_signed;
   LocalValueKind kind{LocalValueKind::Integer};
@@ -110,7 +110,7 @@ struct LocalIntegerValue {
   std::string storage_module_path{};
   std::string storage_file_path{};
   std::uint64_t storage_file_offset{0};
-  std::optional<LocalPointeeType> pointee_type{};
+  std::optional<LocalValueType> pointee_type{};
   std::vector<LocalArrayElement> elements{};
   std::optional<LocalArrayType> array_type{};
   std::optional<LocalEnumType> enum_type{};

@@ -18,6 +18,8 @@ constexpr double kCrashValue = 1234.25;
 constexpr double kSiblingValue = 9876.5;
 constexpr std::uint64_t kStackLocalValue = UINT64_C(0x4f3e2d1c0b9a8877);
 constexpr std::uint64_t kCallerStackLocalValue = UINT64_C(0xcafebabedeadbeef);
+constexpr std::uint64_t kCallerAggregateFirst = UINT64_C(0x1021324354657687);
+constexpr std::uint64_t kCallerAggregateSecond = UINT64_C(0x89abcdef01234567);
 constexpr std::uint64_t kPointerPointeeValue = UINT64_C(0x8877665544332211);
 constexpr std::uint64_t kAggregateFirst = UINT64_C(0x0123456789abcdef);
 constexpr std::uint64_t kAggregateSecond = UINT64_C(0xfedcba9876543210);
@@ -78,10 +80,20 @@ void require_typed_object_oracle(const std::string& executable) {
           "typed-object DWARF oracle did not report compiler-proven evidence");
 }
 
+void require_physical_stack_aggregate_oracle(const std::string& executable) {
+  const auto output = run_command(
+      "python3 tests/core_physical_aggregate_dwarf_oracle.py " +
+          shell_quote(executable) + " 2>&1",
+      "physical stack aggregate DWARF oracle");
+  require(output.find("physical stack aggregate DWARF oracle passed") !=
+              std::string::npos,
+          "physical stack aggregate oracle did not report compiler-proven evidence");
+}
+
 std::string run_core_cli(const std::string& executable,
                          const std::string& core_path) {
   const std::string command =
-      "printf 'print typed_pointer\\nderef typed_pointer\\nmember typed_pointer payload\\nderef-member typed_pointer payload\\nmember typed_pointer marker\\nbt\\nframe 1\\nlist\\nprint caller_stack_local\\nquit\\n' | " +
+      "printf 'print typed_pointer\\nderef typed_pointer\\nmember typed_pointer payload\\nderef-member typed_pointer payload\\nmember typed_pointer marker\\nbt\\nframe 1\\nlist\\nprint caller_stack_local\\nprint caller_stack_aggregate\\naggregate-member caller_stack_aggregate second\\nquit\\n' | " +
       shell_quote(executable) + " " + shell_quote(core_path) + " 2>&1";
   return run_command(command, "mdbg-core subprocess");
 }
@@ -138,6 +150,41 @@ std::uintptr_t require_caller_stack_local(mdbg::CoreInspectionSession& session) 
   require(value.storage == mdbg::LocalValueStorage::SnapshotCoreMemory,
           "caller stack-local lookup did not preserve immutable core-memory provenance");
   return resume_pc;
+}
+
+void require_caller_stack_aggregate(const mdbg::CoreInspectionSession& session) {
+  require(session.selected_frame_index() == 1,
+          "physical stack aggregate requires the historical caller frame");
+  const auto aggregate = session.inspect_value("caller_stack_aggregate");
+  require(aggregate.name == "caller_stack_aggregate" &&
+              aggregate.kind == mdbg::LocalValueKind::Structure &&
+              aggregate.byte_size == 2 * sizeof(std::uint64_t),
+          "historical physical aggregate lost bounded structure identity");
+  require(aggregate.members.size() == 2,
+          "historical physical aggregate changed its direct member count");
+  require(aggregate.members[0].name == "first" &&
+              aggregate.members[0].raw_value == kCallerAggregateFirst &&
+              aggregate.members[0].byte_size == sizeof(std::uint64_t) &&
+              !aggregate.members[0].is_signed && aggregate.members[0].offset == 0,
+          "historical physical aggregate first member was not recovered exactly");
+  require(aggregate.members[1].name == "second" &&
+              aggregate.members[1].raw_value == kCallerAggregateSecond &&
+              aggregate.members[1].byte_size == sizeof(std::uint64_t) &&
+              !aggregate.members[1].is_signed &&
+              aggregate.members[1].offset == sizeof(std::uint64_t),
+          "historical physical aggregate second member was not recovered exactly");
+  require(aggregate.storage == mdbg::LocalValueStorage::SnapshotCoreMemory,
+          "historical physical aggregate lost immutable core-memory provenance");
+
+  const auto member =
+      session.inspect_aggregate_member("caller_stack_aggregate", "second");
+  require(member.name == "caller_stack_aggregate.second" &&
+              member.kind == mdbg::LocalValueKind::Integer &&
+              member.raw_value == kCallerAggregateSecond &&
+              member.byte_size == sizeof(std::uint64_t) && !member.is_signed,
+          "physical aggregate member selection did not recover the second member");
+  require(member.storage == aggregate.storage,
+          "physical aggregate member selection changed immutable provenance");
 }
 
 void require_value_unavailable(const mdbg::CoreInspectionSession& session,
@@ -357,6 +404,8 @@ int main(int argc, char** argv) {
                 session.selected_frame().runtime_pc,
             "frame-zero lookup PC was incorrectly normalized");
     require_typed_object_oracle(session.selected_frame().module_path);
+    require_physical_stack_aggregate_oracle(
+        session.selected_frame().module_path);
 
     const auto crash_fp = session.snapshot().floating_point_state(crash_tid);
     const auto sibling_fp = session.snapshot().floating_point_state(sibling_tid);
@@ -375,6 +424,7 @@ int main(int argc, char** argv) {
     require_typed_pointer_evidence(session);
     require_typed_pointer_member_traversal(session);
     const auto caller_resume_pc = require_caller_stack_local(session);
+    require_caller_stack_aggregate(session);
     const auto stale_caller_frame = session.selected_frame();
 
     session.select_thread(sibling_tid);
@@ -385,6 +435,8 @@ int main(int argc, char** argv) {
     require_stale_frame_rejected(session, stale_caller_frame);
     require_value_unavailable(session, "caller_stack_local",
                               "sibling-thread frame selection");
+    require_value_unavailable(session, "caller_stack_aggregate",
+                              "sibling-thread physical aggregate selection");
     require_source_value(session.inspect_value("xmm_value"), kSiblingValue,
                          "sibling-thread frame 0");
 
@@ -394,7 +446,10 @@ int main(int argc, char** argv) {
             "returning to the crash thread did not reset historical frame selection");
     require_value_unavailable(session, "caller_stack_local",
                               "crash-thread frame-zero selection");
+    require_value_unavailable(session, "caller_stack_aggregate",
+                              "crash-thread frame-zero aggregate selection");
     const auto recovered_resume_pc = require_caller_stack_local(session);
+    require_caller_stack_aggregate(session);
     require(recovered_resume_pc == caller_resume_pc,
             "lookup-PC normalization silently changed immutable unwind sequencing");
 
@@ -418,6 +473,14 @@ int main(int argc, char** argv) {
     require(cli_output.find("caller_stack_local = 0xcafebabedeadbeef") !=
                 std::string::npos,
             "mdbg-core did not render the historical caller stack local");
+    require(cli_output.find(
+                "caller_stack_aggregate = { first=0x1021324354657687, second=0x89abcdef01234567 }") !=
+                std::string::npos,
+            "mdbg-core did not render the historical physical stack aggregate");
+    require(cli_output.find(
+                "caller_stack_aggregate.second = 0x89abcdef01234567") !=
+                std::string::npos,
+            "mdbg-core did not expose physical aggregate member selection");
     require(cli_output.find("[value-core]") != std::string::npos,
             "mdbg-core lost immutable core-memory provenance for caller local");
 

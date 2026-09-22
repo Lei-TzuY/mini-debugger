@@ -8,6 +8,8 @@
 #include <unistd.h>
 
 #define TYPED_OBJECT_MARKER_VALUE UINT64_C(0x13579bdf2468ace0)
+#define CALLER_AGGREGATE_FIRST_VALUE UINT64_C(0x1021324354657687)
+#define CALLER_AGGREGATE_SECOND_VALUE UINT64_C(0x89abcdef01234567)
 #define SHADOW_OUTER_VALUE UINT64_C(0x1111222233334444)
 #define SHADOW_INNER_VALUE UINT64_C(0xaaaabbbbccccdddd)
 
@@ -81,13 +83,19 @@ __attribute__((noinline, noreturn)) static void crash_with_xmm(void) {
 static void (*volatile crash_target)(void) = crash_with_xmm;
 
 __attribute__((noinline, noreturn)) static void caller_with_stack_local(void) {
+  struct CallerStackAggregate {
+    uint64_t first;
+    uint64_t second;
+  };
   uint64_t caller_stack_local = UINT64_C(0xcafebabedeadbeef);
-  __asm__ volatile("" : "+m"(caller_stack_local) : : "memory");
+  struct CallerStackAggregate caller_stack_aggregate = {
+      CALLER_AGGREGATE_FIRST_VALUE, CALLER_AGGREGATE_SECOND_VALUE};
+  __asm__ volatile("" : "+m"(caller_stack_local), "+m"(caller_stack_aggregate) : : "memory");
   crash_target();
   __asm__ volatile(
       ".globl snapshot_caller_resume_probe\n"
       "snapshot_caller_resume_probe:\n"
-      : "+m"(caller_stack_local)
+      : "+m"(caller_stack_local), "+m"(caller_stack_aggregate)
       :
       : "memory");
   __builtin_unreachable();

@@ -44,6 +44,12 @@ jobs:
             tests/fixtures/frame_zero_inline_union_fixture.c \
             -o /tmp/frame-zero-inline-union-nopie
           "$CC" -O2 -g -gdwarf-4 -fPIE -pie \
+            tests/fixtures/frame_zero_inline_bitfield_fixture.c \
+            -o /tmp/frame-zero-inline-bitfield-pie
+          "$CC" -O2 -g -gdwarf-4 -fno-pie -no-pie \
+            tests/fixtures/frame_zero_inline_bitfield_fixture.c \
+            -o /tmp/frame-zero-inline-bitfield-nopie
+          "$CC" -O2 -g -gdwarf-4 -fPIE -pie \
             tests/fixtures/caller_inline_core_fixture.c \
             tests/fixtures/caller_inline_crash_leaf.c -pthread \
             -o /tmp/caller-inline-pie
@@ -81,6 +87,10 @@ jobs:
             /tmp/frame-zero-inline-union-pie
           python3 tests/core_frame_zero_inline_union_dwarf_oracle.py \
             /tmp/frame-zero-inline-union-nopie
+          python3 tests/core_frame_zero_inline_bitfield_dwarf_oracle.py \
+            /tmp/frame-zero-inline-bitfield-pie
+          python3 tests/core_frame_zero_inline_bitfield_dwarf_oracle.py \
+            /tmp/frame-zero-inline-bitfield-nopie
           python3 tests/core_caller_inline_dwarf_oracle.py /tmp/caller-inline-pie
           python3 tests/core_caller_inline_dwarf_oracle.py /tmp/caller-inline-nopie
           python3 tests/core_caller_inline_union_dwarf_oracle.py /tmp/caller-inline-pie
@@ -113,6 +123,10 @@ jobs:
             tests/core_frame_zero_inline_union_integration.cpp \
             build/libmdbg_core.a -pthread \
             -o /tmp/core-frame-zero-inline-union
+          "$CXX" -std=c++17 -Wall -Wextra -Wpedantic -Werror -Isrc \
+            tests/core_frame_zero_inline_bitfield_integration.cpp \
+            build/libmdbg_core.a -pthread \
+            -o /tmp/core-frame-zero-inline-bitfield
           "$CXX" -std=c++17 -Wall -Wextra -Wpedantic -Werror -Isrc \
             tests/core_inline_aggregate_session_integration.cpp \
             build/libmdbg_core.a -pthread \
@@ -157,6 +171,10 @@ jobs:
             /tmp/frame-zero-inline-union-pie build/mdbg-core
           /tmp/core-frame-zero-inline-union \
             /tmp/frame-zero-inline-union-nopie build/mdbg-core
+          /tmp/core-frame-zero-inline-bitfield \
+            /tmp/frame-zero-inline-bitfield-pie build/mdbg-core
+          /tmp/core-frame-zero-inline-bitfield \
+            /tmp/frame-zero-inline-bitfield-nopie build/mdbg-core
           /tmp/core-inline-aggregate-session /tmp/caller-inline-pie build/mdbg-core
           /tmp/core-inline-aggregate-session /tmp/caller-inline-nopie build/mdbg-core
           /tmp/core-inline-array-session /tmp/caller-inline-pie build/mdbg-core

@@ -158,10 +158,20 @@ void require_physical_enum_oracle(const std::string& executable) {
           "physical enum oracle did not report compiler-proven evidence");
 }
 
+void require_physical_enum_aggregate_oracle(const std::string& executable) {
+  const auto output = run_command(
+      "python3 tests/core_physical_enum_aggregate_dwarf_oracle.py " +
+          shell_quote(executable) + " 2>&1",
+      "physical enum aggregate DWARF oracle");
+  require(output.find("physical enum aggregate DWARF oracle passed") !=
+              std::string::npos,
+          "physical enum aggregate oracle did not report compiler-proven evidence");
+}
+
 std::string run_core_cli(const std::string& executable,
                          const std::string& core_path) {
   const std::string command =
-      "printf 'print typed_pointer\\nderef typed_pointer\\nmember typed_pointer payload\\nderef-member typed_pointer payload\\nmember typed_pointer marker\\nbt\\nframe 1\\nlist\\nprint caller_stack_local\\nprint caller_stack_aggregate\\naggregate-member caller_stack_aggregate second\\nprint caller_nested_aggregate\\nnested-aggregate-member caller_nested_aggregate inner terminal\\nprint caller_fixed_array\\narray-element caller_fixed_array 1\\narray-element caller_fixed_array 3\\nprint caller_union\\nunion-member caller_union signed_value\\nunion-member caller_union unsigned_value\\nunion-member caller_union missing\\nprint caller_bit_fields\\naggregate-member caller_bit_fields signed_bits\\naggregate-member caller_bit_fields unsigned_bits\\nprint caller_mode\\nprint caller_typed_aggregate\\naggregate-member caller_typed_aggregate payload\\nderef-aggregate-member caller_typed_aggregate payload\\nquit\\n' | " +
+      "printf 'print typed_pointer\\nderef typed_pointer\\nmember typed_pointer payload\\nderef-member typed_pointer payload\\nmember typed_pointer marker\\nbt\\nframe 1\\nlist\\nprint caller_stack_local\\nprint caller_stack_aggregate\\naggregate-member caller_stack_aggregate second\\nprint caller_nested_aggregate\\nnested-aggregate-member caller_nested_aggregate inner terminal\\nprint caller_fixed_array\\narray-element caller_fixed_array 1\\narray-element caller_fixed_array 3\\nprint caller_union\\nunion-member caller_union signed_value\\nunion-member caller_union unsigned_value\\nunion-member caller_union missing\\nprint caller_bit_fields\\naggregate-member caller_bit_fields signed_bits\\naggregate-member caller_bit_fields unsigned_bits\\nprint caller_mode\\nprint caller_enum_aggregate\\naggregate-member caller_enum_aggregate mode\\nprint caller_typed_aggregate\\naggregate-member caller_typed_aggregate payload\\nderef-aggregate-member caller_typed_aggregate payload\\nquit\\n' | " +
       shell_quote(executable) + " " + shell_quote(core_path) + " 2>&1";
   return run_command(command, "mdbg-core subprocess");
 }
@@ -507,6 +517,49 @@ void require_caller_mode(
           "duplicate physical enum aliases must remain symbolically ambiguous");
 }
 
+void require_caller_enum_aggregate(
+    const mdbg::CoreInspectionSession& session) {
+  require(session.selected_frame_index() == 1,
+          "physical enum aggregate requires the historical caller frame");
+  const auto aggregate = session.inspect_value("caller_enum_aggregate");
+  require(aggregate.name == "caller_enum_aggregate" &&
+              aggregate.kind == mdbg::LocalValueKind::Structure &&
+              aggregate.byte_size == 2 * sizeof(std::uint32_t) &&
+              aggregate.members.size() == 2,
+          "historical physical enum aggregate lost bounded structure identity");
+  require(aggregate.storage == mdbg::LocalValueStorage::SnapshotCoreMemory,
+          "historical physical enum aggregate lost immutable core provenance");
+
+  const auto& direct = aggregate.members[0];
+  require(direct.name == "direct" && direct.offset == 0 &&
+              direct.kind == mdbg::LocalValueKind::Integer &&
+              direct.byte_size == sizeof(std::int32_t) && direct.is_signed &&
+              direct.raw_value == UINT64_C(0x31415926),
+          "physical enum aggregate integer member changed unexpectedly");
+
+  const auto& mode = aggregate.members[1];
+  require(mode.name == "mode" && mode.offset == sizeof(std::int32_t) &&
+              mode.kind == mdbg::LocalValueKind::Enumeration &&
+              mode.byte_size == sizeof(std::uint32_t) && !mode.is_signed &&
+              mode.raw_value == UINT64_C(42) && mode.enum_type.has_value(),
+          "physical enum aggregate member lost enum identity");
+  require(mode.enum_type->name == "CallerPhysicalMode" &&
+              mode.enum_type->enumerators.size() == 3,
+          "physical enum aggregate member lost bounded enum metadata");
+
+  const auto selected =
+      session.inspect_aggregate_member("caller_enum_aggregate", "mode");
+  require(selected.name == "caller_enum_aggregate.mode" &&
+              selected.kind == mdbg::LocalValueKind::Enumeration &&
+              selected.raw_value == UINT64_C(42) &&
+              selected.enum_type.has_value() &&
+              selected.storage == aggregate.storage,
+          "physical enum aggregate selection lost value/provenance");
+  const auto symbol = mdbg::local_enum_symbol(selected);
+  require(symbol && *symbol == "CallerPhysicalBusy",
+          "physical enum aggregate selected member lost exact symbolic identity");
+}
+
 void require_caller_typed_aggregate(
     const mdbg::CoreInspectionSession& session) {
   require(session.selected_frame_index() == 1,
@@ -790,6 +843,8 @@ int main(int argc, char** argv) {
         session.selected_frame().module_path);
     require_physical_enum_oracle(
         session.selected_frame().module_path);
+    require_physical_enum_aggregate_oracle(
+        session.selected_frame().module_path);
 
     const auto crash_fp = session.snapshot().floating_point_state(crash_tid);
     const auto sibling_fp = session.snapshot().floating_point_state(sibling_tid);
@@ -814,6 +869,7 @@ int main(int argc, char** argv) {
     require_caller_union(session);
     require_caller_bit_fields(session);
     require_caller_mode(session);
+    require_caller_enum_aggregate(session);
     require_caller_typed_aggregate(session);
     const auto stale_caller_frame = session.selected_frame();
 
@@ -837,6 +893,8 @@ int main(int argc, char** argv) {
                               "sibling-thread bit-field selection");
     require_value_unavailable(session, "caller_mode",
                               "sibling-thread enum selection");
+    require_value_unavailable(session, "caller_enum_aggregate",
+                              "sibling-thread enum aggregate selection");
     require_value_unavailable(session, "caller_typed_aggregate",
                               "sibling-thread typed aggregate selection");
     require_source_value(session.inspect_value("xmm_value"), kSiblingValue,
@@ -860,6 +918,8 @@ int main(int argc, char** argv) {
                               "crash-thread frame-zero bit-field selection");
     require_value_unavailable(session, "caller_mode",
                               "crash-thread frame-zero enum selection");
+    require_value_unavailable(session, "caller_enum_aggregate",
+                              "crash-thread frame-zero enum aggregate selection");
     require_value_unavailable(session, "caller_typed_aggregate",
                               "crash-thread frame-zero typed aggregate selection");
     const auto recovered_resume_pc = require_caller_stack_local(session);
@@ -869,6 +929,7 @@ int main(int argc, char** argv) {
     require_caller_union(session);
     require_caller_bit_fields(session);
     require_caller_mode(session);
+    require_caller_enum_aggregate(session);
     require_caller_typed_aggregate(session);
     require(recovered_resume_pc == caller_resume_pc,
             "lookup-PC normalization silently changed immutable unwind sequencing");
@@ -942,6 +1003,14 @@ int main(int argc, char** argv) {
             "mdbg-core did not render the historical physical enum symbol");
     require(cli_output.find("[4-byte enum unsigned]") != std::string::npos,
             "mdbg-core did not render the physical enum representation");
+    require(cli_output.find(
+                "caller_enum_aggregate = { direct=0x31415926, mode=0x2a }") !=
+                std::string::npos,
+            "mdbg-core did not render the historical physical enum aggregate");
+    require(cli_output.find(
+                "caller_enum_aggregate.mode = CallerPhysicalMode::CallerPhysicalBusy (0x2a)") !=
+                std::string::npos,
+            "mdbg-core did not render selected physical enum aggregate member identity");
     require(cli_output.find("caller_typed_aggregate = { payload=0x") !=
                 std::string::npos,
             "mdbg-core did not render the physical typed aggregate");

@@ -228,6 +228,24 @@ class CoreInspectionSession {
     return inspect_inline_local_aggregate_member(aggregate, member_name);
   }
 
+  [[nodiscard]] LocalScalarValue inspect_nested_aggregate_member(
+      std::string_view name, std::string_view aggregate_member_name,
+      std::string_view terminal_member_name) const {
+    const auto& frame = selected_frame();
+    validate_selected_frame(frame);
+    if (!selected_inline_context_) {
+      throw std::logic_error(
+          "nested aggregate member traversal requires a selected inline context");
+    }
+    if (selected_inline_context_->module_path != frame.module_path) {
+      throw std::logic_error("selected inline context belongs to a different module");
+    }
+    const auto aggregate = inspect_inline_local_value(
+        snapshot_, frame, selected_inline_context_->die_offset, name, module_paths_);
+    return inspect_inline_local_nested_aggregate_member(
+        aggregate, aggregate_member_name, terminal_member_name);
+  }
+
   [[nodiscard]] LocalScalarValue inspect_union_member(
       std::string_view name, std::string_view member_name) const {
     const auto& frame = selected_frame();

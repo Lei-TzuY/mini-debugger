@@ -348,6 +348,7 @@ void print_help() {
                "  member <name> <member>  inspect one bounded pointer-valued direct member\n"
                "  deref-member <name> <member>  dereference that member once\n"
                "  aggregate-member <name> <member>  select one by-value aggregate member\n"
+               "  nested-aggregate-member <name> <aggregate-member> <terminal-member>  select one bounded nested member\n"
                "  union-member <name> <member>  explicitly select one overlapping union member\n"
                "  deref-aggregate-member <name> <member>  dereference that member once\n"
                "  array-element <name> <index>  select one bounded fixed-array element\n"
@@ -512,6 +513,19 @@ int run_session(const std::string& core_path, mdbg::SnapshotModulePathResolver m
           throw std::invalid_argument("usage: aggregate-member <name> <member>");
         }
         print_value(session.inspect_aggregate_member(name, member));
+        continue;
+      }
+      if (command == "nested-aggregate-member") {
+        std::string name;
+        std::string aggregate_member;
+        std::string terminal_member;
+        std::string extra;
+        if (!(input >> name >> aggregate_member >> terminal_member) || (input >> extra)) {
+          throw std::invalid_argument(
+              "usage: nested-aggregate-member <name> <aggregate-member> <terminal-member>");
+        }
+        print_value(session.inspect_nested_aggregate_member(
+            name, aggregate_member, terminal_member));
         continue;
       }
       if (command == "union-member") {

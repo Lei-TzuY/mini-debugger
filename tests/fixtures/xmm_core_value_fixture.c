@@ -15,6 +15,7 @@
 #define CALLER_ARRAY_FIRST_VALUE INT32_C(0x10203040)
 #define CALLER_ARRAY_SECOND_VALUE INT32_C(0x22334455)
 #define CALLER_ARRAY_THIRD_VALUE INT32_C(0x33445566)
+#define CALLER_UNION_VALUE INT32_C(0x44556677)
 #define CALLER_TYPED_PAYLOAD_VALUE UINT64_C(0x7766554433221100)
 #define CALLER_TYPED_MARKER_VALUE UINT64_C(0x0badf00dcafed00d)
 #define SHADOW_OUTER_VALUE UINT64_C(0x1111222233334444)
@@ -105,6 +106,10 @@ __attribute__((noinline, noreturn)) static void caller_with_stack_local(void) {
     int32_t prefix;
     struct CallerNestedInner inner;
   };
+  union CallerPhysicalUnion {
+    int32_t signed_value;
+    uint32_t unsigned_value;
+  };
   uint64_t caller_stack_local = UINT64_C(0xcafebabedeadbeef);
   uint64_t caller_typed_payload = CALLER_TYPED_PAYLOAD_VALUE;
   struct CallerStackAggregate caller_stack_aggregate = {
@@ -114,11 +119,13 @@ __attribute__((noinline, noreturn)) static void caller_with_stack_local(void) {
   int32_t caller_fixed_array[3] = {
       CALLER_ARRAY_FIRST_VALUE, CALLER_ARRAY_SECOND_VALUE,
       CALLER_ARRAY_THIRD_VALUE};
+  union CallerPhysicalUnion caller_union = {.signed_value = CALLER_UNION_VALUE};
   struct CallerTypedAggregate caller_typed_aggregate = {
       &caller_typed_payload, CALLER_TYPED_MARKER_VALUE};
   __asm__ volatile("" : "+m"(caller_stack_local), "+m"(caller_typed_payload),
                    "+m"(caller_stack_aggregate), "+m"(caller_nested_aggregate),
-                   "+m"(caller_fixed_array), "+m"(caller_typed_aggregate)
+                   "+m"(caller_fixed_array), "+m"(caller_union),
+                   "+m"(caller_typed_aggregate)
                    :
                    : "memory");
   crash_target();
@@ -127,7 +134,8 @@ __attribute__((noinline, noreturn)) static void caller_with_stack_local(void) {
       "snapshot_caller_resume_probe:\n"
       : "+m"(caller_stack_local), "+m"(caller_typed_payload),
         "+m"(caller_stack_aggregate), "+m"(caller_nested_aggregate),
-        "+m"(caller_fixed_array), "+m"(caller_typed_aggregate)
+        "+m"(caller_fixed_array), "+m"(caller_union),
+        "+m"(caller_typed_aggregate)
       :
       : "memory");
   __builtin_unreachable();

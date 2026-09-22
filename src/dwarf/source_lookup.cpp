@@ -16,7 +16,6 @@ constexpr std::size_t kMaxInlineContexts = 8;
 constexpr std::size_t kMaxInlineRangeEntries = 64;
 constexpr std::size_t kMaxDiscoveredLocals = 64;
 constexpr std::uint64_t kInlineDwTagEnumerationType = 0x04;
-constexpr std::uint64_t kInlineDwTagUnionType = 0x17;
 constexpr std::uint64_t kInlineDwTagEnumerator = 0x28;
 constexpr std::uint64_t kInlineDwAtConstValue = 0x1c;
 constexpr std::uint64_t kInlineDwAtBitOffset = 0x0c;
@@ -511,151 +510,6 @@ std::optional<LocalValueType> selected_inline_direct_structure_type(
   throw std::runtime_error("selected-inline local type chain is too deep");
 }
 
-LocalStructMemberType selected_inline_union_member_type(
-    const std::vector<Die>& dies, const Die& member, std::size_t union_size) {
-  const auto* member_name = attribute(member, kDwAtName);
-  const auto* member_type = attribute(member, kDwAtType);
-  const auto* member_offset = attribute(member, kDwAtDataMemberLocation);
-  if (member_name == nullptr || member_name->text.empty()) {
-    throw std::runtime_error("selected-inline union member has no supported name");
-  }
-  if (member_type == nullptr || member_type->form != kDwFormRef4) {
-    throw std::runtime_error(
-        "selected-inline union member has no supported DW_FORM_ref4 type");
-  }
-  if (member_offset != nullptr &&
-      (!is_constant_member_offset_form(member_offset->form) ||
-       member_offset->number != 0)) {
-    throw std::runtime_error(
-        "selected-inline union member does not share storage at offset zero");
-  }
-
-  std::uint64_t type_offset = member_type->number;
-  for (unsigned depth = 0; depth < 16; ++depth) {
-    const auto index = die_index_by_offset(dies, type_offset);
-    if (!index) {
-      throw std::runtime_error(
-          "selected-inline union member type references an unknown DIE");
-    }
-    const auto& type_die = dies[*index];
-    if (type_die.tag == kDwTagTypedef || type_die.tag == kDwTagConstType) {
-      const auto* wrapped = attribute(type_die, kDwAtType);
-      if (wrapped == nullptr || wrapped->form != kDwFormRef4) {
-        throw std::runtime_error(
-            "selected-inline union member wrapper does not use DW_FORM_ref4");
-      }
-      type_offset = wrapped->number;
-      continue;
-    }
-    if (type_die.tag != kDwTagBaseType) {
-      throw std::runtime_error(
-          "selected-inline union member is not a bounded integer scalar");
-    }
-    const auto integer = resolve_integer_type(dies, type_offset);
-    if (integer.byte_size == 0 || integer.byte_size > sizeof(std::uint64_t) ||
-        integer.byte_size > union_size) {
-      throw std::runtime_error(
-          "selected-inline union integer member exceeds bounded shared storage");
-    }
-    return LocalStructMemberType{member_name->text, 0, integer.byte_size,
-                                 integer.is_signed};
-  }
-  throw std::runtime_error("selected-inline union member type chain is too deep");
-}
-
-std::optional<LocalValueType> selected_inline_direct_union_type(
-    const std::vector<Die>& dies, std::uint64_t type_offset) {
-  for (unsigned depth = 0; depth < 16; ++depth) {
-    const auto index = die_index_by_offset(dies, type_offset);
-    if (!index) {
-      throw std::runtime_error("selected-inline union type references an unknown DIE");
-    }
-    const auto& die = dies[*index];
-    if (die.tag == kDwTagTypedef || die.tag == kDwTagConstType) {
-      const auto* wrapped = attribute(die, kDwAtType);
-      if (wrapped == nullptr || wrapped->form != kDwFormRef4) {
-        throw std::runtime_error(
-            "selected-inline union wrapper does not use DW_FORM_ref4");
-      }
-      type_offset = wrapped->number;
-      continue;
-    }
-    if (die.tag != kInlineDwTagUnionType) return std::nullopt;
-
-    const auto* size = attribute(die, kDwAtByteSize);
-    if (size == nullptr || size->number == 0 || size->number > kMaxLocalStructSize) {
-      throw std::runtime_error("selected-inline union has an unsupported byte size");
-    }
-    const auto union_size = static_cast<std::size_t>(size->number);
-    LocalValueType result{union_size, false, LocalValueKind::Union, {}};
-    for (std::size_t child = 0; child < dies.size(); ++child) {
-      if (dies[child].parent != *index) continue;
-      if (dies[child].tag != kDwTagMember) {
-        throw std::runtime_error(
-            "selected-inline union has an unsupported direct child DIE");
-      }
-      if (result.members.size() >= kMaxLocalStructMembers) {
-        throw std::runtime_error("selected-inline union has too many direct members");
-      }
-      auto resolved = selected_inline_union_member_type(dies, dies[child], union_size);
-      const auto duplicate = std::find_if(
-          result.members.begin(), result.members.end(),
-          [&resolved](const LocalStructMemberType& existing) {
-            return existing.name == resolved.name;
-          });
-      if (duplicate != result.members.end()) {
-        throw std::runtime_error("selected-inline union has duplicate member names");
-      }
-      result.members.push_back(std::move(resolved));
-    }
-    if (result.members.empty()) {
-      throw std::runtime_error("selected-inline union has no supported direct members");
-    }
-    return result;
-  }
-  throw std::runtime_error("selected-inline union type chain is too deep");
-}
-
-LocalScalarValue materialize_selected_inline_union(
-    const SnapshotModuleAddress& owner, std::string_view name,
-    const LocalValueType& union_type, const SnapshotMemoryRead& memory) {
-  if (union_type.kind != LocalValueKind::Union || union_type.byte_size == 0 ||
-      union_type.byte_size > kMaxLocalStructSize || union_type.members.empty() ||
-      union_type.members.size() > kMaxLocalStructMembers ||
-      memory.bytes.size() != union_type.byte_size) {
-    throw std::runtime_error(
-        "selected-inline union bytes exceed the bounded overlapping-storage model");
-  }
-  LocalScalarValue result{owner.module_path, std::string(name), 0,
-                          union_type.byte_size, false, LocalValueKind::Union};
-  result.members.reserve(union_type.members.size());
-  for (const auto& member : union_type.members) {
-    if (member.offset != 0 || member.kind != LocalValueKind::Integer ||
-        member.pointee_type || member.byte_size == 0 ||
-        member.byte_size > sizeof(std::uint64_t) ||
-        member.byte_size > union_type.byte_size) {
-      throw std::logic_error(
-          "selected-inline union member violates bounded shared-storage semantics");
-    }
-    result.members.push_back(LocalStructMember{
-        member.name, decode_integer(memory.bytes, 0, member.byte_size),
-        member.byte_size, member.is_signed, LocalValueKind::Integer, {}});
-  }
-  if (memory.provenance == SnapshotMemoryProvenance::Core) {
-    result.storage = LocalValueStorage::SnapshotCoreMemory;
-  } else {
-    if (memory.module_path != owner.module_path) {
-      throw std::logic_error(
-          "selected-inline union artifact ownership changed during value read");
-    }
-    result.storage = LocalValueStorage::SnapshotRuntimeArtifact;
-    result.storage_module_path = memory.module_path;
-    result.storage_file_path = memory.module_file_path;
-    result.storage_file_offset = memory.artifact_file_offset;
-  }
-  return result;
-}
-
 std::uint64_t selected_inline_bit_mask(std::size_t bits) {
   if (bits == 0 || bits > 64) {
     throw std::logic_error("selected-inline bit-field width is out of range");
@@ -954,7 +808,7 @@ std::optional<LocalScalarValue> inspect_inline_scalar_unit(
   const auto direct_union =
       (pointee_type || direct_structure)
           ? std::optional<LocalValueType>{}
-          : selected_inline_direct_union_type(dies, type->number);
+          : resolve_bounded_union_type(dies, type->number);
   const auto direct_array =
       (pointee_type || direct_structure || direct_union)
           ? std::optional<LocalValueType>{}
@@ -970,8 +824,7 @@ std::optional<LocalScalarValue> inspect_inline_scalar_unit(
                 ? LocalValueType{direct_structure->byte_size, false,
                             LocalValueKind::Structure, {}}
                 : direct_union
-                      ? LocalValueType{direct_union->byte_size, false,
-                                  LocalValueKind::Union, {}}
+                      ? *direct_union
                       : direct_array
                             ? *direct_array
                             : direct_enum
@@ -1024,10 +877,6 @@ std::optional<LocalScalarValue> inspect_inline_scalar_unit(
     if (direct_structure) {
       return materialize_selected_inline_structure(owner, requested_name,
                                                    *direct_structure, memory);
-    }
-    if (direct_union) {
-      return materialize_selected_inline_union(owner, requested_name,
-                                               *direct_union, memory);
     }
     auto result =
         materialize_snapshot_memory_value(owner, requested_name, value_type, memory);

@@ -25,6 +25,7 @@ constexpr std::int32_t kCallerNestedTerminal = INT32_C(0x55667788);
 constexpr std::int32_t kCallerArrayFirst = INT32_C(0x10203040);
 constexpr std::int32_t kCallerArraySecond = INT32_C(0x22334455);
 constexpr std::int32_t kCallerArrayThird = INT32_C(0x33445566);
+constexpr std::uint32_t kCallerUnionValue = UINT32_C(0x44556677);
 constexpr std::uint64_t kCallerTypedPayload = UINT64_C(0x7766554433221100);
 constexpr std::uint64_t kCallerTypedMarker = UINT64_C(0x0badf00dcafed00d);
 constexpr std::uint64_t kPointerPointeeValue = UINT64_C(0x8877665544332211);
@@ -127,10 +128,20 @@ void require_physical_fixed_array_oracle(const std::string& executable) {
           "physical fixed-array oracle did not report compiler-proven evidence");
 }
 
+void require_physical_union_oracle(const std::string& executable) {
+  const auto output = run_command(
+      "python3 tests/core_physical_union_dwarf_oracle.py " +
+          shell_quote(executable) + " 2>&1",
+      "physical union DWARF oracle");
+  require(output.find("physical union DWARF oracle passed") !=
+              std::string::npos,
+          "physical union oracle did not report compiler-proven evidence");
+}
+
 std::string run_core_cli(const std::string& executable,
                          const std::string& core_path) {
   const std::string command =
-      "printf 'print typed_pointer\\nderef typed_pointer\\nmember typed_pointer payload\\nderef-member typed_pointer payload\\nmember typed_pointer marker\\nbt\\nframe 1\\nlist\\nprint caller_stack_local\\nprint caller_stack_aggregate\\naggregate-member caller_stack_aggregate second\\nprint caller_nested_aggregate\\nnested-aggregate-member caller_nested_aggregate inner terminal\\nprint caller_fixed_array\\narray-element caller_fixed_array 1\\narray-element caller_fixed_array 3\\nprint caller_typed_aggregate\\naggregate-member caller_typed_aggregate payload\\nderef-aggregate-member caller_typed_aggregate payload\\nquit\\n' | " +
+      "printf 'print typed_pointer\\nderef typed_pointer\\nmember typed_pointer payload\\nderef-member typed_pointer payload\\nmember typed_pointer marker\\nbt\\nframe 1\\nlist\\nprint caller_stack_local\\nprint caller_stack_aggregate\\naggregate-member caller_stack_aggregate second\\nprint caller_nested_aggregate\\nnested-aggregate-member caller_nested_aggregate inner terminal\\nprint caller_fixed_array\\narray-element caller_fixed_array 1\\narray-element caller_fixed_array 3\\nprint caller_union\\nunion-member caller_union signed_value\\nunion-member caller_union unsigned_value\\nunion-member caller_union missing\\nprint caller_typed_aggregate\\naggregate-member caller_typed_aggregate payload\\nderef-aggregate-member caller_typed_aggregate payload\\nquit\\n' | " +
       shell_quote(executable) + " " + shell_quote(core_path) + " 2>&1";
   return run_command(command, "mdbg-core subprocess");
 }
@@ -317,6 +328,68 @@ void require_caller_fixed_array(
     rejected = true;
   }
   require(rejected, "physical fixed-array out-of-range index was accepted");
+}
+
+void require_caller_union(
+    const mdbg::CoreInspectionSession& session) {
+  require(session.selected_frame_index() == 1,
+          "physical union requires the historical caller frame");
+  const auto value = session.inspect_value("caller_union");
+  require(value.name == "caller_union" &&
+              value.kind == mdbg::LocalValueKind::Union &&
+              value.byte_size == sizeof(std::uint32_t) &&
+              value.members.size() == 2,
+          "historical physical union lost bounded overlapping identity");
+  require(value.members[0].name == "signed_value" &&
+              value.members[0].offset == 0 &&
+              value.members[0].byte_size == sizeof(std::int32_t) &&
+              value.members[0].is_signed &&
+              value.members[1].name == "unsigned_value" &&
+              value.members[1].offset == 0 &&
+              value.members[1].byte_size == sizeof(std::uint32_t) &&
+              !value.members[1].is_signed,
+          "historical physical union member metadata does not match compiler evidence");
+  require(value.storage == mdbg::LocalValueStorage::SnapshotCoreMemory,
+          "historical physical union lost immutable core provenance");
+
+  const auto signed_view =
+      session.inspect_union_member("caller_union", "signed_value");
+  require(signed_view.name == "caller_union.signed_value" &&
+              signed_view.kind == mdbg::LocalValueKind::Integer &&
+              signed_view.raw_value == kCallerUnionValue &&
+              signed_view.byte_size == sizeof(std::int32_t) &&
+              signed_view.is_signed,
+          "physical signed union member view was not recovered exactly");
+  require(signed_view.storage == value.storage,
+          "physical signed union member changed immutable provenance");
+
+  const auto unsigned_view =
+      session.inspect_union_member("caller_union", "unsigned_value");
+  require(unsigned_view.name == "caller_union.unsigned_value" &&
+              unsigned_view.kind == mdbg::LocalValueKind::Integer &&
+              unsigned_view.raw_value == kCallerUnionValue &&
+              unsigned_view.byte_size == sizeof(std::uint32_t) &&
+              !unsigned_view.is_signed,
+          "physical unsigned union member view was not recovered exactly");
+  require(unsigned_view.storage == value.storage,
+          "physical unsigned union member changed immutable provenance");
+
+  bool missing_rejected = false;
+  try {
+    (void)session.inspect_union_member("caller_union", "missing");
+  } catch (const std::runtime_error&) {
+    missing_rejected = true;
+  }
+  require(missing_rejected, "physical missing union member was accepted");
+
+  bool aggregate_alias_rejected = false;
+  try {
+    (void)session.inspect_aggregate_member("caller_union", "signed_value");
+  } catch (const std::runtime_error&) {
+    aggregate_alias_rejected = true;
+  }
+  require(aggregate_alias_rejected,
+          "physical union leaked through the structure-only aggregate selector");
 }
 
 void require_caller_typed_aggregate(
@@ -596,6 +669,8 @@ int main(int argc, char** argv) {
         session.selected_frame().module_path);
     require_physical_fixed_array_oracle(
         session.selected_frame().module_path);
+    require_physical_union_oracle(
+        session.selected_frame().module_path);
 
     const auto crash_fp = session.snapshot().floating_point_state(crash_tid);
     const auto sibling_fp = session.snapshot().floating_point_state(sibling_tid);
@@ -617,6 +692,7 @@ int main(int argc, char** argv) {
     require_caller_stack_aggregate(session);
     require_caller_nested_aggregate(session);
     require_caller_fixed_array(session);
+    require_caller_union(session);
     require_caller_typed_aggregate(session);
     const auto stale_caller_frame = session.selected_frame();
 
@@ -634,6 +710,8 @@ int main(int argc, char** argv) {
                               "sibling-thread nested aggregate selection");
     require_value_unavailable(session, "caller_fixed_array",
                               "sibling-thread fixed-array selection");
+    require_value_unavailable(session, "caller_union",
+                              "sibling-thread union selection");
     require_value_unavailable(session, "caller_typed_aggregate",
                               "sibling-thread typed aggregate selection");
     require_source_value(session.inspect_value("xmm_value"), kSiblingValue,
@@ -651,12 +729,15 @@ int main(int argc, char** argv) {
                               "crash-thread frame-zero nested aggregate selection");
     require_value_unavailable(session, "caller_fixed_array",
                               "crash-thread frame-zero fixed-array selection");
+    require_value_unavailable(session, "caller_union",
+                              "crash-thread frame-zero union selection");
     require_value_unavailable(session, "caller_typed_aggregate",
                               "crash-thread frame-zero typed aggregate selection");
     const auto recovered_resume_pc = require_caller_stack_local(session);
     require_caller_stack_aggregate(session);
     require_caller_nested_aggregate(session);
     require_caller_fixed_array(session);
+    require_caller_union(session);
     require_caller_typed_aggregate(session);
     require(recovered_resume_pc == caller_resume_pc,
             "lookup-PC normalization silently changed immutable unwind sequencing");
@@ -702,6 +783,18 @@ int main(int argc, char** argv) {
             "mdbg-core did not render physical fixed-array index 1");
     require(cli_output.find("array index is out of range") != std::string::npos,
             "mdbg-core did not reject the physical fixed-array out-of-range index");
+    require(cli_output.find(
+                "caller_union = union{signed_value, unsigned_value}") !=
+                std::string::npos,
+            "mdbg-core did not render the historical physical union");
+    require(cli_output.find("caller_union.signed_value = 0x44556677") !=
+                std::string::npos,
+            "mdbg-core did not render the physical signed union member");
+    require(cli_output.find("caller_union.unsigned_value = 0x44556677") !=
+                std::string::npos,
+            "mdbg-core did not render the physical unsigned union member");
+    require(cli_output.find("has no member named: missing") != std::string::npos,
+            "mdbg-core did not deterministically reject a missing physical union member");
     require(cli_output.find("caller_typed_aggregate = { payload=0x") !=
                 std::string::npos,
             "mdbg-core did not render the physical typed aggregate");

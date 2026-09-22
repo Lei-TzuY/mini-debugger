@@ -366,15 +366,20 @@ inline LocalScalarValue inspect_local_array_element(
   return result;
 }
 
-inline LocalScalarValue inspect_inline_local_union_member(
+inline LocalScalarValue inspect_local_union_member(
     const LocalScalarValue& value, std::string_view member_name) {
   const auto& member = inline_member_detail::union_member(value, member_name);
   LocalScalarValue result{value.module_path,
-                value.name + "." + std::string(member_name),
-                member.raw_value, member.byte_size,
-                member.is_signed, member.kind};
+                          value.name + "." + std::string(member_name),
+                          member.raw_value, member.byte_size,
+                          member.is_signed, member.kind};
   inline_member_detail::copy_storage(result, value, member.offset);
   return result;
+}
+
+inline LocalScalarValue inspect_inline_local_union_member(
+    const LocalScalarValue& value, std::string_view member_name) {
+  return inspect_local_union_member(value, member_name);
 }
 
 inline LocalScalarValue dereference_local_aggregate_member(

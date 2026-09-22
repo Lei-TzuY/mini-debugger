@@ -33,6 +33,7 @@ constexpr std::uint64_t kDwTagLexicalBlock = 0x0b;
 constexpr std::uint64_t kDwTagPointerType = 0x0f;
 constexpr std::uint64_t kDwTagStructureType = 0x13;
 constexpr std::uint64_t kDwTagTypedef = 0x16;
+constexpr std::uint64_t kDwTagUnionType = 0x17;
 constexpr std::uint64_t kDwTagInlinedSubroutine = 0x1d;
 constexpr std::uint64_t kDwTagSubrangeType = 0x21;
 constexpr std::uint64_t kDwTagBaseType = 0x24;
@@ -836,6 +837,114 @@ bool is_constant_member_offset_form(std::uint64_t form) {
          form == kDwFormData8;
 }
 
+LocalStructMemberType resolve_bounded_union_member_type(
+    const std::vector<Die>& dies, const Die& member, std::size_t union_size) {
+  const auto* member_name = attribute(member, kDwAtName);
+  const auto* member_type = attribute(member, kDwAtType);
+  const auto* member_offset = attribute(member, kDwAtDataMemberLocation);
+  if (member_name == nullptr || member_name->text.empty()) {
+    throw std::runtime_error("bounded union member has no supported name");
+  }
+  if (member_type == nullptr || member_type->form != kDwFormRef4) {
+    throw std::runtime_error(
+        "bounded union member has no supported DW_FORM_ref4 type");
+  }
+  if (member_offset != nullptr &&
+      (!is_constant_member_offset_form(member_offset->form) ||
+       member_offset->number != 0)) {
+    throw std::runtime_error(
+        "bounded union member does not share storage at offset zero");
+  }
+
+  std::uint64_t type_offset = member_type->number;
+  for (unsigned depth = 0; depth < 16; ++depth) {
+    const auto index = die_index_by_offset(dies, type_offset);
+    if (!index) {
+      throw std::runtime_error(
+          "bounded union member type references an unknown DIE");
+    }
+    const auto& type_die = dies[*index];
+    if (type_die.tag == kDwTagTypedef || type_die.tag == kDwTagConstType) {
+      const auto* wrapped = attribute(type_die, kDwAtType);
+      if (wrapped == nullptr || wrapped->form != kDwFormRef4) {
+        throw std::runtime_error(
+            "bounded union member wrapper does not use DW_FORM_ref4");
+      }
+      type_offset = wrapped->number;
+      continue;
+    }
+    if (type_die.tag != kDwTagBaseType) {
+      throw std::runtime_error(
+          "bounded union member is not a bounded integer scalar");
+    }
+    const auto integer = resolve_integer_type(dies, type_offset);
+    if (integer.byte_size == 0 ||
+        integer.byte_size > sizeof(std::uint64_t) ||
+        integer.byte_size > union_size) {
+      throw std::runtime_error(
+          "bounded union integer member exceeds shared storage");
+    }
+    return LocalStructMemberType{member_name->text, 0, integer.byte_size,
+                                 integer.is_signed};
+  }
+  throw std::runtime_error("bounded union member type chain is too deep");
+}
+
+std::optional<LocalValueType> resolve_bounded_union_type(
+    const std::vector<Die>& dies, std::uint64_t type_offset) {
+  for (unsigned depth = 0; depth < 16; ++depth) {
+    const auto index = die_index_by_offset(dies, type_offset);
+    if (!index) {
+      throw std::runtime_error("bounded union type references an unknown DIE");
+    }
+    const auto& die = dies[*index];
+    if (die.tag == kDwTagTypedef || die.tag == kDwTagConstType) {
+      const auto* wrapped = attribute(die, kDwAtType);
+      if (wrapped == nullptr || wrapped->form != kDwFormRef4) {
+        throw std::runtime_error(
+            "bounded union wrapper does not use DW_FORM_ref4");
+      }
+      type_offset = wrapped->number;
+      continue;
+    }
+    if (die.tag != kDwTagUnionType) return std::nullopt;
+
+    const auto* size = attribute(die, kDwAtByteSize);
+    if (size == nullptr || size->number == 0 ||
+        size->number > kMaxLocalStructSize) {
+      throw std::runtime_error("bounded union has an unsupported byte size");
+    }
+    const auto union_size = static_cast<std::size_t>(size->number);
+    LocalValueType result{union_size, false, LocalValueKind::Union, {}};
+    for (std::size_t child = 0; child < dies.size(); ++child) {
+      if (dies[child].parent != *index) continue;
+      if (dies[child].tag != kDwTagMember) {
+        throw std::runtime_error(
+            "bounded union has an unsupported direct child DIE");
+      }
+      if (result.members.size() >= kMaxLocalStructMembers) {
+        throw std::runtime_error("bounded union has too many direct members");
+      }
+      auto resolved =
+          resolve_bounded_union_member_type(dies, dies[child], union_size);
+      const auto duplicate = std::find_if(
+          result.members.begin(), result.members.end(),
+          [&resolved](const LocalStructMemberType& existing) {
+            return existing.name == resolved.name;
+          });
+      if (duplicate != result.members.end()) {
+        throw std::runtime_error("bounded union has duplicate member names");
+      }
+      result.members.push_back(std::move(resolved));
+    }
+    if (result.members.empty()) {
+      throw std::runtime_error("bounded union has no supported direct members");
+    }
+    return result;
+  }
+  throw std::runtime_error("bounded union type chain is too deep");
+}
+
 bool is_bounded_array_bound_form(std::uint64_t form) {
   return form == kDwFormData1 || form == kDwFormData2 ||
          form == kDwFormData4 || form == kDwFormData8 ||
@@ -1068,6 +1177,13 @@ LocalValueType resolve_value_type(const std::vector<Die>& dies, std::uint64_t ty
       type_offset = type->number;
       continue;
     }
+    if (die.tag == kDwTagUnionType) {
+      const auto union_type = resolve_bounded_union_type(dies, type_offset);
+      if (!union_type) {
+        throw std::logic_error("union DIE did not resolve as a bounded union");
+      }
+      return *union_type;
+    }
     if (die.tag == kDwTagArrayType) {
       const auto array = resolve_bounded_fixed_array_type(dies, type_offset);
       if (!array) {
@@ -1202,7 +1318,7 @@ LocalValueType resolve_value_type(const std::vector<Die>& dies, std::uint64_t ty
       return LocalValueType{struct_size, false, LocalValueKind::Structure, std::move(members)};
     }
     throw std::runtime_error(
-        "local variable type is not a supported typedef/const/base-type/pointer/structure/array chain");
+        "local variable type is not a supported typedef/const/base-type/pointer/structure/array/union chain");
   }
   throw std::runtime_error("local variable type chain is too deep");
 }
@@ -1826,6 +1942,10 @@ std::optional<LocalScalarValue> inspect_unit(const DebugSections& sections,
   if (value_type.kind == LocalValueKind::Array) {
     throw std::runtime_error(
         "live fixed-array materialization is outside current compiler evidence");
+  }
+  if (value_type.kind == LocalValueKind::Union) {
+    throw std::runtime_error(
+        "live union materialization is outside current compiler evidence");
   }
   std::vector<std::byte> location_expression;
   if (location->form == kDwFormExprloc) {

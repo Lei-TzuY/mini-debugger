@@ -7,10 +7,8 @@ struct FrameZeroInlineTyped {
 static int32_t frame_zero_inline_typed_payload = INT32_C(0x02468ace);
 
 static __attribute__((always_inline)) inline int
-frame_zero_inline_typed_inner(int seed) {
-  struct FrameZeroInlineTyped inline_typed = {
-      &frame_zero_inline_typed_payload};
-
+frame_zero_inline_typed_inner(struct FrameZeroInlineTyped inline_typed,
+                              int seed) {
   __asm__ volatile(
       ".globl snapshot_frame_zero_inline_typed_probe\n"
       "snapshot_frame_zero_inline_typed_probe:\n"
@@ -24,7 +22,9 @@ frame_zero_inline_typed_inner(int seed) {
 
 static __attribute__((always_inline)) inline int
 frame_zero_inline_typed_outer(int seed) {
-  return frame_zero_inline_typed_inner(seed + 5);
+  struct FrameZeroInlineTyped inline_typed = {
+      &frame_zero_inline_typed_payload};
+  return frame_zero_inline_typed_inner(inline_typed, seed + 5);
 }
 
 __attribute__((noinline)) static int frame_zero_inline_typed_physical(void) {

@@ -1514,6 +1514,25 @@ LocalValueType resolve_value_type(const std::vector<Die>& dies, std::uint64_t ty
             resolved_type_offset = wrapped->number;
             continue;
           }
+          if (resolved_type.tag == kDwTagEnumerationType) {
+            const auto enum_type =
+                resolve_bounded_enum_type(dies, resolved_type_offset);
+            if (!enum_type) {
+              throw std::logic_error(
+                  "enumeration member DIE did not resolve as a bounded enum");
+            }
+            if (offset > struct_size ||
+                enum_type->byte_size > struct_size - offset) {
+              throw std::runtime_error(
+                  "local struct enum member extends past aggregate storage");
+            }
+            LocalStructMemberType member_type{
+                member_name->text, offset, enum_type->byte_size,
+                enum_type->is_signed, LocalValueKind::Enumeration};
+            member_type.enum_type = *enum_type;
+            resolved_member = std::move(member_type);
+            break;
+          }
           if (resolved_type.tag == kDwTagPointerType) {
             const auto* pointer_size_attr =
                 attribute(resolved_type, kDwAtByteSize);
@@ -1837,6 +1856,10 @@ LocalScalarValue decode_structure(const ElfFile& module, std::string_view name,
     if (member.bit_slice) {
       throw std::runtime_error(
           "live bit-field structure materialization is outside current compiler evidence");
+    }
+    if (member.kind == LocalValueKind::Enumeration || member.enum_type) {
+      throw std::runtime_error(
+          "live enum-valued structure materialization is outside current compiler evidence");
     }
     LocalStructMember materialized{
         member.name, decode_integer(bytes, member.offset, member.byte_size),

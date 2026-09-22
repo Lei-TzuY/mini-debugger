@@ -249,7 +249,7 @@ inline LocalScalarValue inspect_inline_local_pointer_member(
       member->byte_size, member->is_signed, member->kind};
   inline_member_detail::attach_storage(result, memory);
   if (member->kind == LocalValueKind::Pointer) {
-    result.pointee_type = LocalPointeeType{
+    result.pointee_type = LocalValueType{
         member->pointee_type->byte_size, member->pointee_type->is_signed,
         LocalValueKind::Integer, {}};
   }
@@ -297,7 +297,7 @@ inline LocalScalarValue inspect_local_aggregate_member(
       member.kind};
   inline_member_detail::copy_storage(result, aggregate, member.offset);
   if (member.kind == LocalValueKind::Pointer) {
-    result.pointee_type = LocalPointeeType{
+    result.pointee_type = LocalValueType{
         member.pointee_type->byte_size, member.pointee_type->is_signed,
         LocalValueKind::Integer, {}};
   } else if (member.kind == LocalValueKind::Enumeration) {

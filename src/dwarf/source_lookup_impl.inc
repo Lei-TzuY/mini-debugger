@@ -147,13 +147,6 @@ struct IntegerType {
   bool is_signed;
 };
 
-struct ValueType {
-  std::size_t byte_size;
-  bool is_signed;
-  LocalValueKind kind;
-  std::vector<LocalStructMemberType> members;
-};
-
 struct LoclistsContribution {
   std::size_t start;
   std::size_t offsets_base;
@@ -834,7 +827,7 @@ bool is_constant_member_offset_form(std::uint64_t form) {
          form == kDwFormData8;
 }
 
-ValueType resolve_value_type(const std::vector<Die>& dies, std::uint64_t type_offset) {
+LocalValueType resolve_value_type(const std::vector<Die>& dies, std::uint64_t type_offset) {
   for (unsigned depth = 0; depth < 16; ++depth) {
     const auto index = die_index_by_offset(dies, type_offset);
     if (!index) throw std::runtime_error("local variable type references an unknown DIE");
@@ -860,11 +853,11 @@ ValueType resolve_value_type(const std::vector<Die>& dies, std::uint64_t type_of
         throw std::runtime_error("local pointer type has no supported DW_FORM_ref4 pointee");
       }
       (void)resolve_integer_type(dies, pointee->number);
-      return ValueType{pointer_size, false, LocalValueKind::Pointer, {}};
+      return LocalValueType{pointer_size, false, LocalValueKind::Pointer, {}};
     }
     if (die.tag == kDwTagBaseType) {
       const auto integer = resolve_integer_type(dies, type_offset);
-      return ValueType{integer.byte_size, integer.is_signed, LocalValueKind::Integer, {}};
+      return LocalValueType{integer.byte_size, integer.is_signed, LocalValueKind::Integer, {}};
     }
     if (die.tag == kDwTagStructureType) {
       const auto* size = attribute(die, kDwAtByteSize);
@@ -966,7 +959,7 @@ ValueType resolve_value_type(const std::vector<Die>& dies, std::uint64_t type_of
       if (members.empty()) {
         throw std::runtime_error("local struct has no supported direct members");
       }
-      return ValueType{struct_size, false, LocalValueKind::Structure, std::move(members)};
+      return LocalValueType{struct_size, false, LocalValueKind::Structure, std::move(members)};
     }
     throw std::runtime_error(
         "local variable type is not a supported typedef/const/base-type/pointer/structure chain");
@@ -1129,7 +1122,7 @@ std::uint64_t decode_integer(const std::vector<std::byte>& bytes, std::size_t of
 }
 
 LocalScalarValue decode_structure(const ElfFile& module, std::string_view name,
-                                  const ValueType& value_type,
+                                  const LocalValueType& value_type,
                                   const std::vector<std::byte>& bytes) {
   if (value_type.kind != LocalValueKind::Structure || bytes.size() != value_type.byte_size) {
     throw std::runtime_error("local struct bytes do not match owned aggregate storage");
@@ -1153,7 +1146,7 @@ LocalScalarValue decode_structure(const ElfFile& module, std::string_view name,
 template <typename RegisterSource>
 std::vector<std::byte> evaluate_register_piece_structure(
     const std::vector<std::byte>& expression, const RegisterSource& register_source,
-    const ValueType& value_type) {
+    const LocalValueType& value_type) {
   if (value_type.kind != LocalValueKind::Structure || value_type.byte_size != 16) {
     throw std::runtime_error(
         "register-piece local requires the compiler-proven 16-byte structure shape");

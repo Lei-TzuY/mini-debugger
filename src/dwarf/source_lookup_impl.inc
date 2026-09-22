@@ -70,6 +70,7 @@ constexpr std::uint64_t kDwFormData4 = 0x06;
 constexpr std::uint64_t kDwFormData8 = 0x07;
 constexpr std::uint64_t kDwFormString = 0x08;
 constexpr std::uint64_t kDwFormData1 = 0x0b;
+constexpr std::uint64_t kDwFormSdata = 0x0d;
 constexpr std::uint64_t kDwFormStrp = 0x0e;
 constexpr std::uint64_t kDwFormUdata = 0x0f;
 constexpr std::uint64_t kDwFormRef4 = 0x13;
@@ -380,6 +381,10 @@ AttributeValue read_attribute(const AttributeSpec& spec, const DebugSections& se
       break;
     case kDwFormData8:
       value.number = read_scalar<std::uint64_t>(sections.info, cursor, unit_end, "DW_FORM_data8");
+      break;
+    case kDwFormSdata:
+      value.number = static_cast<std::uint64_t>(
+          read_sleb(sections.info, cursor, unit_end, "DW_FORM_sdata"));
       break;
     case kDwFormUdata:
       value.number = read_uleb(sections.info, cursor, unit_end, "DW_FORM_udata");
@@ -970,7 +975,7 @@ std::optional<LocalEnumType> resolve_bounded_enum_type(
 
 bool is_constant_member_offset_form(std::uint64_t form) {
   return form == kDwFormData1 || form == kDwFormData2 || form == kDwFormData4 ||
-         form == kDwFormData8;
+         form == kDwFormData8 || form == kDwFormSdata;
 }
 
 std::optional<LocalBitSlice> resolve_bounded_bit_slice(

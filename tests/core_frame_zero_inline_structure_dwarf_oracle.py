@@ -87,16 +87,14 @@ def require_structure_binding(path, probe, records, by_offset):
         path, location, probe, "inline_pair"
     )
 
-    single_register = re.fullmatch(r"DW_OP_reg\d+ \([^)]+\)", expression)
-    two_pieces = re.fullmatch(
-        r"DW_OP_reg\d+ \([^)]+\); DW_OP_piece: 4; "
-        r"DW_OP_reg\d+ \([^)]+\); DW_OP_piece: 4",
-        expression,
-    )
-    if not single_register and not two_pieces:
+    proven_shapes = {
+        "DW_OP_reg1 (rdx); DW_OP_piece: 4; DW_OP_reg2 (rcx); DW_OP_piece: 4",
+        "DW_OP_reg2 (rcx); DW_OP_piece: 4; DW_OP_reg1 (rdx); DW_OP_piece: 4",
+    }
+    if expression not in proven_shapes:
         raise RuntimeError(
-            "inline_pair active compiler location is neither one exact register nor "
-            "two four-byte register pieces: " + expression
+            "inline_pair active compiler location is not one of the two proven "
+            "RDX/RCX four-byte piece orderings: " + expression
         )
 
     type_text = resolved_attr(variable, by_offset, "type")

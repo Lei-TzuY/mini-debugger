@@ -10,6 +10,8 @@
 #define TYPED_OBJECT_MARKER_VALUE UINT64_C(0x13579bdf2468ace0)
 #define CALLER_AGGREGATE_FIRST_VALUE UINT64_C(0x1021324354657687)
 #define CALLER_AGGREGATE_SECOND_VALUE UINT64_C(0x89abcdef01234567)
+#define CALLER_TYPED_PAYLOAD_VALUE UINT64_C(0x7766554433221100)
+#define CALLER_TYPED_MARKER_VALUE UINT64_C(0x0badf00dcafed00d)
 #define SHADOW_OUTER_VALUE UINT64_C(0x1111222233334444)
 #define SHADOW_INNER_VALUE UINT64_C(0xaaaabbbbccccdddd)
 
@@ -87,15 +89,26 @@ __attribute__((noinline, noreturn)) static void caller_with_stack_local(void) {
     uint64_t first;
     uint64_t second;
   };
+  struct CallerTypedAggregate {
+    uint64_t* payload;
+    uint64_t marker;
+  };
   uint64_t caller_stack_local = UINT64_C(0xcafebabedeadbeef);
+  uint64_t caller_typed_payload = CALLER_TYPED_PAYLOAD_VALUE;
   struct CallerStackAggregate caller_stack_aggregate = {
       CALLER_AGGREGATE_FIRST_VALUE, CALLER_AGGREGATE_SECOND_VALUE};
-  __asm__ volatile("" : "+m"(caller_stack_local), "+m"(caller_stack_aggregate) : : "memory");
+  struct CallerTypedAggregate caller_typed_aggregate = {
+      &caller_typed_payload, CALLER_TYPED_MARKER_VALUE};
+  __asm__ volatile("" : "+m"(caller_stack_local), "+m"(caller_typed_payload),
+                   "+m"(caller_stack_aggregate), "+m"(caller_typed_aggregate)
+                   :
+                   : "memory");
   crash_target();
   __asm__ volatile(
       ".globl snapshot_caller_resume_probe\n"
       "snapshot_caller_resume_probe:\n"
-      : "+m"(caller_stack_local), "+m"(caller_stack_aggregate)
+      : "+m"(caller_stack_local), "+m"(caller_typed_payload),
+        "+m"(caller_stack_aggregate), "+m"(caller_typed_aggregate)
       :
       : "memory");
   __builtin_unreachable();

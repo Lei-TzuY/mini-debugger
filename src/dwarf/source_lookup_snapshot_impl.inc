@@ -318,6 +318,41 @@ LocalScalarValue materialize_snapshot_xmm_value(
   return result;
 }
 
+LocalScalarValue materialize_bounded_array_bytes(
+    const SnapshotModuleAddress& owner, std::string_view name,
+    const LocalValueType& value_type, const std::vector<std::byte>& bytes) {
+  if (value_type.kind != LocalValueKind::Array || !value_type.array_type ||
+      !value_type.members.empty() ||
+      value_type.array_type->element_count == 0 ||
+      value_type.array_type->element_count > kMaxLocalArrayElements ||
+      value_type.array_type->element_byte_size == 0 ||
+      value_type.array_type->element_byte_size > sizeof(std::uint64_t) ||
+      value_type.array_type->element_kind != LocalValueKind::Integer ||
+      value_type.byte_size !=
+          value_type.array_type->element_count *
+              value_type.array_type->element_byte_size ||
+      bytes.size() != value_type.byte_size) {
+    throw std::runtime_error(
+        "bounded fixed-array bytes exceed the canonical array model");
+  }
+  LocalScalarValue result{owner.module_path, std::string(name), 0,
+                          value_type.byte_size, false,
+                          LocalValueKind::Array};
+  result.array_type = value_type.array_type;
+  result.elements.reserve(value_type.array_type->element_count);
+  for (std::size_t index = 0;
+       index < value_type.array_type->element_count; ++index) {
+    result.elements.push_back(LocalArrayElement{
+        decode_integer(bytes,
+                       index * value_type.array_type->element_byte_size,
+                       value_type.array_type->element_byte_size),
+        value_type.array_type->element_byte_size,
+        value_type.array_type->element_is_signed,
+        LocalValueKind::Integer});
+  }
+  return result;
+}
+
 LocalScalarValue materialize_snapshot_memory_value(
     const SnapshotModuleAddress& owner, std::string_view name,
     const LocalValueType& value_type, const SnapshotMemoryRead& memory,
@@ -385,34 +420,8 @@ LocalScalarValue materialize_snapshot_memory_value(
       result.members.push_back(std::move(materialized));
     }
   } else if (value_type.kind == LocalValueKind::Array) {
-    if (!value_type.array_type || !value_type.members.empty() ||
-        value_type.array_type->element_count == 0 ||
-        value_type.array_type->element_count > kMaxLocalArrayElements ||
-        value_type.array_type->element_byte_size == 0 ||
-        value_type.array_type->element_byte_size > sizeof(std::uint64_t) ||
-        value_type.array_type->element_kind != LocalValueKind::Integer ||
-        value_type.byte_size !=
-            value_type.array_type->element_count *
-                value_type.array_type->element_byte_size ||
-        memory.bytes.size() != value_type.byte_size) {
-      throw std::runtime_error(
-          "snapshot fixed-array bytes exceed the bounded array model");
-    }
-    result = LocalScalarValue{owner.module_path, std::string(name), 0,
-                              value_type.byte_size, false,
-                              LocalValueKind::Array};
-    result.array_type = value_type.array_type;
-    result.elements.reserve(value_type.array_type->element_count);
-    for (std::size_t index = 0;
-         index < value_type.array_type->element_count; ++index) {
-      result.elements.push_back(LocalArrayElement{
-          decode_integer(memory.bytes,
-                         index * value_type.array_type->element_byte_size,
-                         value_type.array_type->element_byte_size),
-          value_type.array_type->element_byte_size,
-          value_type.array_type->element_is_signed,
-          LocalValueKind::Integer});
-    }
+    result = materialize_bounded_array_bytes(
+        owner, name, value_type, memory.bytes);
   } else {
     if (value_type.array_type) {
       throw std::logic_error(
@@ -615,7 +624,7 @@ std::optional<LocalScalarValue> inspect_snapshot_unit(
       throw std::runtime_error(
           "snapshot historical register-piece local requested an unowned register");
     };
-    const auto bytes = evaluate_register_piece_structure(
+    const auto bytes = evaluate_register_piece_value(
         location_expression, register_value, value_type);
     const ElfFile module(owner.module_file_path);
     auto result = decode_structure(module, name, value_type, bytes);

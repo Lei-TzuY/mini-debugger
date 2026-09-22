@@ -430,8 +430,9 @@ LocalScalarValue materialize_snapshot_memory_value(
       LocalStructMember materialized{
           member.name,
           decode_integer(memory.bytes, member.offset, member.integer.byte_size),
-          member.integer.byte_size, member.integer.is_signed};
+          member.integer.byte_size, member.integer.is_signed, member.kind};
       materialized.offset = member.offset;
+      materialized.pointee_type = member.pointee_type;
       result.members.push_back(std::move(materialized));
     }
   } else {
@@ -858,7 +859,8 @@ LocalScalarValue dereference_local_pointer(
       }
       value_type.members.push_back(AggregateMemberType{
           member.name, member.offset,
-          IntegerType{member.byte_size, member.is_signed}});
+          IntegerType{member.byte_size, member.is_signed},
+          member.kind, member.pointee_type});
     }
   } else {
     throw std::runtime_error("pointer pointee kind is unsupported for bounded dereference");
@@ -870,15 +872,10 @@ LocalScalarValue dereference_local_pointer(
   const SnapshotModuleAddress owner{pointer.module_path, {}, 0};
   auto result = materialize_snapshot_memory_value(owner, "*" + pointer.name,
                                                    value_type, memory, false);
-  if (result.kind == LocalValueKind::Structure) {
-    if (result.members.size() != pointer.pointee_type->members.size()) {
-      throw std::logic_error("bounded structure materialization changed member count");
-    }
-    for (std::size_t index = 0; index < result.members.size(); ++index) {
-      result.members[index].kind = pointer.pointee_type->members[index].kind;
-      result.members[index].pointee_type =
-          pointer.pointee_type->members[index].pointee_type;
-    }
+  if (result.kind == LocalValueKind::Structure &&
+      result.members.size() != pointer.pointee_type->members.size()) {
+    throw std::logic_error(
+        "bounded structure materialization changed member count");
   }
   return result;
 }

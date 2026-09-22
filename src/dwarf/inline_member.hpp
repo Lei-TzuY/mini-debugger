@@ -284,7 +284,7 @@ inline LocalScalarValue dereference_inline_local_pointer_member(
   return result;
 }
 
-inline LocalScalarValue inspect_inline_local_aggregate_member(
+inline LocalScalarValue inspect_local_aggregate_member(
     const LocalScalarValue& aggregate, std::string_view member_name) {
   const auto& member =
       inline_member_detail::aggregate_member(aggregate, member_name);
@@ -312,14 +312,14 @@ inline LocalScalarValue inspect_inline_local_nested_aggregate_member(
     const LocalScalarValue& aggregate, std::string_view aggregate_member_name,
     std::string_view terminal_member_name) {
   const auto inner =
-      inspect_inline_local_aggregate_member(aggregate, aggregate_member_name);
+      inspect_local_aggregate_member(aggregate, aggregate_member_name);
   if (inner.kind != LocalValueKind::Structure) {
     throw std::runtime_error(
         "selected-inline outer member is not a bounded nested structure: " +
         inner.name);
   }
   auto terminal =
-      inspect_inline_local_aggregate_member(inner, terminal_member_name);
+      inspect_local_aggregate_member(inner, terminal_member_name);
   if (terminal.kind == LocalValueKind::Structure) {
     throw std::runtime_error(
         "selected-inline nested aggregate depth exceeds the bounded one-hop model");
@@ -338,12 +338,12 @@ inline LocalScalarValue inspect_inline_local_union_member(
   return result;
 }
 
-inline LocalScalarValue dereference_inline_local_aggregate_member(
+inline LocalScalarValue dereference_local_aggregate_member(
     const CoreSnapshot& snapshot, const LocalScalarValue& aggregate,
     std::string_view member_name,
     const SnapshotModulePathResolver& module_paths) {
   const auto member =
-      inspect_inline_local_aggregate_member(aggregate, member_name);
+      inspect_local_aggregate_member(aggregate, member_name);
   if (member.kind != LocalValueKind::Pointer || !member.pointee_type ||
       member.pointee_type->kind != LocalValueKind::Integer ||
       member.pointee_type->byte_size == 0 ||
@@ -363,6 +363,19 @@ inline LocalScalarValue dereference_inline_local_aggregate_member(
       LocalValueKind::Integer};
   inline_member_detail::attach_storage(result, memory);
   return result;
+}
+
+inline LocalScalarValue inspect_inline_local_aggregate_member(
+    const LocalScalarValue& aggregate, std::string_view member_name) {
+  return inspect_local_aggregate_member(aggregate, member_name);
+}
+
+inline LocalScalarValue dereference_inline_local_aggregate_member(
+    const CoreSnapshot& snapshot, const LocalScalarValue& aggregate,
+    std::string_view member_name,
+    const SnapshotModulePathResolver& module_paths) {
+  return dereference_local_aggregate_member(
+      snapshot, aggregate, member_name, module_paths);
 }
 
 }  // namespace mdbg

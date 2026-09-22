@@ -151,6 +151,8 @@ struct AggregateMemberType {
   std::string name;
   std::size_t offset;
   IntegerType integer;
+  LocalValueKind kind{LocalValueKind::Integer};
+  std::optional<LocalPointerPointeeType> pointee_type{};
 };
 
 struct ValueType {
@@ -904,11 +906,70 @@ ValueType resolve_value_type(const std::vector<Die>& dies, std::uint64_t type_of
           throw std::runtime_error("local struct member offset is too large");
         }
         const auto offset = static_cast<std::size_t>(member_offset->number);
-        const auto integer = resolve_integer_type(dies, member_type->number);
-        if (offset > struct_size || integer.byte_size > struct_size - offset) {
-          throw std::runtime_error("local struct member extends past aggregate storage");
+        std::uint64_t resolved_type_offset = member_type->number;
+        std::optional<AggregateMemberType> resolved_member;
+        for (unsigned member_depth = 0; member_depth < 16; ++member_depth) {
+          const auto member_type_index =
+              die_index_by_offset(dies, resolved_type_offset);
+          if (!member_type_index) {
+            throw std::runtime_error(
+                "local struct member type references an unknown DIE");
+          }
+          const auto& resolved_type = dies[*member_type_index];
+          if (resolved_type.tag == kDwTagTypedef ||
+              resolved_type.tag == kDwTagConstType) {
+            const auto* wrapped = attribute(resolved_type, kDwAtType);
+            if (wrapped == nullptr || wrapped->form != kDwFormRef4) {
+              throw std::runtime_error(
+                  "local struct member wrapper does not use DW_FORM_ref4");
+            }
+            resolved_type_offset = wrapped->number;
+            continue;
+          }
+          if (resolved_type.tag == kDwTagPointerType) {
+            const auto* pointer_size_attr =
+                attribute(resolved_type, kDwAtByteSize);
+            const auto pointer_size =
+                pointer_size_attr == nullptr
+                    ? std::size_t{8}
+                    : static_cast<std::size_t>(pointer_size_attr->number);
+            if (pointer_size != sizeof(std::uintptr_t)) {
+              throw std::runtime_error(
+                  "local struct pointer member has an unsupported byte size");
+            }
+            const auto* pointee = attribute(resolved_type, kDwAtType);
+            if (pointee == nullptr || pointee->form != kDwFormRef4) {
+              throw std::runtime_error(
+                  "local struct pointer member has no supported pointee");
+            }
+            const auto pointee_integer =
+                resolve_integer_type(dies, pointee->number);
+            if (offset > struct_size || pointer_size > struct_size - offset) {
+              throw std::runtime_error(
+                  "local struct pointer member extends past aggregate storage");
+            }
+            resolved_member = AggregateMemberType{
+                member_name->text, offset, IntegerType{pointer_size, false},
+                LocalValueKind::Pointer,
+                LocalPointerPointeeType{pointee_integer.byte_size,
+                                        pointee_integer.is_signed}};
+            break;
+          }
+          const auto integer =
+              resolve_integer_type(dies, resolved_type_offset);
+          if (offset > struct_size || integer.byte_size > struct_size - offset) {
+            throw std::runtime_error(
+                "local struct integer member extends past aggregate storage");
+          }
+          resolved_member =
+              AggregateMemberType{member_name->text, offset, integer};
+          break;
         }
-        members.push_back(AggregateMemberType{member_name->text, offset, integer});
+        if (!resolved_member) {
+          throw std::runtime_error(
+              "local struct member type chain is too deep");
+        }
+        members.push_back(std::move(*resolved_member));
       }
       if (members.empty()) {
         throw std::runtime_error("local struct has no supported direct members");
@@ -1085,9 +1146,12 @@ LocalScalarValue decode_structure(const ElfFile& module, std::string_view name,
                           false, LocalValueKind::Structure};
   result.members.reserve(value_type.members.size());
   for (const auto& member : value_type.members) {
-    result.members.push_back(LocalStructMember{
+    LocalStructMember materialized{
         member.name, decode_integer(bytes, member.offset, member.integer.byte_size),
-        member.integer.byte_size, member.integer.is_signed});
+        member.integer.byte_size, member.integer.is_signed, member.kind};
+    materialized.offset = member.offset;
+    materialized.pointee_type = member.pointee_type;
+    result.members.push_back(std::move(materialized));
   }
   return result;
 }

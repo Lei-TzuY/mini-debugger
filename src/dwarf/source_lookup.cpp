@@ -429,124 +429,6 @@ std::optional<LocalBitSlice> selected_inline_bit_slice(
   return LocalBitSlice{absolute_bit_offset, width};
 }
 
-std::optional<LocalStructMemberType> selected_inline_nested_structure_member_type(
-    const std::vector<Die>& dies, const Die& member, std::size_t outer_size) {
-  const auto* member_type = attribute(member, kDwAtType);
-  if (member_type == nullptr || member_type->form != kDwFormRef4) return std::nullopt;
-
-  std::uint64_t type_offset = member_type->number;
-  std::optional<std::size_t> structure_index;
-  for (unsigned depth = 0; depth < 16; ++depth) {
-    const auto index = die_index_by_offset(dies, type_offset);
-    if (!index) {
-      throw std::runtime_error("selected-inline nested member type references an unknown DIE");
-    }
-    const auto& type_die = dies[*index];
-    if (type_die.tag == kDwTagTypedef || type_die.tag == kDwTagConstType) {
-      const auto* wrapped = attribute(type_die, kDwAtType);
-      if (wrapped == nullptr || wrapped->form != kDwFormRef4) {
-        throw std::runtime_error(
-            "selected-inline nested member wrapper does not use DW_FORM_ref4");
-      }
-      type_offset = wrapped->number;
-      continue;
-    }
-    if (type_die.tag != kDwTagStructureType) return std::nullopt;
-    structure_index = *index;
-    break;
-  }
-  if (!structure_index) {
-    throw std::runtime_error("selected-inline nested member type chain is too deep");
-  }
-
-  const auto* member_name = attribute(member, kDwAtName);
-  const auto* member_offset = attribute(member, kDwAtDataMemberLocation);
-  if (member_name == nullptr || member_name->text.empty()) {
-    throw std::runtime_error("selected-inline nested structure member has no supported name");
-  }
-  if (member_offset == nullptr ||
-      !is_constant_member_offset_form(member_offset->form) ||
-      member_offset->number > std::numeric_limits<std::size_t>::max()) {
-    throw std::runtime_error(
-        "selected-inline nested structure member has no supported constant offset");
-  }
-  const auto offset = static_cast<std::size_t>(member_offset->number);
-  const auto& structure = dies[*structure_index];
-  const auto* size = attribute(structure, kDwAtByteSize);
-  if (size == nullptr || size->number == 0 || size->number > kMaxLocalStructSize) {
-    throw std::runtime_error(
-        "selected-inline nested structure has an unsupported byte size");
-  }
-  const auto nested_size = static_cast<std::size_t>(size->number);
-  if (offset > outer_size || nested_size > outer_size - offset) {
-    throw std::runtime_error(
-        "selected-inline nested structure exceeds outer aggregate storage");
-  }
-
-  LocalStructMemberType result{member_name->text, offset, nested_size, false,
-                               LocalValueKind::Structure};
-  for (std::size_t child = 0; child < dies.size(); ++child) {
-    if (dies[child].parent != *structure_index) continue;
-    if (dies[child].tag != kDwTagMember) {
-      throw std::runtime_error(
-          "selected-inline nested structure has an unsupported direct child DIE");
-    }
-    if (result.members.size() >= kMaxLocalStructMembers) {
-      throw std::runtime_error(
-          "selected-inline nested structure has too many direct members");
-    }
-    const auto& terminal_die = dies[child];
-    if (attribute(terminal_die, kInlineDwAtBitSize) != nullptr ||
-        attribute(terminal_die, kInlineDwAtBitOffset) != nullptr ||
-        attribute(terminal_die, kInlineDwAtDataBitOffset) != nullptr) {
-      throw std::runtime_error(
-          "selected-inline nested structure terminal bit-fields are unsupported");
-    }
-    const auto* terminal_name = attribute(terminal_die, kDwAtName);
-    const auto* terminal_type = attribute(terminal_die, kDwAtType);
-    const auto* terminal_offset = attribute(terminal_die, kDwAtDataMemberLocation);
-    if (terminal_name == nullptr || terminal_name->text.empty()) {
-      throw std::runtime_error(
-          "selected-inline nested structure terminal has no supported name");
-    }
-    if (terminal_type == nullptr || terminal_type->form != kDwFormRef4) {
-      throw std::runtime_error(
-          "selected-inline nested structure terminal has no supported DW_FORM_ref4 type");
-    }
-    if (terminal_offset == nullptr ||
-        !is_constant_member_offset_form(terminal_offset->form) ||
-        terminal_offset->number > std::numeric_limits<std::size_t>::max()) {
-      throw std::runtime_error(
-          "selected-inline nested structure terminal has no supported constant offset");
-    }
-    const auto terminal_byte_offset =
-        static_cast<std::size_t>(terminal_offset->number);
-    const auto integer = resolve_integer_type(dies, terminal_type->number);
-    if (terminal_byte_offset > nested_size ||
-        integer.byte_size > nested_size - terminal_byte_offset) {
-      throw std::runtime_error(
-          "selected-inline nested structure terminal exceeds inner storage");
-    }
-    const auto duplicate = std::find_if(
-        result.members.begin(), result.members.end(),
-        [&](const LocalStructMemberType& existing) {
-          return existing.name == terminal_name->text;
-        });
-    if (duplicate != result.members.end()) {
-      throw std::runtime_error(
-          "selected-inline nested structure has duplicate terminal member names");
-    }
-    result.members.push_back(LocalStructMemberType{
-        terminal_name->text, terminal_byte_offset, integer.byte_size,
-        integer.is_signed, LocalValueKind::Integer});
-  }
-  if (result.members.empty()) {
-    throw std::runtime_error(
-        "selected-inline nested structure has no bounded terminal scalar members");
-  }
-  return result;
-}
-
 std::optional<LocalValueType> selected_inline_direct_structure_type(
     const std::vector<Die>& dies, std::uint64_t type_offset) {
   for (unsigned depth = 0; depth < 16; ++depth) {
@@ -588,7 +470,7 @@ std::optional<LocalValueType> selected_inline_direct_structure_type(
                              attribute(member_die, kInlineDwAtDataBitOffset) != nullptr;
       LocalStructMemberType member;
       if (!bit_field) {
-        const auto nested = selected_inline_nested_structure_member_type(
+        const auto nested = resolve_bounded_nested_structure_member_type(
             dies, member_die, struct_size);
         member = nested ? std::move(*nested)
                         : resolve_snapshot_struct_member_type(dies, member_die,
@@ -995,48 +877,8 @@ LocalScalarValue materialize_selected_inline_structure(
   result.members.reserve(aggregate.members.size());
   for (const auto& member : aggregate.members) {
     if (member.kind == LocalValueKind::Structure) {
-      if (member.byte_size == 0 || member.byte_size > kMaxLocalStructSize ||
-          member.offset > aggregate.byte_size ||
-          member.byte_size > aggregate.byte_size - member.offset ||
-          member.pointee_type || member.bit_slice || member.enum_type ||
-          member.members.empty() ||
-          member.members.size() > kMaxLocalStructMembers) {
-        throw std::logic_error(
-            "selected-inline nested aggregate member violates bounded layout ownership");
-      }
-      LocalStructMember nested{member.name, 0, member.byte_size, false,
-                               LocalValueKind::Structure};
-      nested.offset = member.offset;
-      nested.members.reserve(member.members.size());
-      for (const auto& terminal : member.members) {
-        if (terminal.kind != LocalValueKind::Integer || terminal.pointee_type ||
-            terminal.bit_slice || terminal.enum_type ||
-            !terminal.members.empty() || terminal.byte_size == 0 ||
-            terminal.byte_size > sizeof(std::uint64_t) ||
-            terminal.offset > member.byte_size ||
-            terminal.byte_size > member.byte_size - terminal.offset) {
-          throw std::logic_error(
-              "selected-inline nested aggregate terminal is outside the bounded scalar model");
-        }
-        if (terminal.offset >
-            std::numeric_limits<std::size_t>::max() - member.offset) {
-          throw std::overflow_error(
-              "selected-inline nested aggregate terminal offset overflows");
-        }
-        const auto absolute_offset = member.offset + terminal.offset;
-        if (absolute_offset > aggregate.byte_size ||
-            terminal.byte_size > aggregate.byte_size - absolute_offset) {
-          throw std::logic_error(
-              "selected-inline nested aggregate terminal exceeds outer storage");
-        }
-        LocalStructMember nested_terminal{
-            terminal.name,
-            decode_integer(memory.bytes, absolute_offset, terminal.byte_size),
-            terminal.byte_size, terminal.is_signed, LocalValueKind::Integer};
-        nested_terminal.offset = terminal.offset;
-        nested.members.push_back(std::move(nested_terminal));
-      }
-      result.members.push_back(std::move(nested));
+      result.members.push_back(materialize_bounded_nested_structure_member(
+          memory.bytes, aggregate.byte_size, member));
       continue;
     }
 

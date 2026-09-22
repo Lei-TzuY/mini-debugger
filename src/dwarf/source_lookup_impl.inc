@@ -41,6 +41,8 @@ constexpr std::uint64_t kDwTagVariable = 0x34;
 constexpr std::uint64_t kDwAtLocation = 0x02;
 constexpr std::uint64_t kDwAtName = 0x03;
 constexpr std::uint64_t kDwAtByteSize = 0x0b;
+constexpr std::uint64_t kDwAtBitOffset = 0x0c;
+constexpr std::uint64_t kDwAtBitSize = 0x0d;
 constexpr std::uint64_t kDwAtLowPc = 0x11;
 constexpr std::uint64_t kDwAtHighPc = 0x12;
 constexpr std::uint64_t kDwAtAbstractOrigin = 0x31;
@@ -48,6 +50,7 @@ constexpr std::uint64_t kDwAtDataMemberLocation = 0x38;
 constexpr std::uint64_t kDwAtEncoding = 0x3e;
 constexpr std::uint64_t kDwAtFrameBase = 0x40;
 constexpr std::uint64_t kDwAtType = 0x49;
+constexpr std::uint64_t kDwAtDataBitOffset = 0x6b;
 constexpr std::uint64_t kDwAtStrOffsetsBase = 0x72;
 constexpr std::uint64_t kDwAtAddrBase = 0x73;
 constexpr std::uint64_t kDwAtLoclistsBase = 0x8c;
@@ -827,6 +830,119 @@ bool is_constant_member_offset_form(std::uint64_t form) {
          form == kDwFormData8;
 }
 
+std::optional<LocalStructMemberType> resolve_bounded_nested_structure_member_type(
+    const std::vector<Die>& dies, const Die& member, std::size_t outer_size) {
+  const auto* member_type = attribute(member, kDwAtType);
+  if (member_type == nullptr || member_type->form != kDwFormRef4) return std::nullopt;
+
+  std::uint64_t type_offset = member_type->number;
+  std::optional<std::size_t> structure_index;
+  for (unsigned depth = 0; depth < 16; ++depth) {
+    const auto index = die_index_by_offset(dies, type_offset);
+    if (!index) {
+      throw std::runtime_error(
+          "nested structure member type references an unknown DIE");
+    }
+    const auto& type_die = dies[*index];
+    if (type_die.tag == kDwTagTypedef || type_die.tag == kDwTagConstType) {
+      const auto* wrapped = attribute(type_die, kDwAtType);
+      if (wrapped == nullptr || wrapped->form != kDwFormRef4) {
+        throw std::runtime_error(
+            "nested structure member wrapper does not use DW_FORM_ref4");
+      }
+      type_offset = wrapped->number;
+      continue;
+    }
+    if (type_die.tag != kDwTagStructureType) return std::nullopt;
+    structure_index = *index;
+    break;
+  }
+  if (!structure_index) {
+    throw std::runtime_error("nested structure member type chain is too deep");
+  }
+
+  const auto* member_name = attribute(member, kDwAtName);
+  const auto* member_offset = attribute(member, kDwAtDataMemberLocation);
+  if (member_name == nullptr || member_name->text.empty()) {
+    throw std::runtime_error("nested structure member has no supported name");
+  }
+  if (member_offset == nullptr ||
+      !is_constant_member_offset_form(member_offset->form) ||
+      member_offset->number > std::numeric_limits<std::size_t>::max()) {
+    throw std::runtime_error(
+        "nested structure member has no supported constant offset");
+  }
+  const auto offset = static_cast<std::size_t>(member_offset->number);
+  const auto& structure = dies[*structure_index];
+  const auto* size = attribute(structure, kDwAtByteSize);
+  if (size == nullptr || size->number == 0 ||
+      size->number > kMaxLocalStructSize) {
+    throw std::runtime_error("nested structure has an unsupported byte size");
+  }
+  const auto nested_size = static_cast<std::size_t>(size->number);
+  if (offset > outer_size || nested_size > outer_size - offset) {
+    throw std::runtime_error("nested structure exceeds outer aggregate storage");
+  }
+
+  LocalStructMemberType result{member_name->text, offset, nested_size, false,
+                               LocalValueKind::Structure};
+  for (std::size_t child = 0; child < dies.size(); ++child) {
+    if (dies[child].parent != *structure_index) continue;
+    if (dies[child].tag != kDwTagMember) {
+      throw std::runtime_error(
+          "nested structure has an unsupported direct child DIE");
+    }
+    if (result.members.size() >= kMaxLocalStructMembers) {
+      throw std::runtime_error("nested structure has too many direct members");
+    }
+    const auto& terminal = dies[child];
+    if (attribute(terminal, kDwAtBitSize) != nullptr ||
+        attribute(terminal, kDwAtBitOffset) != nullptr ||
+        attribute(terminal, kDwAtDataBitOffset) != nullptr) {
+      throw std::runtime_error("nested structure terminal bit-fields are unsupported");
+    }
+    const auto* terminal_name = attribute(terminal, kDwAtName);
+    const auto* terminal_type = attribute(terminal, kDwAtType);
+    const auto* terminal_offset = attribute(terminal, kDwAtDataMemberLocation);
+    if (terminal_name == nullptr || terminal_name->text.empty()) {
+      throw std::runtime_error("nested structure terminal has no supported name");
+    }
+    if (terminal_type == nullptr || terminal_type->form != kDwFormRef4) {
+      throw std::runtime_error(
+          "nested structure terminal has no supported DW_FORM_ref4 type");
+    }
+    if (terminal_offset == nullptr ||
+        !is_constant_member_offset_form(terminal_offset->form) ||
+        terminal_offset->number > std::numeric_limits<std::size_t>::max()) {
+      throw std::runtime_error(
+          "nested structure terminal has no supported constant offset");
+    }
+    const auto terminal_byte_offset =
+        static_cast<std::size_t>(terminal_offset->number);
+    const auto integer = resolve_integer_type(dies, terminal_type->number);
+    if (terminal_byte_offset > nested_size ||
+        integer.byte_size > nested_size - terminal_byte_offset) {
+      throw std::runtime_error("nested structure terminal exceeds inner storage");
+    }
+    const auto duplicate = std::find_if(
+        result.members.begin(), result.members.end(),
+        [&](const LocalStructMemberType& existing) {
+          return existing.name == terminal_name->text;
+        });
+    if (duplicate != result.members.end()) {
+      throw std::runtime_error("nested structure has duplicate terminal member names");
+    }
+    result.members.push_back(LocalStructMemberType{
+        terminal_name->text, terminal_byte_offset, integer.byte_size,
+        integer.is_signed, LocalValueKind::Integer});
+  }
+  if (result.members.empty()) {
+    throw std::runtime_error(
+        "nested structure has no bounded terminal scalar members");
+  }
+  return result;
+}
+
 LocalValueType resolve_value_type(const std::vector<Die>& dies, std::uint64_t type_offset) {
   for (unsigned depth = 0; depth < 16; ++depth) {
     const auto index = die_index_by_offset(dies, type_offset);
@@ -891,6 +1007,12 @@ LocalValueType resolve_value_type(const std::vector<Die>& dies, std::uint64_t ty
           throw std::runtime_error("local struct member offset is too large");
         }
         const auto offset = static_cast<std::size_t>(member_offset->number);
+        if (const auto nested =
+                resolve_bounded_nested_structure_member_type(
+                    dies, member, struct_size)) {
+          members.push_back(*nested);
+          continue;
+        }
         std::uint64_t resolved_type_offset = member_type->number;
         std::optional<LocalStructMemberType> resolved_member;
         for (unsigned member_depth = 0; member_depth < 16; ++member_depth) {
@@ -1121,6 +1243,52 @@ std::uint64_t decode_integer(const std::vector<std::byte>& bytes, std::size_t of
   return value;
 }
 
+LocalStructMember materialize_bounded_nested_structure_member(
+    const std::vector<std::byte>& bytes, std::size_t outer_size,
+    const LocalStructMemberType& member) {
+  if (member.kind != LocalValueKind::Structure || member.byte_size == 0 ||
+      member.byte_size > kMaxLocalStructSize || member.offset > outer_size ||
+      member.byte_size > outer_size - member.offset || member.pointee_type ||
+      member.bit_slice || member.enum_type || member.members.empty() ||
+      member.members.size() > kMaxLocalStructMembers) {
+    throw std::logic_error(
+        "nested aggregate member violates bounded layout ownership");
+  }
+  LocalStructMember nested{member.name, 0, member.byte_size, false,
+                           LocalValueKind::Structure};
+  nested.offset = member.offset;
+  nested.members.reserve(member.members.size());
+  for (const auto& terminal : member.members) {
+    if (terminal.kind != LocalValueKind::Integer || terminal.pointee_type ||
+        terminal.bit_slice || terminal.enum_type || !terminal.members.empty() ||
+        terminal.byte_size == 0 ||
+        terminal.byte_size > sizeof(std::uint64_t) ||
+        terminal.offset > member.byte_size ||
+        terminal.byte_size > member.byte_size - terminal.offset) {
+      throw std::logic_error(
+          "nested aggregate terminal is outside the bounded scalar model");
+    }
+    if (terminal.offset >
+        std::numeric_limits<std::size_t>::max() - member.offset) {
+      throw std::overflow_error("nested aggregate terminal offset overflows");
+    }
+    const auto absolute_offset = member.offset + terminal.offset;
+    if (absolute_offset > outer_size ||
+        terminal.byte_size > outer_size - absolute_offset ||
+        absolute_offset > bytes.size() ||
+        terminal.byte_size > bytes.size() - absolute_offset) {
+      throw std::logic_error("nested aggregate terminal exceeds outer storage");
+    }
+    LocalStructMember nested_terminal{
+        terminal.name,
+        decode_integer(bytes, absolute_offset, terminal.byte_size),
+        terminal.byte_size, terminal.is_signed, LocalValueKind::Integer};
+    nested_terminal.offset = terminal.offset;
+    nested.members.push_back(std::move(nested_terminal));
+  }
+  return nested;
+}
+
 LocalScalarValue decode_structure(const ElfFile& module, std::string_view name,
                                   const LocalValueType& value_type,
                                   const std::vector<std::byte>& bytes) {
@@ -1131,6 +1299,15 @@ LocalScalarValue decode_structure(const ElfFile& module, std::string_view name,
                           false, LocalValueKind::Structure};
   result.members.reserve(value_type.members.size());
   for (const auto& member : value_type.members) {
+    if (member.kind == LocalValueKind::Structure) {
+      result.members.push_back(materialize_bounded_nested_structure_member(
+          bytes, value_type.byte_size, member));
+      continue;
+    }
+    if (!member.members.empty()) {
+      throw std::logic_error(
+          "non-structure member unexpectedly carries nested metadata");
+    }
     LocalStructMember materialized{
         member.name, decode_integer(bytes, member.offset, member.byte_size),
         member.byte_size, member.is_signed, member.kind};

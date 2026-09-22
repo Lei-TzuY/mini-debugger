@@ -308,23 +308,29 @@ inline LocalScalarValue inspect_local_aggregate_member(
   return result;
 }
 
-inline LocalScalarValue inspect_inline_local_nested_aggregate_member(
+inline LocalScalarValue inspect_local_nested_aggregate_member(
     const LocalScalarValue& aggregate, std::string_view aggregate_member_name,
     std::string_view terminal_member_name) {
   const auto inner =
       inspect_local_aggregate_member(aggregate, aggregate_member_name);
   if (inner.kind != LocalValueKind::Structure) {
     throw std::runtime_error(
-        "selected-inline outer member is not a bounded nested structure: " +
-        inner.name);
+        "outer member is not a bounded nested structure: " + inner.name);
   }
   auto terminal =
       inspect_local_aggregate_member(inner, terminal_member_name);
   if (terminal.kind == LocalValueKind::Structure) {
     throw std::runtime_error(
-        "selected-inline nested aggregate depth exceeds the bounded one-hop model");
+        "nested aggregate depth exceeds the bounded one-hop model");
   }
   return terminal;
+}
+
+inline LocalScalarValue inspect_inline_local_nested_aggregate_member(
+    const LocalScalarValue& aggregate, std::string_view aggregate_member_name,
+    std::string_view terminal_member_name) {
+  return inspect_local_nested_aggregate_member(
+      aggregate, aggregate_member_name, terminal_member_name);
 }
 
 inline LocalScalarValue inspect_inline_local_union_member(

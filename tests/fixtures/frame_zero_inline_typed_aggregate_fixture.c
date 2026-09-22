@@ -9,6 +9,7 @@ static int32_t frame_zero_inline_typed_payload = INT32_C(0x02468ace);
 static __attribute__((always_inline)) inline int
 frame_zero_inline_typed_inner(struct FrameZeroInlineTyped inline_typed,
                               int seed) {
+  __asm__ volatile("" : : "r"(&inline_typed) : "memory");
   __asm__ volatile(
       ".globl snapshot_frame_zero_inline_typed_probe\n"
       "snapshot_frame_zero_inline_typed_probe:\n"

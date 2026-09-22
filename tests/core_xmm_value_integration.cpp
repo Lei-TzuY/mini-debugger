@@ -138,10 +138,20 @@ void require_physical_union_oracle(const std::string& executable) {
           "physical union oracle did not report compiler-proven evidence");
 }
 
+void require_physical_bitfield_oracle(const std::string& executable) {
+  const auto output = run_command(
+      "python3 tests/core_physical_bitfield_dwarf_oracle.py " +
+          shell_quote(executable) + " 2>&1",
+      "physical bit-field DWARF oracle");
+  require(output.find("physical bit-field DWARF oracle passed") !=
+              std::string::npos,
+          "physical bit-field oracle did not report compiler-proven evidence");
+}
+
 std::string run_core_cli(const std::string& executable,
                          const std::string& core_path) {
   const std::string command =
-      "printf 'print typed_pointer\\nderef typed_pointer\\nmember typed_pointer payload\\nderef-member typed_pointer payload\\nmember typed_pointer marker\\nbt\\nframe 1\\nlist\\nprint caller_stack_local\\nprint caller_stack_aggregate\\naggregate-member caller_stack_aggregate second\\nprint caller_nested_aggregate\\nnested-aggregate-member caller_nested_aggregate inner terminal\\nprint caller_fixed_array\\narray-element caller_fixed_array 1\\narray-element caller_fixed_array 3\\nprint caller_union\\nunion-member caller_union signed_value\\nunion-member caller_union unsigned_value\\nunion-member caller_union missing\\nprint caller_typed_aggregate\\naggregate-member caller_typed_aggregate payload\\nderef-aggregate-member caller_typed_aggregate payload\\nquit\\n' | " +
+      "printf 'print typed_pointer\\nderef typed_pointer\\nmember typed_pointer payload\\nderef-member typed_pointer payload\\nmember typed_pointer marker\\nbt\\nframe 1\\nlist\\nprint caller_stack_local\\nprint caller_stack_aggregate\\naggregate-member caller_stack_aggregate second\\nprint caller_nested_aggregate\\nnested-aggregate-member caller_nested_aggregate inner terminal\\nprint caller_fixed_array\\narray-element caller_fixed_array 1\\narray-element caller_fixed_array 3\\nprint caller_union\\nunion-member caller_union signed_value\\nunion-member caller_union unsigned_value\\nunion-member caller_union missing\\nprint caller_bit_fields\\naggregate-member caller_bit_fields signed_bits\\naggregate-member caller_bit_fields unsigned_bits\\nprint caller_typed_aggregate\\naggregate-member caller_typed_aggregate payload\\nderef-aggregate-member caller_typed_aggregate payload\\nquit\\n' | " +
       shell_quote(executable) + " " + shell_quote(core_path) + " 2>&1";
   return run_command(command, "mdbg-core subprocess");
 }
@@ -390,6 +400,57 @@ void require_caller_union(
   }
   require(aggregate_alias_rejected,
           "physical union leaked through the structure-only aggregate selector");
+}
+
+void require_caller_bit_fields(
+    const mdbg::CoreInspectionSession& session) {
+  require(session.selected_frame_index() == 1,
+          "physical bit fields require the historical caller frame");
+  const auto aggregate = session.inspect_value("caller_bit_fields");
+  require(aggregate.name == "caller_bit_fields" &&
+              aggregate.kind == mdbg::LocalValueKind::Structure &&
+              aggregate.byte_size == sizeof(std::uint32_t) &&
+              aggregate.members.size() == 2,
+          "historical physical bit-field aggregate lost bounded structure identity");
+  require(aggregate.storage == mdbg::LocalValueStorage::SnapshotCoreMemory,
+          "historical physical bit-field aggregate lost immutable core provenance");
+
+  const auto& signed_member = aggregate.members[0];
+  require(signed_member.name == "signed_bits" &&
+              signed_member.kind == mdbg::LocalValueKind::Integer &&
+              signed_member.byte_size == sizeof(std::int32_t) &&
+              signed_member.is_signed &&
+              signed_member.bit_slice.has_value() &&
+              signed_member.bit_slice->bit_size == 5 &&
+              signed_member.raw_value == UINT64_C(0xfffffff9),
+          "historical physical signed bit field was not normalized to int32 -7");
+  const auto& unsigned_member = aggregate.members[1];
+  require(unsigned_member.name == "unsigned_bits" &&
+              unsigned_member.kind == mdbg::LocalValueKind::Integer &&
+              unsigned_member.byte_size == sizeof(std::uint32_t) &&
+              !unsigned_member.is_signed &&
+              unsigned_member.bit_slice.has_value() &&
+              unsigned_member.bit_slice->bit_size == 6 &&
+              unsigned_member.raw_value == UINT64_C(0x29),
+          "historical physical unsigned bit field was not normalized to uint32 41");
+
+  const auto selected_signed =
+      session.inspect_aggregate_member("caller_bit_fields", "signed_bits");
+  require(selected_signed.name == "caller_bit_fields.signed_bits" &&
+              selected_signed.raw_value == UINT64_C(0xfffffff9) &&
+              selected_signed.is_signed &&
+              selected_signed.byte_size == sizeof(std::int32_t) &&
+              selected_signed.storage == aggregate.storage,
+          "physical signed bit-field selection lost value/provenance");
+
+  const auto selected_unsigned =
+      session.inspect_aggregate_member("caller_bit_fields", "unsigned_bits");
+  require(selected_unsigned.name == "caller_bit_fields.unsigned_bits" &&
+              selected_unsigned.raw_value == UINT64_C(0x29) &&
+              !selected_unsigned.is_signed &&
+              selected_unsigned.byte_size == sizeof(std::uint32_t) &&
+              selected_unsigned.storage == aggregate.storage,
+          "physical unsigned bit-field selection lost value/provenance");
 }
 
 void require_caller_typed_aggregate(
@@ -671,6 +732,8 @@ int main(int argc, char** argv) {
         session.selected_frame().module_path);
     require_physical_union_oracle(
         session.selected_frame().module_path);
+    require_physical_bitfield_oracle(
+        session.selected_frame().module_path);
 
     const auto crash_fp = session.snapshot().floating_point_state(crash_tid);
     const auto sibling_fp = session.snapshot().floating_point_state(sibling_tid);
@@ -693,6 +756,7 @@ int main(int argc, char** argv) {
     require_caller_nested_aggregate(session);
     require_caller_fixed_array(session);
     require_caller_union(session);
+    require_caller_bit_fields(session);
     require_caller_typed_aggregate(session);
     const auto stale_caller_frame = session.selected_frame();
 
@@ -712,6 +776,8 @@ int main(int argc, char** argv) {
                               "sibling-thread fixed-array selection");
     require_value_unavailable(session, "caller_union",
                               "sibling-thread union selection");
+    require_value_unavailable(session, "caller_bit_fields",
+                              "sibling-thread bit-field selection");
     require_value_unavailable(session, "caller_typed_aggregate",
                               "sibling-thread typed aggregate selection");
     require_source_value(session.inspect_value("xmm_value"), kSiblingValue,
@@ -731,6 +797,8 @@ int main(int argc, char** argv) {
                               "crash-thread frame-zero fixed-array selection");
     require_value_unavailable(session, "caller_union",
                               "crash-thread frame-zero union selection");
+    require_value_unavailable(session, "caller_bit_fields",
+                              "crash-thread frame-zero bit-field selection");
     require_value_unavailable(session, "caller_typed_aggregate",
                               "crash-thread frame-zero typed aggregate selection");
     const auto recovered_resume_pc = require_caller_stack_local(session);
@@ -795,6 +863,16 @@ int main(int argc, char** argv) {
             "mdbg-core did not render the physical unsigned union member");
     require(cli_output.find("has no member named: missing") != std::string::npos,
             "mdbg-core did not deterministically reject a missing physical union member");
+    require(cli_output.find(
+                "caller_bit_fields = { signed_bits=0xfffffff9, unsigned_bits=0x29 }") !=
+                std::string::npos,
+            "mdbg-core did not render historical physical bit fields");
+    require(cli_output.find("caller_bit_fields.signed_bits = 0xfffffff9") !=
+                std::string::npos,
+            "mdbg-core did not select the physical signed bit field");
+    require(cli_output.find("caller_bit_fields.unsigned_bits = 0x29") !=
+                std::string::npos,
+            "mdbg-core did not select the physical unsigned bit field");
     require(cli_output.find("caller_typed_aggregate = { payload=0x") !=
                 std::string::npos,
             "mdbg-core did not render the physical typed aggregate");

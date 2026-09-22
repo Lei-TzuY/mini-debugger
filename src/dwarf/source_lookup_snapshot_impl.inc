@@ -159,86 +159,6 @@ std::optional<LocalValueType> resolve_snapshot_floating_type(
   throw std::runtime_error("snapshot floating type chain is too deep");
 }
 
-LocalStructMemberType resolve_snapshot_struct_member_type(
-    const std::vector<Die>& dies, const Die& member, std::size_t struct_size) {
-  const auto* member_name = attribute(member, kDwAtName);
-  const auto* member_type = attribute(member, kDwAtType);
-  const auto* member_offset = attribute(member, kDwAtDataMemberLocation);
-  if (member_name == nullptr || member_name->text.empty()) {
-    throw std::runtime_error("snapshot structure member has no supported name");
-  }
-  if (member_type == nullptr || member_type->form != kDwFormRef4) {
-    throw std::runtime_error("snapshot structure member has no supported DW_FORM_ref4 type");
-  }
-  if (member_offset == nullptr || !is_constant_member_offset_form(member_offset->form) ||
-      member_offset->number > std::numeric_limits<std::size_t>::max()) {
-    throw std::runtime_error("snapshot structure member has no supported constant offset");
-  }
-  const auto offset = static_cast<std::size_t>(member_offset->number);
-
-  std::uint64_t type_offset = member_type->number;
-  for (unsigned depth = 0; depth < 16; ++depth) {
-    const auto index = die_index_by_offset(dies, type_offset);
-    if (!index) {
-      throw std::runtime_error("snapshot structure member type references an unknown DIE");
-    }
-    const auto& type_die = dies[*index];
-    if (type_die.tag == kDwTagTypedef || type_die.tag == kDwTagConstType) {
-      const auto* wrapped = attribute(type_die, kDwAtType);
-      if (wrapped == nullptr || wrapped->form != kDwFormRef4) {
-        throw std::runtime_error(
-            "snapshot structure member wrapper does not use DW_FORM_ref4");
-      }
-      type_offset = wrapped->number;
-      continue;
-    }
-
-    if (type_die.tag == kDwTagPointerType) {
-      const auto* size = attribute(type_die, kDwAtByteSize);
-      const auto pointer_size = size == nullptr ? std::size_t{8}
-                                                : static_cast<std::size_t>(size->number);
-      if (pointer_size != sizeof(std::uintptr_t)) {
-        throw std::runtime_error(
-            "snapshot pointer-valued structure member has an unsupported byte size");
-      }
-      const auto* pointee = attribute(type_die, kDwAtType);
-      if (pointee == nullptr || pointee->form != kDwFormRef4) {
-        throw std::runtime_error(
-            "snapshot pointer-valued structure member has no supported pointee type");
-      }
-      const auto pointee_integer = resolve_integer_type(dies, pointee->number);
-      if (offset > struct_size || pointer_size > struct_size - offset) {
-        throw std::runtime_error(
-            "snapshot pointer-valued structure member exceeds aggregate storage");
-      }
-      return LocalStructMemberType{
-          member_name->text, offset, pointer_size, false, LocalValueKind::Pointer,
-          LocalPointerPointeeType{pointee_integer.byte_size,
-                                  pointee_integer.is_signed}};
-    }
-
-    if (const auto enum_type = resolve_bounded_enum_type(dies, type_offset)) {
-      if (offset > struct_size || enum_type->byte_size > struct_size - offset) {
-        throw std::runtime_error(
-            "snapshot enum structure member exceeds aggregate storage");
-      }
-      LocalStructMemberType result{member_name->text, offset, enum_type->byte_size,
-                                   enum_type->is_signed,
-                                   LocalValueKind::Enumeration};
-      result.enum_type = *enum_type;
-      return result;
-    }
-
-    const auto integer = resolve_integer_type(dies, type_offset);
-    if (offset > struct_size || integer.byte_size > struct_size - offset) {
-      throw std::runtime_error("snapshot integer structure member exceeds aggregate storage");
-    }
-    return LocalStructMemberType{member_name->text, offset, integer.byte_size,
-                                 integer.is_signed};
-  }
-  throw std::runtime_error("snapshot structure member type chain is too deep");
-}
-
 LocalValueType resolve_snapshot_structure_pointee_type(
     const std::vector<Die>& dies, std::uint64_t type_offset) {
   for (unsigned depth = 0; depth < 16; ++depth) {
@@ -274,7 +194,8 @@ LocalValueType resolve_snapshot_structure_pointee_type(
       if (result.members.size() >= kMaxLocalStructMembers) {
         throw std::runtime_error("snapshot structure pointee has too many direct members");
       }
-      auto member = resolve_snapshot_struct_member_type(dies, dies[child], struct_size);
+      auto member = resolve_bounded_direct_structure_member_type(
+          dies, dies[child], struct_size);
       const auto duplicate = std::find_if(
           result.members.begin(), result.members.end(),
           [&member](const LocalStructMemberType& existing) {

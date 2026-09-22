@@ -17,18 +17,6 @@ constexpr std::uint8_t kSnapshotDwOpR12 =
 constexpr std::uint8_t kSnapshotDwOpXmm0 =
     static_cast<std::uint8_t>(kDwOpReg0 + 17U);
 
-struct SnapshotRegisterPieceSource {
-  struct Registers {
-    std::uint64_t rdi;
-    std::uint64_t rsi;
-  };
-
-  std::uint64_t rdi;
-  std::uint64_t rsi;
-
-  [[nodiscard]] Registers registers() const noexcept { return Registers{rdi, rsi}; }
-};
-
 std::uint64_t decode_snapshot_address(const std::vector<std::byte>& expression) {
   constexpr std::size_t kAddressSize = sizeof(std::uint64_t);
   if (expression.size() != 1 + kAddressSize) {
@@ -621,10 +609,14 @@ std::optional<LocalScalarValue> inspect_snapshot_unit(
       throw std::runtime_error(
           "snapshot register-piece local requires explicit restored RDI/RSI ownership");
     }
-    const SnapshotRegisterPieceSource register_source{*frame.registers.rdi,
-                                                       *frame.registers.rsi};
+    const auto register_value = [&](std::uint8_t op) -> std::uint64_t {
+      if (op == kDwOpReg5) return *frame.registers.rdi;
+      if (op == kDwOpReg4) return *frame.registers.rsi;
+      throw std::runtime_error(
+          "snapshot historical register-piece local requested an unowned register");
+    };
     const auto bytes = evaluate_register_piece_structure(
-        location_expression, register_source, value_type);
+        location_expression, register_value, value_type);
     const ElfFile module(owner.module_file_path);
     auto result = decode_structure(module, name, value_type, bytes);
     result.module_path = owner.module_path;

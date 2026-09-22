@@ -573,8 +573,20 @@ std::optional<LocalScalarValue> inspect_inline_scalar_unit(
   }
 
   if (direct_structure) {
-    throw std::runtime_error(
-        "frame-zero selected-inline aggregate materialization is outside current compiler evidence");
+    const auto& regs = snapshot.thread(frame.thread_tid).registers;
+    const auto register_value = [&](std::uint8_t op) -> std::uint64_t {
+      if (op == kInlineDwOpRdx) return regs.rdx;
+      if (op == kInlineDwOpRcx) return regs.rcx;
+      throw std::runtime_error(
+          "frame-zero selected-inline structure requested an unproven register piece");
+    };
+    const auto bytes = evaluate_register_piece_structure(
+        expression, register_value, value_type);
+    const ElfFile module(owner.module_file_path);
+    auto result = decode_structure(module, requested_name, value_type, bytes);
+    result.module_path = owner.module_path;
+    result.storage = LocalValueStorage::SnapshotCoreRegister;
+    return result;
   }
   if (direct_union) {
     throw std::runtime_error(

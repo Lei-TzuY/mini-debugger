@@ -429,10 +429,12 @@ LocalScalarValue materialize_snapshot_memory_value(
     for (const auto& member : value_type.members) {
       LocalStructMember materialized{
           member.name,
-          decode_integer(memory.bytes, member.offset, member.integer.byte_size),
-          member.integer.byte_size, member.integer.is_signed, member.kind};
+          decode_integer(memory.bytes, member.offset, member.byte_size),
+          member.byte_size, member.is_signed, member.kind};
       materialized.offset = member.offset;
       materialized.pointee_type = member.pointee_type;
+      materialized.bit_slice = member.bit_slice;
+      materialized.enum_type = member.enum_type;
       result.members.push_back(std::move(materialized));
     }
   } else {
@@ -857,10 +859,7 @@ LocalScalarValue dereference_local_pointer(
       } else {
         throw std::runtime_error("pointer structure member kind is unsupported");
       }
-      value_type.members.push_back(AggregateMemberType{
-          member.name, member.offset,
-          IntegerType{member.byte_size, member.is_signed},
-          member.kind, member.pointee_type});
+      value_type.members.push_back(member);
     }
   } else {
     throw std::runtime_error("pointer pointee kind is unsupported for bounded dereference");

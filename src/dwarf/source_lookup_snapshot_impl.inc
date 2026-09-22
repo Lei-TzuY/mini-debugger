@@ -427,6 +427,15 @@ LocalScalarValue materialize_snapshot_memory_value(
                               LocalValueKind::Structure};
     result.members.reserve(value_type.members.size());
     for (const auto& member : value_type.members) {
+      if (member.kind == LocalValueKind::Structure) {
+        result.members.push_back(materialize_bounded_nested_structure_member(
+            memory.bytes, value_type.byte_size, member));
+        continue;
+      }
+      if (!member.members.empty()) {
+        throw std::logic_error(
+            "snapshot non-structure member unexpectedly carries nested metadata");
+      }
       LocalStructMember materialized{
           member.name,
           decode_integer(memory.bytes, member.offset, member.byte_size),

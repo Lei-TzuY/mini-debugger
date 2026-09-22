@@ -236,16 +236,19 @@ class CoreInspectionSession {
       std::string_view terminal_member_name) const {
     const auto& frame = selected_frame();
     validate_selected_frame(frame);
-    if (!selected_inline_context_) {
-      throw std::logic_error(
-          "nested aggregate member traversal requires a selected inline context");
+    LocalScalarValue aggregate;
+    if (selected_inline_context_) {
+      if (selected_inline_context_->module_path != frame.module_path) {
+        throw std::logic_error(
+            "selected inline context belongs to a different module");
+      }
+      aggregate = inspect_inline_local_value(
+          snapshot_, frame, selected_inline_context_->die_offset, name,
+          module_paths_);
+    } else {
+      aggregate = inspect_local_value(snapshot_, frame, name, module_paths_);
     }
-    if (selected_inline_context_->module_path != frame.module_path) {
-      throw std::logic_error("selected inline context belongs to a different module");
-    }
-    const auto aggregate = inspect_inline_local_value(
-        snapshot_, frame, selected_inline_context_->die_offset, name, module_paths_);
-    return inspect_inline_local_nested_aggregate_member(
+    return inspect_local_nested_aggregate_member(
         aggregate, aggregate_member_name, terminal_member_name);
   }
 

@@ -20,6 +20,8 @@ constexpr std::uint64_t kStackLocalValue = UINT64_C(0x4f3e2d1c0b9a8877);
 constexpr std::uint64_t kCallerStackLocalValue = UINT64_C(0xcafebabedeadbeef);
 constexpr std::uint64_t kCallerAggregateFirst = UINT64_C(0x1021324354657687);
 constexpr std::uint64_t kCallerAggregateSecond = UINT64_C(0x89abcdef01234567);
+constexpr std::int32_t kCallerNestedPrefix = INT32_C(0x11223344);
+constexpr std::int32_t kCallerNestedTerminal = INT32_C(0x55667788);
 constexpr std::uint64_t kCallerTypedPayload = UINT64_C(0x7766554433221100);
 constexpr std::uint64_t kCallerTypedMarker = UINT64_C(0x0badf00dcafed00d);
 constexpr std::uint64_t kPointerPointeeValue = UINT64_C(0x8877665544332211);
@@ -102,10 +104,20 @@ void require_physical_typed_aggregate_oracle(const std::string& executable) {
           "physical typed aggregate oracle did not report compiler-proven evidence");
 }
 
+void require_physical_nested_aggregate_oracle(const std::string& executable) {
+  const auto output = run_command(
+      "python3 tests/core_physical_nested_aggregate_dwarf_oracle.py " +
+          shell_quote(executable) + " 2>&1",
+      "physical nested aggregate DWARF oracle");
+  require(output.find("physical nested aggregate DWARF oracle passed") !=
+              std::string::npos,
+          "physical nested aggregate oracle did not report compiler-proven evidence");
+}
+
 std::string run_core_cli(const std::string& executable,
                          const std::string& core_path) {
   const std::string command =
-      "printf 'print typed_pointer\\nderef typed_pointer\\nmember typed_pointer payload\\nderef-member typed_pointer payload\\nmember typed_pointer marker\\nbt\\nframe 1\\nlist\\nprint caller_stack_local\\nprint caller_stack_aggregate\\naggregate-member caller_stack_aggregate second\\nprint caller_typed_aggregate\\naggregate-member caller_typed_aggregate payload\\nderef-aggregate-member caller_typed_aggregate payload\\nquit\\n' | " +
+      "printf 'print typed_pointer\\nderef typed_pointer\\nmember typed_pointer payload\\nderef-member typed_pointer payload\\nmember typed_pointer marker\\nbt\\nframe 1\\nlist\\nprint caller_stack_local\\nprint caller_stack_aggregate\\naggregate-member caller_stack_aggregate second\\nprint caller_nested_aggregate\\nnested-aggregate-member caller_nested_aggregate inner terminal\\nprint caller_typed_aggregate\\naggregate-member caller_typed_aggregate payload\\nderef-aggregate-member caller_typed_aggregate payload\\nquit\\n' | " +
       shell_quote(executable) + " " + shell_quote(core_path) + " 2>&1";
   return run_command(command, "mdbg-core subprocess");
 }
@@ -197,6 +209,55 @@ void require_caller_stack_aggregate(const mdbg::CoreInspectionSession& session) 
           "physical aggregate member selection did not recover the second member");
   require(member.storage == aggregate.storage,
           "physical aggregate member selection changed immutable provenance");
+}
+
+void require_caller_nested_aggregate(
+    const mdbg::CoreInspectionSession& session) {
+  require(session.selected_frame_index() == 1,
+          "physical nested aggregate requires the historical caller frame");
+  const auto aggregate = session.inspect_value("caller_nested_aggregate");
+  require(aggregate.name == "caller_nested_aggregate" &&
+              aggregate.kind == mdbg::LocalValueKind::Structure &&
+              aggregate.byte_size == 8 && aggregate.members.size() == 2,
+          "historical physical nested aggregate lost outer structure identity");
+
+  const auto& prefix = aggregate.members[0];
+  require(prefix.name == "prefix" &&
+              prefix.kind == mdbg::LocalValueKind::Integer &&
+              prefix.byte_size == sizeof(std::int32_t) && prefix.is_signed &&
+              prefix.raw_value == static_cast<std::uint32_t>(kCallerNestedPrefix) &&
+              prefix.offset == 0,
+          "physical nested aggregate prefix was not recovered exactly");
+
+  const auto& inner = aggregate.members[1];
+  require(inner.name == "inner" &&
+              inner.kind == mdbg::LocalValueKind::Structure &&
+              inner.byte_size == sizeof(std::int32_t) && !inner.is_signed &&
+              inner.offset == sizeof(std::int32_t) &&
+              inner.members.size() == 1,
+          "physical nested aggregate lost bounded inner structure metadata");
+  const auto& terminal = inner.members.front();
+  require(terminal.name == "terminal" &&
+              terminal.kind == mdbg::LocalValueKind::Integer &&
+              terminal.byte_size == sizeof(std::int32_t) &&
+              terminal.is_signed && terminal.offset == 0 &&
+              terminal.raw_value ==
+                  static_cast<std::uint32_t>(kCallerNestedTerminal),
+          "physical nested aggregate terminal was not recovered exactly");
+  require(aggregate.storage == mdbg::LocalValueStorage::SnapshotCoreMemory,
+          "physical nested aggregate lost immutable core provenance");
+
+  const auto selected = session.inspect_nested_aggregate_member(
+      "caller_nested_aggregate", "inner", "terminal");
+  require(selected.name == "caller_nested_aggregate.inner.terminal" &&
+              selected.kind == mdbg::LocalValueKind::Integer &&
+              selected.byte_size == sizeof(std::int32_t) &&
+              selected.is_signed &&
+              selected.raw_value ==
+                  static_cast<std::uint32_t>(kCallerNestedTerminal),
+          "physical nested aggregate traversal did not recover terminal");
+  require(selected.storage == aggregate.storage,
+          "physical nested aggregate traversal changed immutable provenance");
 }
 
 void require_caller_typed_aggregate(
@@ -472,6 +533,8 @@ int main(int argc, char** argv) {
         session.selected_frame().module_path);
     require_physical_typed_aggregate_oracle(
         session.selected_frame().module_path);
+    require_physical_nested_aggregate_oracle(
+        session.selected_frame().module_path);
 
     const auto crash_fp = session.snapshot().floating_point_state(crash_tid);
     const auto sibling_fp = session.snapshot().floating_point_state(sibling_tid);
@@ -491,6 +554,7 @@ int main(int argc, char** argv) {
     require_typed_pointer_member_traversal(session);
     const auto caller_resume_pc = require_caller_stack_local(session);
     require_caller_stack_aggregate(session);
+    require_caller_nested_aggregate(session);
     require_caller_typed_aggregate(session);
     const auto stale_caller_frame = session.selected_frame();
 
@@ -504,6 +568,8 @@ int main(int argc, char** argv) {
                               "sibling-thread frame selection");
     require_value_unavailable(session, "caller_stack_aggregate",
                               "sibling-thread physical aggregate selection");
+    require_value_unavailable(session, "caller_nested_aggregate",
+                              "sibling-thread nested aggregate selection");
     require_value_unavailable(session, "caller_typed_aggregate",
                               "sibling-thread typed aggregate selection");
     require_source_value(session.inspect_value("xmm_value"), kSiblingValue,
@@ -517,10 +583,13 @@ int main(int argc, char** argv) {
                               "crash-thread frame-zero selection");
     require_value_unavailable(session, "caller_stack_aggregate",
                               "crash-thread frame-zero aggregate selection");
+    require_value_unavailable(session, "caller_nested_aggregate",
+                              "crash-thread frame-zero nested aggregate selection");
     require_value_unavailable(session, "caller_typed_aggregate",
                               "crash-thread frame-zero typed aggregate selection");
     const auto recovered_resume_pc = require_caller_stack_local(session);
     require_caller_stack_aggregate(session);
+    require_caller_nested_aggregate(session);
     require_caller_typed_aggregate(session);
     require(recovered_resume_pc == caller_resume_pc,
             "lookup-PC normalization silently changed immutable unwind sequencing");
@@ -553,6 +622,10 @@ int main(int argc, char** argv) {
                 "caller_stack_aggregate.second = 0x89abcdef01234567") !=
                 std::string::npos,
             "mdbg-core did not expose physical aggregate member selection");
+    require(cli_output.find(
+                "caller_nested_aggregate.inner.terminal = 0x55667788") !=
+                std::string::npos,
+            "mdbg-core did not expose physical nested aggregate traversal");
     require(cli_output.find("caller_typed_aggregate = { payload=0x") !=
                 std::string::npos,
             "mdbg-core did not render the physical typed aggregate");

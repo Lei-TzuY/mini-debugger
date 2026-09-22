@@ -92,6 +92,27 @@ def require_integer_member(member, by_offset, name, encoding, bit_size):
     return absolute, spelling
 
 
+def exact_fbreg_location(path, location, probe, context):
+    direct = re.fullmatch(
+        r"(?:\d+\s+byte block:\s+(?:[0-9a-fA-F]{1,2}\s+)+)?"
+        r"\(?\s*(DW_OP_fbreg:\s*-?\d+)\s*\)?",
+        location,
+    )
+    if direct:
+        expression = re.sub(r"\s+", " ", direct.group(1)).strip()
+        return expression, "direct-exprloc"
+
+    expression, begin, end, _ = active_debug_loc_expression(
+        path, location, probe, context
+    )
+    if not re.fullmatch(r"DW_OP_fbreg: -?\d+", expression):
+        raise RuntimeError(
+            f"{context} active compiler location is not one exact "
+            f"DW_OP_fbreg operation: {expression}"
+        )
+    return expression, f"loclist=[0x{begin:x},0x{end:x})"
+
+
 def require_binding(path, probe, records, by_offset):
     candidates = []
     for position, record in enumerate(records):
@@ -116,14 +137,9 @@ def require_binding(path, probe, records, by_offset):
     location = variable["attrs"].get("location")
     if not location:
         raise RuntimeError("inline_bit_fields has no compiler-produced DW_AT_location")
-    expression, begin, end, _ = active_debug_loc_expression(
+    expression, ownership = exact_fbreg_location(
         path, location, probe, "inline_bit_fields"
     )
-    if not re.fullmatch(r"DW_OP_fbreg: -?\d+", expression):
-        raise RuntimeError(
-            "inline_bit_fields active compiler location is not one exact "
-            "DW_OP_fbreg operation: " + expression
-        )
 
     type_text = resolved_attr(variable, by_offset, "type")
     if not type_text:
@@ -161,8 +177,8 @@ def require_binding(path, probe, records, by_offset):
 
     print(
         "frame-zero inline bit-field DWARF oracle passed: "
-        f"die=0x{variable['offset']:x} range=[0x{begin:x},0x{end:x}) "
-        f"location={expression} size=4 "
+        f"die=0x{variable['offset']:x} probe=0x{probe:x} "
+        f"ownership={ownership} location={expression} size=4 "
         f"signed_bits:int32/5 {signed_spelling}; "
         f"unsigned_bits:uint32/6 {unsigned_spelling}"
     )

@@ -398,9 +398,10 @@ std::optional<LocalValueType> selected_inline_direct_structure_type(
       } else {
         const auto nested = resolve_bounded_nested_structure_member_type(
             dies, member_die, struct_size);
-        member = nested ? std::move(*nested)
-                        : resolve_snapshot_struct_member_type(dies, member_die,
-                                                              struct_size);
+        member = nested
+                     ? std::move(*nested)
+                     : resolve_bounded_direct_structure_member_type(
+                           dies, member_die, struct_size);
       }
 
       const auto duplicate = std::find_if(

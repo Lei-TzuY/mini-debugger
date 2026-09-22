@@ -1393,6 +1393,97 @@ std::optional<LocalStructMemberType> resolve_bounded_nested_structure_member_typ
   return result;
 }
 
+LocalStructMemberType resolve_bounded_direct_structure_member_type(
+    const std::vector<Die>& dies, const Die& member, std::size_t struct_size) {
+  const auto* member_name = attribute(member, kDwAtName);
+  const auto* member_type = attribute(member, kDwAtType);
+  const auto* member_offset = attribute(member, kDwAtDataMemberLocation);
+  if (member_name == nullptr || member_name->text.empty()) {
+    throw std::runtime_error(
+        "bounded direct structure member has no supported name");
+  }
+  if (member_type == nullptr || member_type->form != kDwFormRef4) {
+    throw std::runtime_error(
+        "bounded direct structure member has no supported DW_FORM_ref4 type");
+  }
+  if (member_offset == nullptr ||
+      !is_constant_member_offset_form(member_offset->form) ||
+      member_offset->number > std::numeric_limits<std::size_t>::max()) {
+    throw std::runtime_error(
+        "bounded direct structure member has no supported constant offset");
+  }
+  const auto offset = static_cast<std::size_t>(member_offset->number);
+
+  std::uint64_t type_offset = member_type->number;
+  for (unsigned depth = 0; depth < 16; ++depth) {
+    const auto index = die_index_by_offset(dies, type_offset);
+    if (!index) {
+      throw std::runtime_error(
+          "bounded direct structure member type references an unknown DIE");
+    }
+    const auto& type_die = dies[*index];
+    if (type_die.tag == kDwTagTypedef || type_die.tag == kDwTagConstType) {
+      const auto* wrapped = attribute(type_die, kDwAtType);
+      if (wrapped == nullptr || wrapped->form != kDwFormRef4) {
+        throw std::runtime_error(
+            "bounded direct structure member wrapper does not use DW_FORM_ref4");
+      }
+      type_offset = wrapped->number;
+      continue;
+    }
+
+    if (type_die.tag == kDwTagPointerType) {
+      const auto* size = attribute(type_die, kDwAtByteSize);
+      const auto pointer_size =
+          size == nullptr ? std::size_t{8}
+                          : static_cast<std::size_t>(size->number);
+      if (pointer_size != sizeof(std::uintptr_t)) {
+        throw std::runtime_error(
+            "bounded direct pointer member has an unsupported byte size");
+      }
+      const auto* pointee = attribute(type_die, kDwAtType);
+      if (pointee == nullptr || pointee->form != kDwFormRef4) {
+        throw std::runtime_error(
+            "bounded direct pointer member has no supported pointee type");
+      }
+      const auto pointee_integer =
+          resolve_integer_type(dies, pointee->number);
+      if (offset > struct_size || pointer_size > struct_size - offset) {
+        throw std::runtime_error(
+            "bounded direct pointer member exceeds aggregate storage");
+      }
+      return LocalStructMemberType{
+          member_name->text, offset, pointer_size, false,
+          LocalValueKind::Pointer,
+          LocalPointerPointeeType{pointee_integer.byte_size,
+                                  pointee_integer.is_signed}};
+    }
+
+    if (const auto enum_type = resolve_bounded_enum_type(dies, type_offset)) {
+      if (offset > struct_size ||
+          enum_type->byte_size > struct_size - offset) {
+        throw std::runtime_error(
+            "bounded direct enum member exceeds aggregate storage");
+      }
+      LocalStructMemberType result{
+          member_name->text, offset, enum_type->byte_size,
+          enum_type->is_signed, LocalValueKind::Enumeration};
+      result.enum_type = *enum_type;
+      return result;
+    }
+
+    const auto integer = resolve_integer_type(dies, type_offset);
+    if (offset > struct_size || integer.byte_size > struct_size - offset) {
+      throw std::runtime_error(
+          "bounded direct integer member exceeds aggregate storage");
+    }
+    return LocalStructMemberType{
+        member_name->text, offset, integer.byte_size, integer.is_signed};
+  }
+  throw std::runtime_error(
+      "bounded direct structure member type chain is too deep");
+}
+
 LocalValueType resolve_value_type(const std::vector<Die>& dies, std::uint64_t type_offset) {
   for (unsigned depth = 0; depth < 16; ++depth) {
     const auto index = die_index_by_offset(dies, type_offset);
@@ -1472,111 +1563,15 @@ LocalValueType resolve_value_type(const std::vector<Die>& dies, std::uint64_t ty
           members.push_back(*bit_field);
           continue;
         }
-        const auto* member_name = attribute(member, kDwAtName);
-        const auto* member_type = attribute(member, kDwAtType);
-        const auto* member_offset = attribute(member, kDwAtDataMemberLocation);
-        if (member_name == nullptr || member_name->text.empty()) {
-          throw std::runtime_error("local struct member has no supported name");
-        }
-        if (member_type == nullptr || member_type->form != kDwFormRef4) {
-          throw std::runtime_error("local struct member has no supported DW_FORM_ref4 type");
-        }
-        if (member_offset == nullptr || !is_constant_member_offset_form(member_offset->form)) {
-          throw std::runtime_error("local struct member has no supported constant offset");
-        }
-        if (member_offset->number > std::numeric_limits<std::size_t>::max()) {
-          throw std::runtime_error("local struct member offset is too large");
-        }
-        const auto offset = static_cast<std::size_t>(member_offset->number);
         if (const auto nested =
                 resolve_bounded_nested_structure_member_type(
                     dies, member, struct_size)) {
           members.push_back(*nested);
           continue;
         }
-        std::uint64_t resolved_type_offset = member_type->number;
-        std::optional<LocalStructMemberType> resolved_member;
-        for (unsigned member_depth = 0; member_depth < 16; ++member_depth) {
-          const auto member_type_index =
-              die_index_by_offset(dies, resolved_type_offset);
-          if (!member_type_index) {
-            throw std::runtime_error(
-                "local struct member type references an unknown DIE");
-          }
-          const auto& resolved_type = dies[*member_type_index];
-          if (resolved_type.tag == kDwTagTypedef ||
-              resolved_type.tag == kDwTagConstType) {
-            const auto* wrapped = attribute(resolved_type, kDwAtType);
-            if (wrapped == nullptr || wrapped->form != kDwFormRef4) {
-              throw std::runtime_error(
-                  "local struct member wrapper does not use DW_FORM_ref4");
-            }
-            resolved_type_offset = wrapped->number;
-            continue;
-          }
-          if (resolved_type.tag == kDwTagEnumerationType) {
-            const auto enum_type =
-                resolve_bounded_enum_type(dies, resolved_type_offset);
-            if (!enum_type) {
-              throw std::logic_error(
-                  "enumeration member DIE did not resolve as a bounded enum");
-            }
-            if (offset > struct_size ||
-                enum_type->byte_size > struct_size - offset) {
-              throw std::runtime_error(
-                  "local struct enum member extends past aggregate storage");
-            }
-            LocalStructMemberType member_type{
-                member_name->text, offset, enum_type->byte_size,
-                enum_type->is_signed, LocalValueKind::Enumeration};
-            member_type.enum_type = *enum_type;
-            resolved_member = std::move(member_type);
-            break;
-          }
-          if (resolved_type.tag == kDwTagPointerType) {
-            const auto* pointer_size_attr =
-                attribute(resolved_type, kDwAtByteSize);
-            const auto pointer_size =
-                pointer_size_attr == nullptr
-                    ? std::size_t{8}
-                    : static_cast<std::size_t>(pointer_size_attr->number);
-            if (pointer_size != sizeof(std::uintptr_t)) {
-              throw std::runtime_error(
-                  "local struct pointer member has an unsupported byte size");
-            }
-            const auto* pointee = attribute(resolved_type, kDwAtType);
-            if (pointee == nullptr || pointee->form != kDwFormRef4) {
-              throw std::runtime_error(
-                  "local struct pointer member has no supported pointee");
-            }
-            const auto pointee_integer =
-                resolve_integer_type(dies, pointee->number);
-            if (offset > struct_size || pointer_size > struct_size - offset) {
-              throw std::runtime_error(
-                  "local struct pointer member extends past aggregate storage");
-            }
-            resolved_member = LocalStructMemberType{
-                member_name->text, offset, pointer_size, false,
-                LocalValueKind::Pointer,
-                LocalPointerPointeeType{pointee_integer.byte_size,
-                                        pointee_integer.is_signed}};
-            break;
-          }
-          const auto integer =
-              resolve_integer_type(dies, resolved_type_offset);
-          if (offset > struct_size || integer.byte_size > struct_size - offset) {
-            throw std::runtime_error(
-                "local struct integer member extends past aggregate storage");
-          }
-          resolved_member = LocalStructMemberType{
-              member_name->text, offset, integer.byte_size, integer.is_signed};
-          break;
-        }
-        if (!resolved_member) {
-          throw std::runtime_error(
-              "local struct member type chain is too deep");
-        }
-        members.push_back(std::move(*resolved_member));
+        members.push_back(
+            resolve_bounded_direct_structure_member_type(
+                dies, member, struct_size));
       }
       if (members.empty()) {
         throw std::runtime_error("local struct has no supported direct members");

@@ -1916,6 +1916,52 @@ std::vector<std::byte> evaluate_register_piece_value(
     }
   };
 
+  if (value_type.byte_size == 4) {
+    const bool proven_union =
+        value_type.kind == LocalValueKind::Union &&
+        value_type.members.size() == 2 &&
+        !value_type.array_type && !value_type.enum_type &&
+        value_type.members[0].name == "signed_value" &&
+        value_type.members[1].name == "unsigned_value" &&
+        value_type.members[0].kind == LocalValueKind::Integer &&
+        value_type.members[1].kind == LocalValueKind::Integer &&
+        value_type.members[0].offset == 0 &&
+        value_type.members[1].offset == 0 &&
+        value_type.members[0].byte_size == 4 &&
+        value_type.members[1].byte_size == 4 &&
+        value_type.members[0].is_signed &&
+        !value_type.members[1].is_signed &&
+        !value_type.members[0].pointee_type &&
+        !value_type.members[1].pointee_type &&
+        !value_type.members[0].bit_slice &&
+        !value_type.members[1].bit_slice &&
+        !value_type.members[0].enum_type &&
+        !value_type.members[1].enum_type &&
+        value_type.members[0].members.empty() &&
+        value_type.members[1].members.empty();
+    if (!proven_union) {
+      throw std::runtime_error(
+          "4-byte register value requires the compiler-proven signed/unsigned union shape");
+    }
+
+    const auto first = read_op("the union register");
+    if (first != kDwOpReg1 && first != kDwOpReg2) {
+      throw std::runtime_error(
+          "4-byte union register requires compiler-proven RDX or RCX ownership");
+    }
+    if (first == kDwOpReg1) {
+      require_piece(4, "GCC union 4-byte piece");
+    }
+    if (cursor != expression.size()) {
+      throw std::runtime_error(
+          "unsupported trailing operations after 4-byte register union");
+    }
+
+    std::vector<std::byte> bytes(4);
+    store_piece(bytes, 0, 4, register_value(first));
+    return bytes;
+  }
+
   if (value_type.byte_size == 16) {
     if (value_type.kind != LocalValueKind::Structure) {
       throw std::runtime_error(
@@ -1998,7 +2044,7 @@ std::vector<std::byte> evaluate_register_piece_value(
   }
 
   throw std::runtime_error(
-      "register-piece local is outside the proven 8-byte or 16-byte typed-value shapes");
+      "register-piece local is outside the proven 4-byte union, 8-byte, or 16-byte typed-value shapes");
 }
 
 std::uint64_t read_integer(const Debugger& debugger, std::uint64_t address,

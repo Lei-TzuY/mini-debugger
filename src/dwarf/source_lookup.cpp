@@ -572,7 +572,7 @@ std::optional<LocalScalarValue> inspect_inline_scalar_unit(
     return result;
   }
 
-  if (direct_structure || direct_array) {
+  if (direct_structure || direct_array || direct_union) {
     const auto& regs = snapshot.thread(frame.thread_tid).registers;
     const auto register_value = [&](std::uint8_t op) -> std::uint64_t {
       if (op == kInlineDwOpRdx) return regs.rdx;
@@ -587,16 +587,15 @@ std::optional<LocalScalarValue> inspect_inline_scalar_unit(
       const ElfFile module(owner.module_file_path);
       result = decode_structure(module, requested_name, value_type, bytes);
       result.module_path = owner.module_path;
-    } else {
+    } else if (direct_array) {
       result = materialize_bounded_array_bytes(
+          owner, requested_name, value_type, bytes);
+    } else {
+      result = materialize_bounded_union_bytes(
           owner, requested_name, value_type, bytes);
     }
     result.storage = LocalValueStorage::SnapshotCoreRegister;
     return result;
-  }
-  if (direct_union) {
-    throw std::runtime_error(
-        "frame-zero selected-inline union materialization is outside current compiler evidence");
   }
   if (expression.size() != 1) {
     throw std::runtime_error(

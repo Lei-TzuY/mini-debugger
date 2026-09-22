@@ -353,6 +353,43 @@ LocalScalarValue materialize_bounded_array_bytes(
   return result;
 }
 
+LocalScalarValue materialize_bounded_union_bytes(
+    const SnapshotModuleAddress& owner, std::string_view name,
+    const LocalValueType& value_type, const std::vector<std::byte>& bytes) {
+  if (value_type.kind != LocalValueKind::Union ||
+      value_type.byte_size == 0 ||
+      value_type.byte_size > kMaxLocalStructSize ||
+      value_type.members.empty() ||
+      value_type.members.size() > kMaxLocalStructMembers ||
+      value_type.array_type || value_type.enum_type ||
+      bytes.size() != value_type.byte_size) {
+    throw std::runtime_error(
+        "bounded union bytes exceed the canonical overlapping-storage model");
+  }
+
+  LocalScalarValue result{owner.module_path, std::string(name), 0,
+                          value_type.byte_size, false,
+                          LocalValueKind::Union};
+  result.members.reserve(value_type.members.size());
+  for (const auto& member : value_type.members) {
+    if (member.offset != 0 ||
+        member.kind != LocalValueKind::Integer ||
+        member.pointee_type || member.bit_slice || member.enum_type ||
+        !member.members.empty() || member.byte_size == 0 ||
+        member.byte_size > sizeof(std::uint64_t) ||
+        member.byte_size > value_type.byte_size) {
+      throw std::logic_error(
+          "bounded union member violates shared-storage semantics");
+    }
+    LocalStructMember materialized{
+        member.name, decode_integer(bytes, 0, member.byte_size),
+        member.byte_size, member.is_signed, LocalValueKind::Integer};
+    materialized.offset = 0;
+    result.members.push_back(std::move(materialized));
+  }
+  return result;
+}
+
 LocalScalarValue materialize_snapshot_memory_value(
     const SnapshotModuleAddress& owner, std::string_view name,
     const LocalValueType& value_type, const SnapshotMemoryRead& memory,
@@ -390,35 +427,8 @@ LocalScalarValue materialize_snapshot_memory_value(
       result.members.push_back(std::move(materialized));
     }
   } else if (value_type.kind == LocalValueKind::Union) {
-    if (value_type.byte_size == 0 ||
-        value_type.byte_size > kMaxLocalStructSize ||
-        value_type.members.empty() ||
-        value_type.members.size() > kMaxLocalStructMembers ||
-        value_type.array_type ||
-        memory.bytes.size() != value_type.byte_size) {
-      throw std::runtime_error(
-          "snapshot union bytes exceed the bounded overlapping-storage model");
-    }
-    result = LocalScalarValue{owner.module_path, std::string(name), 0,
-                              value_type.byte_size, false,
-                              LocalValueKind::Union};
-    result.members.reserve(value_type.members.size());
-    for (const auto& member : value_type.members) {
-      if (member.offset != 0 ||
-          member.kind != LocalValueKind::Integer ||
-          member.pointee_type || member.bit_slice || member.enum_type ||
-          !member.members.empty() || member.byte_size == 0 ||
-          member.byte_size > sizeof(std::uint64_t) ||
-          member.byte_size > value_type.byte_size) {
-        throw std::logic_error(
-            "snapshot union member violates bounded shared-storage semantics");
-      }
-      LocalStructMember materialized{
-          member.name, decode_integer(memory.bytes, 0, member.byte_size),
-          member.byte_size, member.is_signed, LocalValueKind::Integer};
-      materialized.offset = 0;
-      result.members.push_back(std::move(materialized));
-    }
+    result = materialize_bounded_union_bytes(
+        owner, name, value_type, memory.bytes);
   } else if (value_type.kind == LocalValueKind::Array) {
     result = materialize_bounded_array_bytes(
         owner, name, value_type, memory.bytes);

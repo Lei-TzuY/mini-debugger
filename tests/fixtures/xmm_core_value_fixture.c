@@ -119,6 +119,10 @@ __attribute__((noinline, noreturn)) static void caller_with_stack_local(void) {
     CallerPhysicalReady = 7,
     CallerPhysicalBusy = 42,
   };
+  struct CallerPhysicalEnumAggregate {
+    int32_t direct;
+    enum CallerPhysicalMode mode;
+  };
   uint64_t caller_stack_local = UINT64_C(0xcafebabedeadbeef);
   uint64_t caller_typed_payload = CALLER_TYPED_PAYLOAD_VALUE;
   struct CallerStackAggregate caller_stack_aggregate = {
@@ -132,13 +136,15 @@ __attribute__((noinline, noreturn)) static void caller_with_stack_local(void) {
   struct CallerPhysicalBitFields caller_bit_fields = {
       .signed_bits = -7, .unsigned_bits = 41};
   enum CallerPhysicalMode caller_mode = CallerPhysicalBusy;
+  struct CallerPhysicalEnumAggregate caller_enum_aggregate = {
+      INT32_C(0x31415926), CallerPhysicalBusy};
   struct CallerTypedAggregate caller_typed_aggregate = {
       &caller_typed_payload, CALLER_TYPED_MARKER_VALUE};
   __asm__ volatile("" : "+m"(caller_stack_local), "+m"(caller_typed_payload),
                    "+m"(caller_stack_aggregate), "+m"(caller_nested_aggregate),
                    "+m"(caller_fixed_array), "+m"(caller_union),
                    "+m"(caller_bit_fields), "+m"(caller_mode),
-                   "+m"(caller_typed_aggregate)
+                   "+m"(caller_enum_aggregate), "+m"(caller_typed_aggregate)
                    :
                    : "memory");
   crash_target();
@@ -149,7 +155,7 @@ __attribute__((noinline, noreturn)) static void caller_with_stack_local(void) {
         "+m"(caller_stack_aggregate), "+m"(caller_nested_aggregate),
         "+m"(caller_fixed_array), "+m"(caller_union),
         "+m"(caller_bit_fields), "+m"(caller_mode),
-        "+m"(caller_typed_aggregate)
+        "+m"(caller_enum_aggregate), "+m"(caller_typed_aggregate)
       :
       : "memory");
   __builtin_unreachable();

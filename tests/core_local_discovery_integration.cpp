@@ -159,8 +159,10 @@ void test_inline_artifact_gate(const std::string& integration_path,
                               " tests/fixtures/inline_core_fixture.c -o " +
                               shell_quote(fixture.string()) + " 2>&1";
   (void)run_command(compile);
-  (void)run_command("python3 tests/core_inline_dwarf_oracle.py " +
-                    shell_quote(fixture.string()) + " 2>&1");
+  const auto inline_oracle =
+      run_command("python3 tests/core_inline_dwarf_oracle.py " +
+                  shell_quote(fixture.string()) + " 2>&1");
+  std::cout << inline_oracle;
 
   const pid_t child = ::fork();
   if (child == -1) throw std::runtime_error("failed to fork optimized inline fixture");

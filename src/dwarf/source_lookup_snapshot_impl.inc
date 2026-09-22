@@ -17,9 +17,6 @@ constexpr std::uint8_t kSnapshotDwOpR12 =
 constexpr std::uint8_t kSnapshotDwOpXmm0 =
     static_cast<std::uint8_t>(kDwOpReg0 + 17U);
 
-std::optional<LocalEnumType> selected_inline_enum_type(
-    const std::vector<Die>& dies, std::uint64_t type_offset);
-
 struct SnapshotRegisterPieceSource {
   struct Registers {
     std::uint64_t rdi;
@@ -220,7 +217,7 @@ LocalStructMemberType resolve_snapshot_struct_member_type(
                                   pointee_integer.is_signed}};
     }
 
-    if (const auto enum_type = selected_inline_enum_type(dies, type_offset)) {
+    if (const auto enum_type = resolve_bounded_enum_type(dies, type_offset)) {
       if (offset > struct_size || enum_type->byte_size > struct_size - offset) {
         throw std::runtime_error(
             "snapshot enum structure member exceeds aggregate storage");
@@ -512,10 +509,25 @@ LocalScalarValue materialize_snapshot_memory_value(
       throw std::logic_error(
           "non-array snapshot value unexpectedly carries array metadata");
     }
+    if (value_type.kind == LocalValueKind::Enumeration) {
+      if (!value_type.enum_type ||
+          value_type.enum_type->byte_size != value_type.byte_size ||
+          value_type.enum_type->is_signed != value_type.is_signed ||
+          value_type.enum_type->enumerators.empty()) {
+        throw std::logic_error(
+            "snapshot enum value lost bounded compiler type metadata");
+      }
+    } else if (value_type.enum_type) {
+      throw std::logic_error(
+          "non-enum snapshot value unexpectedly carries enum metadata");
+    }
     result = LocalScalarValue{
         owner.module_path, std::string(name),
         decode_snapshot_scalar(memory, value_type.byte_size), value_type.byte_size,
         value_type.is_signed, value_type.kind};
+    if (value_type.kind == LocalValueKind::Enumeration) {
+      result.enum_type = value_type.enum_type;
+    }
   }
 
   if (memory.provenance == SnapshotMemoryProvenance::Core) {
@@ -707,6 +719,7 @@ std::optional<LocalScalarValue> inspect_snapshot_unit(
     if (value_type.kind == LocalValueKind::Structure ||
         value_type.kind == LocalValueKind::Union ||
         value_type.kind == LocalValueKind::Array ||
+        value_type.kind == LocalValueKind::Enumeration ||
         value_type.kind == LocalValueKind::Floating || value_type.byte_size == 0 ||
         value_type.byte_size > sizeof(std::uint64_t)) {
       throw std::runtime_error(
@@ -733,6 +746,7 @@ std::optional<LocalScalarValue> inspect_snapshot_unit(
     if (value_type.kind == LocalValueKind::Structure ||
         value_type.kind == LocalValueKind::Union ||
         value_type.kind == LocalValueKind::Array ||
+        value_type.kind == LocalValueKind::Enumeration ||
         value_type.kind == LocalValueKind::Floating || value_type.byte_size == 0 ||
         value_type.byte_size > sizeof(std::uint64_t)) {
       throw std::runtime_error(
@@ -752,11 +766,20 @@ std::optional<LocalScalarValue> inspect_snapshot_unit(
   }
 
   if (opcode == kDwOpFbreg) {
-    if (value_type.kind == LocalValueKind::Integer) {
+    if (value_type.kind == LocalValueKind::Integer ||
+        value_type.kind == LocalValueKind::Enumeration) {
       if (value_type.byte_size == 0 ||
           value_type.byte_size > sizeof(std::uint64_t)) {
         throw std::runtime_error(
-            "snapshot DW_OP_fbreg integer width exceeds the bounded scalar model");
+            "snapshot DW_OP_fbreg scalar width exceeds the bounded model");
+      }
+      if (value_type.kind == LocalValueKind::Enumeration &&
+          (!value_type.enum_type ||
+           value_type.enum_type->byte_size != value_type.byte_size ||
+           value_type.enum_type->is_signed != value_type.is_signed ||
+           value_type.enum_type->enumerators.empty())) {
+        throw std::runtime_error(
+            "snapshot DW_OP_fbreg enum lost bounded compiler metadata");
       }
     } else if (value_type.kind == LocalValueKind::Structure) {
       if (value_type.byte_size == 0 ||
@@ -790,7 +813,7 @@ std::optional<LocalScalarValue> inspect_snapshot_unit(
       }
     } else {
       throw std::runtime_error(
-          "snapshot DW_OP_fbreg requires a bounded integer, structure, fixed array, or union local");
+          "snapshot DW_OP_fbreg requires a bounded integer, enum, structure, fixed array, or union local");
     }
     const auto base = snapshot_frame_base(
         dies, *subprogram, snapshot, frame, module_paths, owner);
@@ -810,6 +833,7 @@ std::optional<LocalScalarValue> inspect_snapshot_unit(
     if (value_type.kind == LocalValueKind::Structure ||
         value_type.kind == LocalValueKind::Union ||
         value_type.kind == LocalValueKind::Array ||
+        value_type.kind == LocalValueKind::Enumeration ||
         value_type.kind == LocalValueKind::Floating) {
       throw std::runtime_error(
           "snapshot caller DW_OP_breg3 requires an integer/pointer scalar value");
@@ -839,6 +863,10 @@ std::optional<LocalScalarValue> inspect_snapshot_unit(
   if (value_type.kind == LocalValueKind::Array) {
     throw std::runtime_error(
         "snapshot DW_OP_addr fixed-array materialization is outside current compiler evidence");
+  }
+  if (value_type.kind == LocalValueKind::Enumeration) {
+    throw std::runtime_error(
+        "snapshot DW_OP_addr enum materialization is outside current compiler evidence");
   }
   if (value_type.kind == LocalValueKind::Union) {
     throw std::runtime_error(

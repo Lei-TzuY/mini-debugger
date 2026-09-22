@@ -77,6 +77,7 @@ struct LocalValueType {
   LocalValueKind kind{LocalValueKind::Integer};
   std::vector<LocalStructMemberType> members{};
   std::optional<LocalArrayType> array_type{};
+  std::optional<LocalEnumType> enum_type{};
 };
 
 struct LocalStructMember {

@@ -27,6 +27,7 @@ namespace mdbg {
 namespace {
 
 constexpr std::uint64_t kDwTagArrayType = 0x01;
+constexpr std::uint64_t kDwTagEnumerationType = 0x04;
 constexpr std::uint64_t kDwTagFormalParameter = 0x05;
 constexpr std::uint64_t kDwTagMember = 0x0d;
 constexpr std::uint64_t kDwTagLexicalBlock = 0x0b;
@@ -38,6 +39,7 @@ constexpr std::uint64_t kDwTagInlinedSubroutine = 0x1d;
 constexpr std::uint64_t kDwTagSubrangeType = 0x21;
 constexpr std::uint64_t kDwTagBaseType = 0x24;
 constexpr std::uint64_t kDwTagConstType = 0x26;
+constexpr std::uint64_t kDwTagEnumerator = 0x28;
 constexpr std::uint64_t kDwTagSubprogram = 0x2e;
 constexpr std::uint64_t kDwTagVariable = 0x34;
 
@@ -46,6 +48,7 @@ constexpr std::uint64_t kDwAtName = 0x03;
 constexpr std::uint64_t kDwAtByteSize = 0x0b;
 constexpr std::uint64_t kDwAtBitOffset = 0x0c;
 constexpr std::uint64_t kDwAtBitSize = 0x0d;
+constexpr std::uint64_t kDwAtConstValue = 0x1c;
 constexpr std::uint64_t kDwAtLowPc = 0x11;
 constexpr std::uint64_t kDwAtHighPc = 0x12;
 constexpr std::uint64_t kDwAtLowerBound = 0x22;
@@ -112,6 +115,7 @@ constexpr std::uint64_t kDwAteUnsigned = 0x07;
 constexpr std::size_t kMaxLocalStructSize = 256;
 constexpr std::size_t kMaxLocalStructMembers = 32;
 constexpr std::size_t kMaxLocalArrayElements = 64;
+constexpr std::size_t kMaxLocalEnumEntries = 64;
 constexpr unsigned kMaxAbstractOriginDepth = 8;
 
 struct DebugSections {
@@ -832,6 +836,138 @@ IntegerType resolve_integer_type(const std::vector<Die>& dies, std::uint64_t typ
   throw std::runtime_error("local variable typedef/const chain is too deep");
 }
 
+bool bounded_enum_constant_form(std::uint64_t form) {
+  return form == kDwFormData1 || form == kDwFormData2 ||
+         form == kDwFormData4 || form == kDwFormData8 ||
+         form == kDwFormUdata || form == kDwFormImplicitConst;
+}
+
+std::uint64_t bounded_enum_raw_value(std::uint64_t value,
+                                     std::size_t byte_size) {
+  if (byte_size == 0 || byte_size > sizeof(std::uint64_t)) {
+    throw std::logic_error("bounded enum scalar width is out of range");
+  }
+  if (byte_size == sizeof(std::uint64_t)) return value;
+  const auto bits = static_cast<unsigned>(byte_size * 8U);
+  return value & ((std::uint64_t{1} << bits) - 1U);
+}
+
+std::optional<LocalEnumType> resolve_bounded_enum_type(
+    const std::vector<Die>& dies, std::uint64_t type_offset) {
+  for (unsigned depth = 0; depth < 16; ++depth) {
+    const auto index = die_index_by_offset(dies, type_offset);
+    if (!index) {
+      throw std::runtime_error("bounded enum type references an unknown DIE");
+    }
+    const auto& die = dies[*index];
+    if (die.tag == kDwTagTypedef || die.tag == kDwTagConstType) {
+      const auto* wrapped = attribute(die, kDwAtType);
+      if (wrapped == nullptr || wrapped->form != kDwFormRef4) {
+        throw std::runtime_error(
+            "bounded enum wrapper does not use DW_FORM_ref4");
+      }
+      type_offset = wrapped->number;
+      continue;
+    }
+    if (die.tag != kDwTagEnumerationType) return std::nullopt;
+
+    const auto* enum_name = attribute(die, kDwAtName);
+    const auto* size = attribute(die, kDwAtByteSize);
+    if (enum_name == nullptr || enum_name->text.empty()) {
+      throw std::runtime_error("bounded enum has no supported name");
+    }
+    if (size == nullptr || size->number == 0 ||
+        size->number > sizeof(std::uint64_t)) {
+      throw std::runtime_error(
+          "bounded enum has an unsupported scalar byte size");
+    }
+    const auto byte_size = static_cast<std::size_t>(size->number);
+
+    bool is_signed = false;
+    const auto* encoding = attribute(die, kDwAtEncoding);
+    const auto* underlying_ref = attribute(die, kDwAtType);
+    if (encoding != nullptr) {
+      if (encoding->number != kDwAteSigned &&
+          encoding->number != kDwAteUnsigned) {
+        throw std::runtime_error(
+            "bounded enum direct encoding is not signed/unsigned integer");
+      }
+      is_signed = encoding->number == kDwAteSigned;
+      if (underlying_ref != nullptr) {
+        if (underlying_ref->form != kDwFormRef4) {
+          throw std::runtime_error(
+              "bounded enum underlying type does not use DW_FORM_ref4");
+        }
+        const auto underlying =
+            resolve_integer_type(dies, underlying_ref->number);
+        if (underlying.byte_size != byte_size ||
+            underlying.is_signed != is_signed) {
+          throw std::runtime_error(
+              "bounded enum direct and underlying representations disagree");
+        }
+      }
+    } else {
+      if (underlying_ref == nullptr ||
+          underlying_ref->form != kDwFormRef4) {
+        throw std::runtime_error(
+            "bounded enum has no compiler-described integer representation");
+      }
+      const auto underlying =
+          resolve_integer_type(dies, underlying_ref->number);
+      if (underlying.byte_size != byte_size) {
+        throw std::runtime_error(
+            "bounded enum byte size disagrees with its underlying type");
+      }
+      is_signed = underlying.is_signed;
+    }
+
+    LocalEnumType result{enum_name->text, byte_size, is_signed, {}};
+    for (std::size_t child = 0; child < dies.size(); ++child) {
+      if (dies[child].parent != *index) continue;
+      if (dies[child].tag != kDwTagEnumerator) {
+        throw std::runtime_error(
+            "bounded enum has an unsupported direct child DIE");
+      }
+      if (result.enumerators.size() >= kMaxLocalEnumEntries) {
+        throw std::runtime_error(
+            "bounded enum exceeds the 64-entry table");
+      }
+      const auto* entry_name = attribute(dies[child], kDwAtName);
+      const auto* constant = attribute(dies[child], kDwAtConstValue);
+      if (entry_name == nullptr || entry_name->text.empty()) {
+        throw std::runtime_error("bounded enumerator has no supported name");
+      }
+      if (constant == nullptr ||
+          !bounded_enum_constant_form(constant->form)) {
+        throw std::runtime_error(
+            "bounded enumerator has no supported constant value");
+      }
+      const auto raw =
+          bounded_enum_raw_value(constant->number, byte_size);
+      if (!is_signed && raw != constant->number) {
+        throw std::runtime_error(
+            "bounded unsigned enumerator exceeds enum storage width");
+      }
+      const auto duplicate = std::find_if(
+          result.enumerators.begin(), result.enumerators.end(),
+          [&](const LocalEnumEntry& existing) {
+            return existing.name == entry_name->text;
+          });
+      if (duplicate != result.enumerators.end()) {
+        throw std::runtime_error(
+            "bounded enum has duplicate enumerator names");
+      }
+      result.enumerators.push_back(
+          LocalEnumEntry{entry_name->text, raw});
+    }
+    if (result.enumerators.empty()) {
+      throw std::runtime_error("bounded enum has no direct enumerators");
+    }
+    return result;
+  }
+  throw std::runtime_error("bounded enum type chain is too deep");
+}
+
 bool is_constant_member_offset_form(std::uint64_t form) {
   return form == kDwFormData1 || form == kDwFormData2 || form == kDwFormData4 ||
          form == kDwFormData8;
@@ -1271,6 +1407,17 @@ LocalValueType resolve_value_type(const std::vector<Die>& dies, std::uint64_t ty
       type_offset = type->number;
       continue;
     }
+    if (die.tag == kDwTagEnumerationType) {
+      const auto enum_type = resolve_bounded_enum_type(dies, type_offset);
+      if (!enum_type) {
+        throw std::logic_error(
+            "enumeration DIE did not resolve as a bounded enum");
+      }
+      LocalValueType result{enum_type->byte_size, enum_type->is_signed,
+                            LocalValueKind::Enumeration, {}};
+      result.enum_type = *enum_type;
+      return result;
+    }
     if (die.tag == kDwTagUnionType) {
       const auto union_type = resolve_bounded_union_type(dies, type_offset);
       if (!union_type) {
@@ -1418,7 +1565,7 @@ LocalValueType resolve_value_type(const std::vector<Die>& dies, std::uint64_t ty
       return LocalValueType{struct_size, false, LocalValueKind::Structure, std::move(members)};
     }
     throw std::runtime_error(
-        "local variable type is not a supported typedef/const/base-type/pointer/structure/array/union chain");
+        "local variable type is not a supported typedef/const/base-type/pointer/structure/array/union/enumeration chain");
   }
   throw std::runtime_error("local variable type chain is too deep");
 }
@@ -2088,6 +2235,10 @@ std::optional<LocalScalarValue> inspect_unit(const DebugSections& sections,
   }
 
   const auto value_type = resolve_value_type(dies, type->number);
+  if (value_type.kind == LocalValueKind::Enumeration) {
+    throw std::runtime_error(
+        "live enum materialization is outside current compiler evidence");
+  }
   if (value_type.kind == LocalValueKind::Array) {
     throw std::runtime_error(
         "live fixed-array materialization is outside current compiler evidence");
@@ -2307,6 +2458,10 @@ std::optional<LocalScalarValue> inspect_caller_stack_unit(
   }
 
   const auto value_type = resolve_value_type(dies, type->number);
+  if (value_type.kind == LocalValueKind::Enumeration) {
+    throw std::runtime_error(
+        "live historical enum materialization is outside current compiler evidence");
+  }
   std::vector<std::byte> location_expression;
   if (location->form == kDwFormExprloc) {
     location_expression = location->expression;

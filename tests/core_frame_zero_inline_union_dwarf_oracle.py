@@ -94,11 +94,14 @@ def require_union_binding(path, probe, records, by_offset):
     expression, begin, end, _ = active_debug_loc_expression(
         path, location, probe, "inline_union"
     )
-    proven = {"DW_OP_reg1 (rdx)", "DW_OP_reg2 (rcx)"}
+    proven = {
+        "DW_OP_reg1 (rdx); DW_OP_piece: 4",
+        "DW_OP_reg2 (rcx)",
+    }
     if expression not in proven:
         raise RuntimeError(
-            "inline_union active compiler location is not the expected single "
-            "RDX/RCX register: " + expression
+            "inline_union active compiler location is not one of the two "
+            "compiler-proven bounded forms: " + expression
         )
 
     type_text = resolved_attr(variable, by_offset, "type")

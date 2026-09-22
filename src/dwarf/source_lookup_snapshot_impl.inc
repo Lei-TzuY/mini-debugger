@@ -436,10 +436,12 @@ LocalScalarValue materialize_snapshot_memory_value(
         throw std::logic_error(
             "snapshot non-structure member unexpectedly carries nested metadata");
       }
+      const auto raw = member.bit_slice
+                           ? decode_bounded_bit_field(memory.bytes, member)
+                           : decode_integer(memory.bytes, member.offset,
+                                            member.byte_size);
       LocalStructMember materialized{
-          member.name,
-          decode_integer(memory.bytes, member.offset, member.byte_size),
-          member.byte_size, member.is_signed, member.kind};
+          member.name, raw, member.byte_size, member.is_signed, member.kind};
       materialized.offset = member.offset;
       materialized.pointee_type = member.pointee_type;
       materialized.bit_slice = member.bit_slice;

@@ -837,6 +837,100 @@ bool is_constant_member_offset_form(std::uint64_t form) {
          form == kDwFormData8;
 }
 
+std::optional<LocalBitSlice> resolve_bounded_bit_slice(
+    const Die& member, const IntegerType& integer, std::size_t struct_size) {
+  const auto* bit_size = attribute(member, kDwAtBitSize);
+  const auto* bit_offset = attribute(member, kDwAtBitOffset);
+  const auto* data_bit_offset = attribute(member, kDwAtDataBitOffset);
+  const auto* member_offset = attribute(member, kDwAtDataMemberLocation);
+  if (bit_size == nullptr) {
+    if (bit_offset != nullptr || data_bit_offset != nullptr) {
+      throw std::runtime_error(
+          "structure member has compiler bit location without bit size");
+    }
+    return std::nullopt;
+  }
+  if (!is_constant_member_offset_form(bit_size->form) ||
+      bit_size->number == 0 ||
+      bit_size->number > integer.byte_size * 8U) {
+    throw std::runtime_error(
+        "structure bit-field has unsupported compiler width");
+  }
+  if ((bit_offset == nullptr) == (data_bit_offset == nullptr)) {
+    throw std::runtime_error(
+        "structure bit-field requires exactly one compiler bit location");
+  }
+
+  const auto width = static_cast<std::size_t>(bit_size->number);
+  std::size_t absolute_bit_offset = 0;
+  if (data_bit_offset != nullptr) {
+    if (member_offset != nullptr ||
+        !is_constant_member_offset_form(data_bit_offset->form) ||
+        data_bit_offset->number > std::numeric_limits<std::size_t>::max()) {
+      throw std::runtime_error(
+          "structure DW_AT_data_bit_offset is unsupported");
+    }
+    absolute_bit_offset =
+        static_cast<std::size_t>(data_bit_offset->number);
+  } else {
+    if (member_offset == nullptr ||
+        !is_constant_member_offset_form(member_offset->form) ||
+        !is_constant_member_offset_form(bit_offset->form) ||
+        member_offset->number > struct_size) {
+      throw std::runtime_error(
+          "structure legacy bit-field has unsupported storage offset");
+    }
+    const auto storage_bits = integer.byte_size * 8U;
+    if (bit_offset->number > storage_bits ||
+        bit_size->number > storage_bits - bit_offset->number) {
+      throw std::runtime_error(
+          "structure legacy bit-field exceeds its base storage unit");
+    }
+    const auto byte_offset =
+        static_cast<std::size_t>(member_offset->number);
+    absolute_bit_offset =
+        byte_offset * 8U +
+        (storage_bits - static_cast<std::size_t>(bit_offset->number) - width);
+  }
+
+  const auto aggregate_bits = struct_size * 8U;
+  if (absolute_bit_offset > aggregate_bits ||
+      width > aggregate_bits - absolute_bit_offset) {
+    throw std::runtime_error(
+        "structure bit-field exceeds aggregate storage");
+  }
+  return LocalBitSlice{absolute_bit_offset, width};
+}
+
+std::optional<LocalStructMemberType> resolve_bounded_bit_field_member_type(
+    const std::vector<Die>& dies, const Die& member, std::size_t struct_size) {
+  const bool bit_field =
+      attribute(member, kDwAtBitSize) != nullptr ||
+      attribute(member, kDwAtBitOffset) != nullptr ||
+      attribute(member, kDwAtDataBitOffset) != nullptr;
+  if (!bit_field) return std::nullopt;
+
+  const auto* member_name = attribute(member, kDwAtName);
+  const auto* member_type = attribute(member, kDwAtType);
+  if (member_name == nullptr || member_name->text.empty()) {
+    throw std::runtime_error(
+        "structure bit-field has no supported name");
+  }
+  if (member_type == nullptr || member_type->form != kDwFormRef4) {
+    throw std::runtime_error(
+        "structure bit-field has no supported DW_FORM_ref4 type");
+  }
+  const auto integer = resolve_integer_type(dies, member_type->number);
+  const auto slice = resolve_bounded_bit_slice(member, integer, struct_size);
+  if (!slice) {
+    throw std::logic_error(
+        "bit-field member lost compiler bit-slice metadata");
+  }
+  return LocalStructMemberType{
+      member_name->text, slice->bit_offset / 8U, integer.byte_size,
+      integer.is_signed, LocalValueKind::Integer, {}, slice};
+}
+
 LocalStructMemberType resolve_bounded_union_member_type(
     const std::vector<Die>& dies, const Die& member, std::size_t union_size) {
   const auto* member_name = attribute(member, kDwAtName);
@@ -1225,6 +1319,12 @@ LocalValueType resolve_value_type(const std::vector<Die>& dies, std::uint64_t ty
         if (members.size() >= kMaxLocalStructMembers) {
           throw std::runtime_error("local struct has too many direct members");
         }
+        if (const auto bit_field =
+                resolve_bounded_bit_field_member_type(
+                    dies, member, struct_size)) {
+          members.push_back(*bit_field);
+          continue;
+        }
         const auto* member_name = attribute(member, kDwAtName);
         const auto* member_type = attribute(member, kDwAtType);
         const auto* member_offset = attribute(member, kDwAtDataMemberLocation);
@@ -1477,6 +1577,51 @@ std::uint64_t decode_integer(const std::vector<std::byte>& bytes, std::size_t of
   return value;
 }
 
+std::uint64_t bounded_bit_mask(std::size_t bits) {
+  if (bits == 0 || bits > 64) {
+    throw std::logic_error("bit-field width is out of range");
+  }
+  return bits == 64 ? std::numeric_limits<std::uint64_t>::max()
+                    : (std::uint64_t{1} << bits) - 1U;
+}
+
+std::uint64_t decode_bounded_bit_field(
+    const std::vector<std::byte>& bytes,
+    const LocalStructMemberType& member) {
+  if (!member.bit_slice || member.kind != LocalValueKind::Integer ||
+      member.pointee_type || member.enum_type || !member.members.empty() ||
+      member.byte_size == 0 ||
+      member.byte_size > sizeof(std::uint64_t)) {
+    throw std::logic_error(
+        "bit-field member lost bounded integer metadata");
+  }
+  const auto slice = *member.bit_slice;
+  const auto storage_bits = member.byte_size * 8U;
+  if (slice.bit_size == 0 || slice.bit_size > storage_bits ||
+      slice.bit_size > 64 || slice.bit_offset > bytes.size() * 8U ||
+      slice.bit_size > bytes.size() * 8U - slice.bit_offset) {
+    throw std::logic_error(
+        "bit-field slice exceeds immutable aggregate bytes");
+  }
+
+  std::uint64_t raw = 0;
+  for (std::size_t bit = 0; bit < slice.bit_size; ++bit) {
+    const auto absolute = slice.bit_offset + bit;
+    const auto byte =
+        std::to_integer<unsigned int>(bytes[absolute / 8U]);
+    if (((byte >> (absolute % 8U)) & 1U) != 0) {
+      raw |= std::uint64_t{1} << bit;
+    }
+  }
+  raw &= bounded_bit_mask(slice.bit_size);
+  if (member.is_signed && slice.bit_size < storage_bits &&
+      ((raw >> (slice.bit_size - 1U)) & 1U) != 0) {
+    raw |= ~bounded_bit_mask(slice.bit_size);
+    raw &= bounded_bit_mask(storage_bits);
+  }
+  return raw;
+}
+
 LocalStructMember materialize_bounded_nested_structure_member(
     const std::vector<std::byte>& bytes, std::size_t outer_size,
     const LocalStructMemberType& member) {
@@ -1541,6 +1686,10 @@ LocalScalarValue decode_structure(const ElfFile& module, std::string_view name,
     if (!member.members.empty()) {
       throw std::logic_error(
           "non-structure member unexpectedly carries nested metadata");
+    }
+    if (member.bit_slice) {
+      throw std::runtime_error(
+          "live bit-field structure materialization is outside current compiler evidence");
     }
     LocalStructMember materialized{
         member.name, decode_integer(bytes, member.offset, member.byte_size),

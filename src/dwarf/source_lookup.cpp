@@ -631,8 +631,7 @@ std::optional<LocalScalarValue> inspect_inline_scalar_unit(
       pointee_type
           ? LocalValueType{sizeof(std::uintptr_t), false, LocalValueKind::Pointer, {}}
           : direct_structure
-                ? LocalValueType{direct_structure->byte_size, false,
-                            LocalValueKind::Structure, {}}
+                ? *direct_structure
                 : direct_union
                       ? *direct_union
                       : direct_array

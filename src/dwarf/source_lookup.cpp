@@ -550,6 +550,7 @@ std::optional<LocalScalarValue> inspect_inline_scalar_unit(
 
   const auto opcode = std::to_integer<std::uint8_t>(expression.front());
   bool frame_zero_bit_field_structure = false;
+  bool frame_zero_nested_structure = false;
   if (frame.index == 0 && direct_structure &&
       !value_type.members.empty()) {
     frame_zero_bit_field_structure = std::all_of(
@@ -559,10 +560,41 @@ std::optional<LocalScalarValue> inspect_inline_scalar_unit(
                  member.bit_slice.has_value() && !member.pointee_type &&
                  !member.enum_type && member.members.empty();
         });
+
+    if (value_type.members.size() == 2) {
+      std::size_t direct_scalar_count = 0;
+      std::size_t nested_structure_count = 0;
+      bool supported_nested_shape = true;
+      for (const auto& member : value_type.members) {
+        if (member.kind == LocalValueKind::Integer && !member.pointee_type &&
+            !member.bit_slice && !member.enum_type && member.members.empty()) {
+          ++direct_scalar_count;
+          continue;
+        }
+        if (member.kind != LocalValueKind::Structure || member.pointee_type ||
+            member.bit_slice || member.enum_type ||
+            member.members.size() != 1) {
+          supported_nested_shape = false;
+          break;
+        }
+        const auto& terminal = member.members.front();
+        if (terminal.kind != LocalValueKind::Integer ||
+            terminal.pointee_type || terminal.bit_slice ||
+            terminal.enum_type || !terminal.members.empty()) {
+          supported_nested_shape = false;
+          break;
+        }
+        ++nested_structure_count;
+      }
+      frame_zero_nested_structure =
+          supported_nested_shape && direct_scalar_count == 1 &&
+          nested_structure_count == 1;
+    }
   }
 
   if (frame.index != 0 ||
-      (frame_zero_bit_field_structure && opcode == kDwOpFbreg)) {
+      ((frame_zero_bit_field_structure || frame_zero_nested_structure) &&
+       opcode == kDwOpFbreg)) {
     if (opcode != kDwOpFbreg) {
       throw std::runtime_error(
           "caller-frame selected-inline value currently requires compiler-proven DW_OP_fbreg");

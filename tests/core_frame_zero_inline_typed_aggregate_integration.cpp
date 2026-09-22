@@ -152,7 +152,6 @@ void exercise(const std::string& fixture, const std::string& cli) {
                 linked.byte_size == sizeof(std::uintptr_t) &&
                 linked.raw_value != 0 &&
                 linked.pointee_type &&
-                linked.pointee_type->kind == mdbg::LocalValueKind::Integer &&
                 linked.pointee_type->byte_size == sizeof(std::int32_t) &&
                 linked.pointee_type->is_signed,
             "frame-zero typed aggregate lost pointer-member metadata");

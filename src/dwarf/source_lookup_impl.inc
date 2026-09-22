@@ -1878,14 +1878,9 @@ LocalScalarValue decode_structure(const ElfFile& module, std::string_view name,
 }
 
 template <typename RegisterValue>
-std::vector<std::byte> evaluate_register_piece_structure(
+std::vector<std::byte> evaluate_register_piece_value(
     const std::vector<std::byte>& expression, RegisterValue register_value,
     const LocalValueType& value_type) {
-  if (value_type.kind != LocalValueKind::Structure) {
-    throw std::runtime_error(
-        "register-piece local requires a bounded structure type");
-  }
-
   const auto store_piece = [](std::vector<std::byte>& bytes,
                               std::size_t offset, std::size_t width,
                               std::uint64_t value) {
@@ -1922,6 +1917,10 @@ std::vector<std::byte> evaluate_register_piece_structure(
   };
 
   if (value_type.byte_size == 16) {
+    if (value_type.kind != LocalValueKind::Structure) {
+      throw std::runtime_error(
+          "16-byte register-piece local requires the proven structure shape");
+    }
     const auto first = read_op("the first register");
     if (first != kDwOpReg5) {
       throw std::runtime_error(
@@ -1945,23 +1944,33 @@ std::vector<std::byte> evaluate_register_piece_structure(
   }
 
   if (value_type.byte_size == 8) {
-    if (value_type.members.size() != 2 ||
-        value_type.members[0].kind != LocalValueKind::Integer ||
-        value_type.members[1].kind != LocalValueKind::Integer ||
-        value_type.members[0].offset != 0 ||
-        value_type.members[1].offset != 4 ||
-        value_type.members[0].byte_size != 4 ||
-        value_type.members[1].byte_size != 4 ||
-        value_type.members[0].pointee_type ||
-        value_type.members[1].pointee_type ||
-        value_type.members[0].bit_slice ||
-        value_type.members[1].bit_slice ||
-        value_type.members[0].enum_type ||
-        value_type.members[1].enum_type ||
-        !value_type.members[0].members.empty() ||
-        !value_type.members[1].members.empty()) {
+    const bool proven_structure =
+        value_type.kind == LocalValueKind::Structure &&
+        value_type.members.size() == 2 &&
+        value_type.members[0].kind == LocalValueKind::Integer &&
+        value_type.members[1].kind == LocalValueKind::Integer &&
+        value_type.members[0].offset == 0 &&
+        value_type.members[1].offset == 4 &&
+        value_type.members[0].byte_size == 4 &&
+        value_type.members[1].byte_size == 4 &&
+        !value_type.members[0].pointee_type &&
+        !value_type.members[1].pointee_type &&
+        !value_type.members[0].bit_slice &&
+        !value_type.members[1].bit_slice &&
+        !value_type.members[0].enum_type &&
+        !value_type.members[1].enum_type &&
+        value_type.members[0].members.empty() &&
+        value_type.members[1].members.empty();
+    const bool proven_array =
+        value_type.kind == LocalValueKind::Array &&
+        value_type.members.empty() && value_type.array_type &&
+        value_type.array_type->element_count == 2 &&
+        value_type.array_type->element_byte_size == 4 &&
+        value_type.array_type->element_is_signed &&
+        value_type.array_type->element_kind == LocalValueKind::Integer;
+    if (!proven_structure && !proven_array) {
       throw std::runtime_error(
-          "8-byte register-piece local requires the compiler-proven two-int32 structure shape");
+          "8-byte register-piece local requires the compiler-proven two-int32 structure/array shape");
     }
 
     const auto first = read_op("the first 4-byte register");
@@ -1989,7 +1998,7 @@ std::vector<std::byte> evaluate_register_piece_structure(
   }
 
   throw std::runtime_error(
-      "register-piece local is outside the proven 8-byte or 16-byte structure shapes");
+      "register-piece local is outside the proven 8-byte or 16-byte typed-value shapes");
 }
 
 std::uint64_t read_integer(const Debugger& debugger, std::uint64_t address,
@@ -2432,7 +2441,7 @@ std::optional<LocalScalarValue> inspect_unit(const DebugSections& sections,
     };
     return decode_structure(
         module, name, value_type,
-        evaluate_register_piece_structure(location_expression, register_value,
+        evaluate_register_piece_value(location_expression, register_value,
                                           value_type));
   }
 

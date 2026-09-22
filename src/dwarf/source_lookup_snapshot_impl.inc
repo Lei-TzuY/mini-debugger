@@ -427,10 +427,12 @@ LocalScalarValue materialize_snapshot_memory_value(
                               LocalValueKind::Structure};
     result.members.reserve(value_type.members.size());
     for (const auto& member : value_type.members) {
-      result.members.push_back(LocalStructMember{
+      LocalStructMember materialized{
           member.name,
           decode_integer(memory.bytes, member.offset, member.integer.byte_size),
-          member.integer.byte_size, member.integer.is_signed});
+          member.integer.byte_size, member.integer.is_signed};
+      materialized.offset = member.offset;
+      result.members.push_back(std::move(materialized));
     }
   } else {
     result = LocalScalarValue{
@@ -669,10 +671,23 @@ std::optional<LocalScalarValue> inspect_snapshot_unit(
   }
 
   if (opcode == kDwOpFbreg) {
-    if (value_type.kind != LocalValueKind::Integer || value_type.byte_size == 0 ||
-        value_type.byte_size > sizeof(std::uint64_t)) {
+    if (value_type.kind == LocalValueKind::Integer) {
+      if (value_type.byte_size == 0 ||
+          value_type.byte_size > sizeof(std::uint64_t)) {
+        throw std::runtime_error(
+            "snapshot DW_OP_fbreg integer width exceeds the bounded scalar model");
+      }
+    } else if (value_type.kind == LocalValueKind::Structure) {
+      if (value_type.byte_size == 0 ||
+          value_type.byte_size > kMaxLocalStructSize ||
+          value_type.members.empty() ||
+          value_type.members.size() > kMaxLocalStructMembers) {
+        throw std::runtime_error(
+            "snapshot DW_OP_fbreg structure exceeds the bounded aggregate model");
+      }
+    } else {
       throw std::runtime_error(
-          "snapshot DW_OP_fbreg currently requires the compiler-proven bounded integer local");
+          "snapshot DW_OP_fbreg requires a bounded integer or structure local");
     }
     const auto base = snapshot_frame_base(
         dies, *subprogram, snapshot, frame, module_paths, owner);

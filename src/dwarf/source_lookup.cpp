@@ -584,13 +584,9 @@ std::optional<LocalScalarValue> inspect_inline_scalar_unit(
     throw std::runtime_error(
         "frame-zero selected-inline fixed-array materialization is outside current compiler evidence");
   }
-  if (value_type.kind == LocalValueKind::Pointer) {
-    throw std::runtime_error(
-        "frame-zero selected-inline pointer materialization is outside current compiler evidence");
-  }
   if (expression.size() != 1) {
     throw std::runtime_error(
-        "selected-inline scalar requires one exact compiler-proven register operation");
+        "frame-zero selected-inline value requires one exact compiler-proven register operation");
   }
   const auto& regs = snapshot.thread(frame.thread_tid).registers;
   std::uint64_t raw = 0;
@@ -600,8 +596,8 @@ std::optional<LocalScalarValue> inspect_inline_scalar_unit(
     raw = regs.rcx;
   } else {
     throw std::runtime_error(
-        "selected-inline scalar currently requires compiler-proven DW_OP_reg1 (rdx) or "
-        "DW_OP_reg2 (rcx)");
+        "frame-zero selected-inline value currently requires compiler-proven "
+        "DW_OP_reg1 (rdx) or DW_OP_reg2 (rcx)");
   }
 
   LocalScalarValue result{owner.module_path, std::string(requested_name),
@@ -615,6 +611,13 @@ std::optional<LocalScalarValue> inspect_inline_scalar_unit(
           "selected-inline register enum lost canonical type metadata");
     }
     result.enum_type = value_type.enum_type;
+  }
+  if (value_type.kind == LocalValueKind::Pointer) {
+    if (!pointee_type) {
+      throw std::logic_error(
+          "selected-inline register pointer lost canonical pointee metadata");
+    }
+    attach_pointer_metadata(result, pointee_type);
   }
   return result;
 }

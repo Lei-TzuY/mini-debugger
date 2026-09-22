@@ -1006,6 +1006,7 @@ LocalScalarValue materialize_selected_inline_structure(
       }
       LocalStructMember nested{member.name, 0, member.byte_size, false,
                                LocalValueKind::Structure};
+      nested.offset = member.offset;
       nested.members.reserve(member.members.size());
       for (const auto& terminal : member.members) {
         if (terminal.kind != LocalValueKind::Integer || terminal.pointee_type ||
@@ -1028,10 +1029,12 @@ LocalScalarValue materialize_selected_inline_structure(
           throw std::logic_error(
               "selected-inline nested aggregate terminal exceeds outer storage");
         }
-        nested.members.push_back(LocalStructMember{
+        LocalStructMember nested_terminal{
             terminal.name,
             decode_integer(memory.bytes, absolute_offset, terminal.byte_size),
-            terminal.byte_size, terminal.is_signed, LocalValueKind::Integer});
+            terminal.byte_size, terminal.is_signed, LocalValueKind::Integer};
+        nested_terminal.offset = terminal.offset;
+        nested.members.push_back(std::move(nested_terminal));
       }
       result.members.push_back(std::move(nested));
       continue;

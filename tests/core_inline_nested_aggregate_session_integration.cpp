@@ -168,6 +168,27 @@ void exercise(const std::string& fixture, const std::string& cli) {
     require(terminal.kind == mdbg::LocalValueKind::Integer && terminal.byte_size == 4 &&
                 terminal.is_signed && terminal.raw_value == UINT64_C(0x55667788),
             "nested terminal member was not materialized from outer-owned bytes");
+    require(inner.offset == 4 && terminal.offset == 0,
+            "nested aggregate materialization lost compiler-owned relative offsets");
+
+    auto artifact_aggregate = aggregate;
+    artifact_aggregate.storage = mdbg::LocalValueStorage::SnapshotRuntimeArtifact;
+    artifact_aggregate.storage_module_path = "/fixture/module";
+    artifact_aggregate.storage_file_path = "/fixture/module.debug";
+    artifact_aggregate.storage_file_offset = UINT64_C(0x1000);
+    const auto artifact_inner =
+        mdbg::inspect_inline_local_aggregate_member(artifact_aggregate, "inner");
+    require(artifact_inner.storage ==
+                mdbg::LocalValueStorage::SnapshotRuntimeArtifact &&
+                artifact_inner.storage_file_offset == UINT64_C(0x1004),
+            "nested inner selection did not advance runtime-artifact provenance");
+    const auto artifact_terminal =
+        mdbg::inspect_inline_local_nested_aggregate_member(
+            artifact_aggregate, "inner", "terminal");
+    require(artifact_terminal.storage ==
+                mdbg::LocalValueStorage::SnapshotRuntimeArtifact &&
+                artifact_terminal.storage_file_offset == UINT64_C(0x1004),
+            "nested terminal selection did not preserve composed artifact provenance");
 
     const auto selected = session.inspect_nested_aggregate_member(
         "caller_nested_aggregate", "inner", "terminal");

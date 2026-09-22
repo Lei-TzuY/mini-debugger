@@ -333,6 +333,39 @@ inline LocalScalarValue inspect_inline_local_nested_aggregate_member(
       aggregate, aggregate_member_name, terminal_member_name);
 }
 
+inline LocalScalarValue inspect_local_array_element(
+    const LocalScalarValue& array, std::size_t index) {
+  if (array.kind != LocalValueKind::Array || !array.array_type ||
+      array.array_type->element_count == 0 ||
+      array.elements.size() != array.array_type->element_count ||
+      array.array_type->element_kind != LocalValueKind::Integer) {
+    throw std::logic_error(
+        "local value is not a materialized bounded fixed array: " + array.name);
+  }
+  if (index >= array.array_type->element_count) {
+    throw std::out_of_range("array index is out of range");
+  }
+  const auto& element = array.elements[index];
+  if (element.kind != LocalValueKind::Integer ||
+      element.byte_size != array.array_type->element_byte_size ||
+      element.is_signed != array.array_type->element_is_signed ||
+      element.byte_size == 0 ||
+      element.byte_size > sizeof(std::uint64_t)) {
+    throw std::logic_error(
+        "bounded fixed-array element metadata is inconsistent");
+  }
+  if (index > std::numeric_limits<std::size_t>::max() / element.byte_size) {
+    throw std::overflow_error("array element byte offset overflows");
+  }
+  const auto byte_offset = index * element.byte_size;
+  LocalScalarValue result{array.module_path,
+                          array.name + "[" + std::to_string(index) + "]",
+                          element.raw_value, element.byte_size,
+                          element.is_signed, element.kind};
+  inline_member_detail::copy_storage(result, array, byte_offset);
+  return result;
+}
+
 inline LocalScalarValue inspect_inline_local_union_member(
     const LocalScalarValue& value, std::string_view member_name) {
   const auto& member = inline_member_detail::union_member(value, member_name);

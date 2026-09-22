@@ -26,6 +26,7 @@
 namespace mdbg {
 namespace {
 
+constexpr std::uint64_t kDwTagArrayType = 0x01;
 constexpr std::uint64_t kDwTagFormalParameter = 0x05;
 constexpr std::uint64_t kDwTagMember = 0x0d;
 constexpr std::uint64_t kDwTagLexicalBlock = 0x0b;
@@ -33,6 +34,7 @@ constexpr std::uint64_t kDwTagPointerType = 0x0f;
 constexpr std::uint64_t kDwTagStructureType = 0x13;
 constexpr std::uint64_t kDwTagTypedef = 0x16;
 constexpr std::uint64_t kDwTagInlinedSubroutine = 0x1d;
+constexpr std::uint64_t kDwTagSubrangeType = 0x21;
 constexpr std::uint64_t kDwTagBaseType = 0x24;
 constexpr std::uint64_t kDwTagConstType = 0x26;
 constexpr std::uint64_t kDwTagSubprogram = 0x2e;
@@ -45,7 +47,10 @@ constexpr std::uint64_t kDwAtBitOffset = 0x0c;
 constexpr std::uint64_t kDwAtBitSize = 0x0d;
 constexpr std::uint64_t kDwAtLowPc = 0x11;
 constexpr std::uint64_t kDwAtHighPc = 0x12;
+constexpr std::uint64_t kDwAtLowerBound = 0x22;
+constexpr std::uint64_t kDwAtUpperBound = 0x2f;
 constexpr std::uint64_t kDwAtAbstractOrigin = 0x31;
+constexpr std::uint64_t kDwAtCount = 0x37;
 constexpr std::uint64_t kDwAtDataMemberLocation = 0x38;
 constexpr std::uint64_t kDwAtEncoding = 0x3e;
 constexpr std::uint64_t kDwAtFrameBase = 0x40;
@@ -105,6 +110,7 @@ constexpr std::uint64_t kDwAteSigned = 0x05;
 constexpr std::uint64_t kDwAteUnsigned = 0x07;
 constexpr std::size_t kMaxLocalStructSize = 256;
 constexpr std::size_t kMaxLocalStructMembers = 32;
+constexpr std::size_t kMaxLocalArrayElements = 64;
 constexpr unsigned kMaxAbstractOriginDepth = 8;
 
 struct DebugSections {
@@ -830,6 +836,111 @@ bool is_constant_member_offset_form(std::uint64_t form) {
          form == kDwFormData8;
 }
 
+bool is_bounded_array_bound_form(std::uint64_t form) {
+  return form == kDwFormData1 || form == kDwFormData2 ||
+         form == kDwFormData4 || form == kDwFormData8 ||
+         form == kDwFormUdata || form == kDwFormImplicitConst;
+}
+
+std::optional<LocalValueType> resolve_bounded_fixed_array_type(
+    const std::vector<Die>& dies, std::uint64_t type_offset) {
+  for (unsigned depth = 0; depth < 16; ++depth) {
+    const auto index = die_index_by_offset(dies, type_offset);
+    if (!index) {
+      throw std::runtime_error("fixed-array type references an unknown DIE");
+    }
+    const auto& die = dies[*index];
+    if (die.tag == kDwTagTypedef || die.tag == kDwTagConstType) {
+      const auto* wrapped = attribute(die, kDwAtType);
+      if (wrapped == nullptr || wrapped->form != kDwFormRef4) {
+        throw std::runtime_error(
+            "fixed-array wrapper does not use DW_FORM_ref4");
+      }
+      type_offset = wrapped->number;
+      continue;
+    }
+    if (die.tag != kDwTagArrayType) return std::nullopt;
+
+    const auto* element_ref = attribute(die, kDwAtType);
+    if (element_ref == nullptr || element_ref->form != kDwFormRef4) {
+      throw std::runtime_error("fixed array has no supported element type");
+    }
+    const auto element = resolve_integer_type(dies, element_ref->number);
+
+    std::optional<std::size_t> subrange;
+    for (std::size_t child = 0; child < dies.size(); ++child) {
+      if (dies[child].parent != *index) continue;
+      if (dies[child].tag != kDwTagSubrangeType || subrange) {
+        throw std::runtime_error(
+            "fixed array requires exactly one direct subrange");
+      }
+      subrange = child;
+    }
+    if (!subrange) {
+      throw std::runtime_error("fixed array has no direct subrange");
+    }
+
+    const auto& range = dies[*subrange];
+    const auto* lower = attribute(range, kDwAtLowerBound);
+    if (lower != nullptr &&
+        (!is_bounded_array_bound_form(lower->form) || lower->number != 0)) {
+      throw std::runtime_error("fixed array requires a zero lower bound");
+    }
+    const auto* count = attribute(range, kDwAtCount);
+    const auto* upper = attribute(range, kDwAtUpperBound);
+    if (count != nullptr && !is_bounded_array_bound_form(count->form)) {
+      throw std::runtime_error("fixed-array count has an unsupported form");
+    }
+    if (upper != nullptr && !is_bounded_array_bound_form(upper->form)) {
+      throw std::runtime_error("fixed-array upper bound has an unsupported form");
+    }
+
+    std::uint64_t element_count = 0;
+    if (count != nullptr) {
+      element_count = count->number;
+      if (upper != nullptr &&
+          (upper->number == std::numeric_limits<std::uint64_t>::max() ||
+           upper->number + 1 != element_count)) {
+        throw std::runtime_error(
+            "fixed-array count conflicts with upper bound");
+      }
+    } else if (upper != nullptr) {
+      if (upper->number == std::numeric_limits<std::uint64_t>::max()) {
+        throw std::runtime_error(
+            "fixed-array upper bound overflows element count");
+      }
+      element_count = upper->number + 1;
+    } else {
+      throw std::runtime_error("fixed array has no bounded element count");
+    }
+
+    if (element_count == 0 || element_count > kMaxLocalArrayElements) {
+      throw std::runtime_error(
+          "fixed-array count exceeds the bounded 64-element model");
+    }
+    if (element.byte_size == 0 ||
+        element.byte_size > sizeof(std::uint64_t) ||
+        element_count > kMaxLocalStructSize / element.byte_size) {
+      throw std::runtime_error(
+          "fixed-array storage exceeds the bounded scalar-array model");
+    }
+    const auto byte_size =
+        static_cast<std::size_t>(element_count) * element.byte_size;
+    const auto* declared_size = attribute(die, kDwAtByteSize);
+    if (declared_size != nullptr && declared_size->number != byte_size) {
+      throw std::runtime_error(
+          "fixed-array byte size conflicts with its element layout");
+    }
+
+    LocalValueType result{byte_size, false, LocalValueKind::Array, {}};
+    result.array_type = LocalArrayType{
+        static_cast<std::size_t>(element_count), element.byte_size,
+        element.is_signed, LocalValueKind::Integer};
+    return result;
+  }
+  throw std::runtime_error("fixed-array type chain is too deep");
+}
+
 std::optional<LocalStructMemberType> resolve_bounded_nested_structure_member_type(
     const std::vector<Die>& dies, const Die& member, std::size_t outer_size) {
   const auto* member_type = attribute(member, kDwAtType);
@@ -956,6 +1067,13 @@ LocalValueType resolve_value_type(const std::vector<Die>& dies, std::uint64_t ty
       }
       type_offset = type->number;
       continue;
+    }
+    if (die.tag == kDwTagArrayType) {
+      const auto array = resolve_bounded_fixed_array_type(dies, type_offset);
+      if (!array) {
+        throw std::logic_error("array DIE did not resolve as a bounded fixed array");
+      }
+      return *array;
     }
     if (die.tag == kDwTagPointerType) {
       const auto* size = attribute(die, kDwAtByteSize);
@@ -1084,7 +1202,7 @@ LocalValueType resolve_value_type(const std::vector<Die>& dies, std::uint64_t ty
       return LocalValueType{struct_size, false, LocalValueKind::Structure, std::move(members)};
     }
     throw std::runtime_error(
-        "local variable type is not a supported typedef/const/base-type/pointer/structure chain");
+        "local variable type is not a supported typedef/const/base-type/pointer/structure/array chain");
   }
   throw std::runtime_error("local variable type chain is too deep");
 }
@@ -1705,6 +1823,10 @@ std::optional<LocalScalarValue> inspect_unit(const DebugSections& sections,
   }
 
   const auto value_type = resolve_value_type(dies, type->number);
+  if (value_type.kind == LocalValueKind::Array) {
+    throw std::runtime_error(
+        "live fixed-array materialization is outside current compiler evidence");
+  }
   std::vector<std::byte> location_expression;
   if (location->form == kDwFormExprloc) {
     location_expression = location->expression;

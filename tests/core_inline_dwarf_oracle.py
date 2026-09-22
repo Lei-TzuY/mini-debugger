@@ -97,7 +97,7 @@ def origin_name(record, by_offset):
 
 
 def inline_scalar_location_evidence(path, records, by_offset):
-    wanted = {"seed", "outer_only", "inner_only", "shadow_value"}
+    wanted = {"seed", "outer_only", "inner_only", "shadow_value", "inline_pointer"}
     evidence = []
     for position, record in enumerate(records):
         if record["tag"] != "DW_TAG_inlined_subroutine":
@@ -128,6 +128,109 @@ def inline_scalar_location_evidence(path, records, by_offset):
     print("inline fixture location-list dump (bounded):")
     print(loc_dump[:12000])
     return evidence
+
+
+def resolved_attr(record, by_offset, name):
+    current = record
+    for _ in range(8):
+        value = current["attrs"].get(name)
+        if value:
+            return value
+        origin_text = current["attrs"].get("abstract_origin")
+        if not origin_text:
+            return None
+        current = by_offset.get(ref_offset(origin_text, "abstract_origin"))
+        if current is None:
+            return None
+    raise RuntimeError("abstract-origin attribute chain is too deep")
+
+
+def unwrap_type(record, by_offset, context):
+    current = record
+    wrappers = {
+        "DW_TAG_typedef",
+        "DW_TAG_const_type",
+        "DW_TAG_volatile_type",
+        "DW_TAG_restrict_type",
+    }
+    for _ in range(16):
+        if current["tag"] not in wrappers:
+            return current
+        wrapped = current["attrs"].get("type")
+        if not wrapped:
+            raise RuntimeError(f"{context}: type wrapper has no DW_AT_type")
+        current = by_offset.get(ref_offset(wrapped, context))
+        if current is None:
+            raise RuntimeError(f"{context}: type wrapper references an unknown DIE")
+    raise RuntimeError(f"{context}: type wrapper chain is too deep")
+
+
+def require_frame_zero_inline_pointer(records, by_offset):
+    candidates = []
+    for position, record in enumerate(records):
+        if record["tag"] != "DW_TAG_inlined_subroutine":
+            continue
+        if origin_name(record, by_offset) != "inline_inner":
+            continue
+        for child in records[position + 1 :]:
+            if child["depth"] <= record["depth"]:
+                break
+            if child["tag"] not in {"DW_TAG_variable", "DW_TAG_formal_parameter"}:
+                continue
+            if resolved_name(child, by_offset) != "inline_pointer":
+                continue
+            candidates.append(child)
+
+    if len(candidates) != 1:
+        raise RuntimeError(
+            f"inline_pointer requires exactly one concrete active binding, found {len(candidates)}"
+        )
+    pointer_var = candidates[0]
+    location = pointer_var["attrs"].get("location")
+    if not location:
+        raise RuntimeError("inline_pointer has no compiler-produced DW_AT_location")
+    if "DW_OP_reg" not in location or "DW_OP_piece" in location or "DW_OP_stack_value" in location:
+        raise RuntimeError(
+            "inline_pointer is not retained as one exact compiler register operation: "
+            + location
+        )
+
+    type_text = resolved_attr(pointer_var, by_offset, "type")
+    if not type_text:
+        raise RuntimeError("inline_pointer has no resolved DW_AT_type")
+    pointer = by_offset.get(ref_offset(type_text, "inline_pointer type"))
+    if pointer is None:
+        raise RuntimeError("inline_pointer type references an unknown DIE")
+    pointer = unwrap_type(pointer, by_offset, "inline_pointer type")
+    if pointer["tag"] != "DW_TAG_pointer_type":
+        raise RuntimeError("inline_pointer does not resolve to DW_TAG_pointer_type")
+    pointer_size = pointer["attrs"].get("byte_size")
+    if pointer_size and numeric_attr(pointer_size, "inline_pointer byte size") != 8:
+        raise RuntimeError("inline_pointer compiler pointer width is not eight bytes")
+
+    pointee_text = pointer["attrs"].get("type")
+    if not pointee_text:
+        raise RuntimeError("inline_pointer pointer type has no pointee")
+    pointee = by_offset.get(ref_offset(pointee_text, "inline_pointer pointee"))
+    if pointee is None:
+        raise RuntimeError("inline_pointer pointee references an unknown DIE")
+    pointee = unwrap_type(pointee, by_offset, "inline_pointer pointee")
+    if pointee["tag"] != "DW_TAG_base_type":
+        raise RuntimeError("inline_pointer pointee is not a compiler base type")
+    size = pointee["attrs"].get("byte_size")
+    encoding = pointee["attrs"].get("encoding", "")
+    if not size or numeric_attr(size, "inline_pointer pointee byte size") != 4:
+        raise RuntimeError("inline_pointer pointee is not exactly four bytes")
+    if "signed" not in encoding and numeric_attr(
+        encoding, "inline_pointer pointee encoding"
+    ) != 5:
+        raise RuntimeError("inline_pointer pointee is not a signed integer type")
+
+    print(
+        "frame-zero inline pointer DWARF: "
+        f"die=0x{pointer_var['offset']:x} location={location} "
+        f"type=DW_TAG_pointer_type pointee=4-byte-signed"
+    )
 
 
 def addr2line_contexts(path, probe):
@@ -436,6 +539,7 @@ def main():
         )
 
     inline_scalar_location_evidence(path, records, by_offset)
+    require_frame_zero_inline_pointer(records, by_offset)
     require_mdbg_core_callsite_ownership(path)
     require_caller_inline_materialization(path)
 

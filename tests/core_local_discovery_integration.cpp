@@ -221,6 +221,33 @@ void test_inline_artifact_gate(const std::string& integration_path,
   require(inline_shadow.raw_value == kInlineInnerShadowValue &&
               inline_shadow.byte_size == 4 && inline_shadow.is_signed,
           "selected inner inline scalar did not materialize the exact compiler-owned binding");
+
+  const auto inline_pointer = inline_session.inspect_value("inline_pointer");
+  require(inline_pointer.kind == mdbg::LocalValueKind::Pointer &&
+              inline_pointer.byte_size == sizeof(std::uintptr_t) &&
+              !inline_pointer.is_signed &&
+              inline_pointer.raw_value != 0 &&
+              inline_pointer.storage ==
+                  mdbg::LocalValueStorage::SnapshotCoreRegister,
+          "frame-zero selected-inline pointer lost register-owned pointer identity");
+  require(inline_pointer.pointee_type.has_value() &&
+              inline_pointer.pointee_type->kind ==
+                  mdbg::LocalValueKind::Integer &&
+              inline_pointer.pointee_type->byte_size == sizeof(std::int32_t) &&
+              inline_pointer.pointee_type->is_signed,
+          "frame-zero selected-inline pointer lost bounded signed-int32 pointee metadata");
+  const auto inline_pointee = inline_session.dereference_value("inline_pointer");
+  require(inline_pointee.name == "*inline_pointer" &&
+              inline_pointee.kind == mdbg::LocalValueKind::Integer &&
+              inline_pointee.raw_value == UINT64_C(0x13579bdf) &&
+              inline_pointee.byte_size == sizeof(std::int32_t) &&
+              inline_pointee.is_signed,
+          "frame-zero selected-inline pointer did not dereference the compiler-owned pointee");
+  require(inline_pointee.storage ==
+              mdbg::LocalValueStorage::SnapshotCoreMemory ||
+              inline_pointee.storage ==
+                  mdbg::LocalValueStorage::SnapshotRuntimeArtifact,
+          "frame-zero selected-inline pointee lost immutable snapshot provenance");
   bool pointer_traversal_rejected = false;
   try {
     (void)inline_session.dereference_value("shadow_value");
@@ -244,6 +271,7 @@ void test_inline_artifact_gate(const std::string& integration_path,
       std::filesystem::absolute(integration_path).parent_path() / "mdbg-core";
   const std::string script =
       "inline\\ninline 0\\nlocals\\ninline 1\\nlocals\\nprint shadow_value\\n"
+      "print inline_pointer\\nderef inline_pointer\\n"
       "inline physical\\nlocals\\ninline 1\\nframe 0\\ninline\\nquit\\n";
   const std::string command = "printf '" + script + "' | " +
                               shell_quote(mdbg_core.string()) + " " +
@@ -267,6 +295,12 @@ void test_inline_artifact_gate(const std::string& integration_path,
   require_inline_cli_scope(inner_segment, "inner_only", "outer_only", "inner inline CLI scope");
   require(inner_segment.find("!shadow_value = 0x141 [4-byte signed]") != std::string::npos,
           "mdbg-core did not print the exact selected inner inline scalar binding");
+  require(inner_segment.find("!inline_pointer = 0x") != std::string::npos &&
+              inner_segment.find("[8-byte unsigned]") != std::string::npos,
+          "mdbg-core did not print the frame-zero selected-inline pointer");
+  require(inner_segment.find("!*inline_pointer = 0x13579bdf [4-byte signed]") !=
+              std::string::npos,
+          "mdbg-core did not dereference the frame-zero selected-inline pointer");
   const auto physical_segment = output.substr(physical_marker, frame_marker - physical_marker);
   require(physical_segment.find("variable physical_only") != std::string::npos &&
               physical_segment.find("variable outer_only") == std::string::npos &&

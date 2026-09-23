@@ -143,6 +143,54 @@ void require_inline_cli_scope(const std::string& segment, const std::string& pre
           context + " leaked a nested/sibling inline local");
 }
 
+void test_live_inline_cli(const std::string& integration_path,
+                          const std::filesystem::path& fixture) {
+  const auto mdbg =
+      std::filesystem::absolute(integration_path).parent_path() / "mdbg";
+  require(std::filesystem::exists(mdbg), "mdbg executable is unavailable");
+
+  const std::string script =
+      "break snapshot_inline_crash_probe\\n"
+      "continue\\n"
+      "inline\\n"
+      "inline 0\\n"
+      "locals\\n"
+      "inline 1\\n"
+      "locals\\n"
+      "inline physical\\n"
+      "locals\\n"
+      "quit\\n";
+  const std::string command =
+      "printf '" + script + "' | " + shell_quote(mdbg.string()) + " " +
+      shell_quote(fixture.string()) + " 2>&1";
+  const auto output = run_command(command);
+
+  const auto listed = output.find("inline 0 inline_outer");
+  const auto outer = output.find("selected inline 0", listed);
+  const auto inner = output.find("selected inline 1", outer);
+  const auto physical = output.find("selected physical inspection frame", inner);
+  require(listed != std::string::npos && outer != std::string::npos &&
+              inner != std::string::npos && physical != std::string::npos &&
+              listed < outer && outer < inner && inner < physical,
+          "live mdbg inline discovery/selection markers are incomplete\n" + output);
+
+  const auto outer_segment = output.substr(outer, inner - outer);
+  require_inline_cli_scope(outer_segment, "outer_only", "inner_only",
+                           "live outer inline scope");
+
+  const auto inner_segment = output.substr(inner, physical - inner);
+  require_inline_cli_scope(inner_segment, "inner_only", "outer_only",
+                           "live inner inline scope");
+  require(inner_segment.find("variable inline_pointer") != std::string::npos,
+          "live inner inline scope lost inline_pointer\n" + output);
+
+  const auto physical_segment = output.substr(physical);
+  require(physical_segment.find("variable physical_only") != std::string::npos &&
+              physical_segment.find("variable outer_only") == std::string::npos &&
+              physical_segment.find("variable inner_only") == std::string::npos,
+          "live inline physical selection did not restore physical scope\n" + output);
+}
+
 void test_inline_artifact_gate(const std::string& integration_path,
                                const mdbg::CoreInspectionSession& baseline_session) {
   const char* compiler_env = std::getenv("CC");
@@ -163,6 +211,7 @@ void test_inline_artifact_gate(const std::string& integration_path,
       run_command("python3 tests/core_inline_dwarf_oracle.py " +
                   shell_quote(fixture.string()) + " 2>&1");
   std::cout << inline_oracle;
+  test_live_inline_cli(integration_path, fixture);
 
   const pid_t child = ::fork();
   if (child == -1) throw std::runtime_error("failed to fork optimized inline fixture");

@@ -11,7 +11,10 @@
 namespace mdbg {
 
 class CoreSnapshot;
+class Debugger;
+class ElfFile;
 class SnapshotModulePathResolver;
+struct InspectionFrameContext;
 struct SnapshotInspectionFrameContext;
 
 struct InlineCallsiteContext {
@@ -23,9 +26,15 @@ struct InlineCallsiteContext {
 };
 
 std::vector<InlineCallsiteContext> discover_inline_call_chain(
+    const Debugger& debugger, const ElfFile& preferred_elf,
+    const InspectionFrameContext& frame);
+std::vector<InlineCallsiteContext> discover_inline_call_chain(
     const CoreSnapshot& snapshot, const SnapshotInspectionFrameContext& frame,
     const SnapshotModulePathResolver& module_paths);
 
+std::vector<LocalDiscoveryEntry> discover_inline_local_values(
+    const Debugger& debugger, const ElfFile& preferred_elf,
+    const InspectionFrameContext& frame, std::size_t inline_die_offset);
 std::vector<LocalDiscoveryEntry> discover_inline_local_values(
     const CoreSnapshot& snapshot, const SnapshotInspectionFrameContext& frame,
     std::size_t inline_die_offset, const SnapshotModulePathResolver& module_paths);

@@ -1,6 +1,7 @@
 #include "breakpoints/user_breakpoint_registry.hpp"
 #include "debugger/debugger.hpp"
 #include "dwarf/eh_frame.hpp"
+#include "dwarf/inline_context.hpp"
 #include "dwarf/inline_member.hpp"
 #include "dwarf/line_table.hpp"
 #include "dwarf/local_value.hpp"
@@ -449,9 +450,16 @@ int main(int argc, char** argv) {
     mdbg::ElfFile elf(executable);
     mdbg::UserBreakpointRegistry breakpoints(debugger, elf);
     std::optional<mdbg::InspectionFrameContext> selected_inspection_frame;
+    std::optional<mdbg::InlineCallsiteContext> selected_inline_context;
+    std::optional<std::size_t> selected_inline_context_index;
 
+    auto invalidate_inline_context = [&]() {
+      selected_inline_context.reset();
+      selected_inline_context_index.reset();
+    };
     auto invalidate_inspection_frame = [&]() {
       selected_inspection_frame.reset();
+      invalidate_inline_context();
     };
     auto inspect_source_value = [&](std::string_view name) {
       if (selected_inspection_frame) {
@@ -579,6 +587,7 @@ int main(int argc, char** argv) {
             throw std::out_of_range("inspection frame index is out of range");
           }
           selected_inspection_frame = frames[index];
+          invalidate_inline_context();
           std::cout << "selected inspection frame " << index << " 0x"
                     << std::hex << selected_inspection_frame->runtime_pc
                     << std::dec << '\n';
@@ -596,6 +605,59 @@ int main(int argc, char** argv) {
         print_source_location(address, debugger, elf);
       } else if (command == "list" || command == "l") {
         print_source_location(static_cast<std::uintptr_t>(debugger.registers().rip), debugger, elf);
+      } else if (command == "inline") {
+        std::string selector;
+        std::string extra;
+        input >> selector >> extra;
+        if (!extra.empty()) {
+          std::cout << "usage: inline [<index>|physical]\n";
+          continue;
+        }
+        try {
+          const auto frame = source_inspection_frame();
+          if (selector.empty()) {
+            const auto contexts =
+                mdbg::discover_inline_call_chain(debugger, elf, frame);
+            for (std::size_t index = 0; index < contexts.size(); ++index) {
+              const auto& context = contexts[index];
+              std::cout << (selected_inline_context_index &&
+                                    *selected_inline_context_index == index
+                                ? "* "
+                                : "  ")
+                        << "inline " << index << ' ' << context.name
+                        << " called at " << context.call_site.file << ':'
+                        << context.call_site.line;
+              if (context.call_site.column != 0) {
+                std::cout << ':' << context.call_site.column;
+              }
+              std::cout << '\n';
+            }
+            continue;
+          }
+          if (selector == "physical") {
+            invalidate_inline_context();
+            std::cout << "selected physical inspection frame\n";
+            continue;
+          }
+
+          std::size_t consumed = 0;
+          const auto parsed = std::stoull(selector, &consumed, 10);
+          if (consumed != selector.size() ||
+              parsed > std::numeric_limits<std::size_t>::max()) {
+            throw std::invalid_argument("invalid inline context index");
+          }
+          const auto contexts =
+              mdbg::discover_inline_call_chain(debugger, elf, frame);
+          const auto index = static_cast<std::size_t>(parsed);
+          if (index >= contexts.size()) {
+            throw std::out_of_range("inline context index is out of range");
+          }
+          selected_inline_context = contexts[index];
+          selected_inline_context_index = index;
+          std::cout << "selected inline " << index << '\n';
+        } catch (const std::exception& error) {
+          std::cout << "inline selection failed: " << error.what() << '\n';
+        }
       } else if (command == "locals") {
         std::string extra;
         input >> extra;
@@ -604,8 +666,13 @@ int main(int argc, char** argv) {
           continue;
         }
         try {
-          const auto entries = mdbg::discover_local_values(
-              debugger, elf, source_inspection_frame());
+          const auto frame = source_inspection_frame();
+          const auto entries = selected_inline_context
+                                   ? mdbg::discover_inline_local_values(
+                                         debugger, elf, frame,
+                                         selected_inline_context->die_offset)
+                                   : mdbg::discover_local_values(
+                                         debugger, elf, frame);
           for (const auto& entry : entries) {
             std::cout
                 << (entry.kind == mdbg::LocalDiscoveryKind::FormalParameter
@@ -1032,7 +1099,7 @@ int main(int argc, char** argv) {
                     << std::dec << ' ' << symbol.name << '\n';
         }
       } else {
-        std::cout << "commands: continue, step, next, finish, stepi, regs, bt, frame <index>, list, locals, "
+        std::cout << "commands: continue, step, next, finish, stepi, regs, bt, frame <index>, inline [<index>|physical], list, locals, "
                      "line <addr|symbol>, print <name>, deref <name>, aggregate-member <name> <member>, "
                      "deref-aggregate-member <name> <member>, "
                      "set follow-fork-mode <parent|child|both>, "

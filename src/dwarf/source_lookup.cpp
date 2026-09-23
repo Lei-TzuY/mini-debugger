@@ -712,6 +712,47 @@ std::optional<LocalScalarValue> inspect_inline_scalar_unit(
   return result;
 }
 
+std::vector<InlineCallsiteContext> discover_inline_call_chain_for_module(
+    std::uint64_t virtual_pc, const std::string& module_path,
+    const std::string& debug_path) {
+  const auto sections = read_debug_sections(debug_path);
+  const auto ranges = read_debug_ranges(debug_path);
+  std::size_t unit = 0;
+  while (unit < sections.info.size()) {
+    std::size_t next = unit;
+    const auto result = discover_inline_unit(
+        sections, ranges, virtual_pc, module_path, debug_path, unit, next);
+    if (result) return *result;
+    if (next <= unit) {
+      throw std::runtime_error(
+          "DWARF inline parser did not advance to the next unit");
+    }
+    unit = next;
+  }
+  return {};
+}
+
+std::vector<LocalDiscoveryEntry> discover_inline_local_values_for_module(
+    std::uint64_t virtual_pc, std::size_t inline_die_offset,
+    const std::string& debug_path) {
+  const auto sections = read_debug_sections(debug_path);
+  const auto ranges = read_debug_ranges(debug_path);
+  std::size_t unit = 0;
+  while (unit < sections.info.size()) {
+    std::size_t next = unit;
+    const auto result = discover_inline_locals_unit(
+        sections, ranges, virtual_pc, inline_die_offset, unit, next);
+    if (result) return *result;
+    if (next <= unit) {
+      throw std::runtime_error(
+          "DWARF inline-local parser did not advance to the next unit");
+    }
+    unit = next;
+  }
+  throw std::runtime_error(
+      "selected inline DIE is unavailable in the owning debug file");
+}
+
 }  // namespace
 
 std::vector<InlineCallsiteContext> discover_inline_call_chain(
@@ -726,21 +767,26 @@ std::vector<InlineCallsiteContext> discover_inline_call_chain(
     throw std::logic_error("snapshot inline discovery module ownership changed");
   }
   const auto debug_path = module_paths.resolve_debug_file(owner.module_path);
-  const auto sections = read_debug_sections(debug_path);
-  const auto ranges = read_debug_ranges(debug_path);
+  return discover_inline_call_chain_for_module(
+      owner.virtual_address, owner.module_path, debug_path);
+}
 
-  std::size_t unit = 0;
-  while (unit < sections.info.size()) {
-    std::size_t next = unit;
-    const auto result = discover_inline_unit(sections, ranges, owner.virtual_address,
-                                             owner.module_path, debug_path, unit, next);
-    if (result) return *result;
-    if (next <= unit) {
-      throw std::runtime_error("DWARF inline parser did not advance to the next unit");
-    }
-    unit = next;
+std::vector<InlineCallsiteContext> discover_inline_call_chain(
+    const Debugger& debugger, const ElfFile& preferred_elf,
+    const InspectionFrameContext& frame) {
+  validate_inspection_frame(debugger, frame);
+  const std::string module_path =
+      frame.module_path.empty() ? preferred_elf.path() : frame.module_path;
+  const ElfFile module(module_path);
+  const auto bias = module.load_bias(frame.process_pid);
+  if (frame.runtime_pc < bias) {
+    throw std::runtime_error(
+        "inspection-frame inline discovery PC is below module load bias");
   }
-  return {};
+  const auto virtual_pc =
+      static_cast<std::uint64_t>(frame.runtime_pc - bias);
+  return discover_inline_call_chain_for_module(
+      virtual_pc, module.path(), module.path());
 }
 
 std::vector<LocalDiscoveryEntry> discover_local_values(
@@ -817,24 +863,30 @@ std::vector<LocalDiscoveryEntry> discover_inline_local_values(
   const auto owner =
       resolve_snapshot_module_address(snapshot, lookup_runtime_pc, module_paths);
   if (owner.module_path != frame.module_path) {
-    throw std::logic_error("snapshot inline local discovery module ownership changed");
+    throw std::logic_error(
+        "snapshot inline local discovery module ownership changed");
   }
   const auto debug_path = module_paths.resolve_debug_file(owner.module_path);
-  const auto sections = read_debug_sections(debug_path);
-  const auto ranges = read_debug_ranges(debug_path);
+  return discover_inline_local_values_for_module(
+      owner.virtual_address, inline_die_offset, debug_path);
+}
 
-  std::size_t unit = 0;
-  while (unit < sections.info.size()) {
-    std::size_t next = unit;
-    const auto result = discover_inline_locals_unit(
-        sections, ranges, owner.virtual_address, inline_die_offset, unit, next);
-    if (result) return *result;
-    if (next <= unit) {
-      throw std::runtime_error("DWARF inline-local parser did not advance to the next unit");
-    }
-    unit = next;
+std::vector<LocalDiscoveryEntry> discover_inline_local_values(
+    const Debugger& debugger, const ElfFile& preferred_elf,
+    const InspectionFrameContext& frame, std::size_t inline_die_offset) {
+  validate_inspection_frame(debugger, frame);
+  const std::string module_path =
+      frame.module_path.empty() ? preferred_elf.path() : frame.module_path;
+  const ElfFile module(module_path);
+  const auto bias = module.load_bias(frame.process_pid);
+  if (frame.runtime_pc < bias) {
+    throw std::runtime_error(
+        "inspection-frame inline local discovery PC is below module load bias");
   }
-  throw std::runtime_error("selected inline DIE is unavailable in the owning debug file");
+  const auto virtual_pc =
+      static_cast<std::uint64_t>(frame.runtime_pc - bias);
+  return discover_inline_local_values_for_module(
+      virtual_pc, inline_die_offset, module.path());
 }
 
 LocalScalarValue inspect_inline_local_value(

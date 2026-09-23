@@ -425,6 +425,13 @@ std::optional<LocalValueType> selected_inline_direct_structure_type(
 bool frame_zero_fbreg_value_eligible(
     const LocalValueType& value_type,
     const std::optional<LocalValueType>& pointee_type) {
+  if (value_type.kind == LocalValueKind::Floating) {
+    return value_type.byte_size == sizeof(double) &&
+           !value_type.is_signed && value_type.members.empty() &&
+           !value_type.array_type && !value_type.enum_type &&
+           !pointee_type.has_value();
+  }
+
   if (value_type.kind == LocalValueKind::Pointer) {
     return value_type.byte_size == sizeof(std::uintptr_t) &&
            !value_type.is_signed && value_type.members.empty() &&
@@ -624,46 +631,57 @@ std::optional<LocalScalarValue> inspect_inline_scalar_unit(
         "selected-inline local has no supported DW_FORM_ref4 type");
   }
 
-  const auto pointee_type = resolve_pointer_pointee_type(dies, type->number);
+  const auto floating_type =
+      resolve_snapshot_floating_type(dies, type->number);
+  const auto pointee_type =
+      floating_type ? std::optional<LocalValueType>{}
+                    : resolve_pointer_pointee_type(dies, type->number);
   const auto direct_structure =
-      pointee_type ? std::optional<LocalValueType>{}
-                   : selected_inline_direct_structure_type(dies, type->number);
+      (floating_type || pointee_type)
+          ? std::optional<LocalValueType>{}
+          : selected_inline_direct_structure_type(dies, type->number);
   const auto direct_union =
-      (pointee_type || direct_structure)
+      (floating_type || pointee_type || direct_structure)
           ? std::optional<LocalValueType>{}
           : resolve_bounded_union_type(dies, type->number);
   const auto direct_array =
-      (pointee_type || direct_structure || direct_union)
+      (floating_type || pointee_type || direct_structure || direct_union)
           ? std::optional<LocalValueType>{}
           : resolve_bounded_fixed_array_type(dies, type->number);
   const auto direct_enum =
-      (pointee_type || direct_structure || direct_union || direct_array)
+      (floating_type || pointee_type || direct_structure || direct_union ||
+       direct_array)
           ? std::optional<LocalEnumType>{}
           : resolve_bounded_enum_type(dies, type->number);
   auto value_type =
-      pointee_type
-          ? LocalValueType{sizeof(std::uintptr_t), false, LocalValueKind::Pointer, {}}
-          : direct_structure
-                ? *direct_structure
-                : direct_union
-                      ? *direct_union
-                      : direct_array
-                            ? *direct_array
-                            : direct_enum
-                                  ? LocalValueType{direct_enum->byte_size,
+      floating_type
+          ? *floating_type
+          : pointee_type
+                ? LocalValueType{sizeof(std::uintptr_t), false,
+                                 LocalValueKind::Pointer, {}}
+                : direct_structure
+                      ? *direct_structure
+                      : direct_union
+                            ? *direct_union
+                            : direct_array
+                                  ? *direct_array
+                                  : direct_enum
+                                        ? LocalValueType{
+                                              direct_enum->byte_size,
                                               direct_enum->is_signed,
                                               LocalValueKind::Enumeration, {}}
-                                  : resolve_value_type(dies, type->number);
+                                        : resolve_value_type(dies, type->number);
   if (direct_enum) {
     value_type.enum_type = *direct_enum;
   }
-  if (!direct_structure && !direct_union && !direct_array && !direct_enum &&
+  if (!floating_type && !direct_structure && !direct_union && !direct_array &&
+      !direct_enum &&
       ((value_type.kind != LocalValueKind::Integer &&
         value_type.kind != LocalValueKind::Pointer) ||
        value_type.byte_size == 0 ||
        value_type.byte_size > sizeof(std::uint64_t))) {
     throw std::runtime_error(
-        "selected-inline value materialization requires a bounded integer/pointer scalar");
+        "selected-inline value materialization requires a bounded scalar");
   }
 
   std::vector<std::byte> expression;

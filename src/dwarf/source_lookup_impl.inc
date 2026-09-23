@@ -2372,17 +2372,44 @@ LocalScalarValue materialize_live_scalar(
           throw std::logic_error(
               "live pointer received malformed bounded structure pointee metadata");
         }
+        std::size_t integer_members = 0;
+        std::size_t pointer_members = 0;
         for (const auto& member : pointee_type->members) {
-          if (member.kind != LocalValueKind::Integer ||
-              member.byte_size == 0 ||
+          if (member.byte_size == 0 ||
               member.byte_size > sizeof(std::uint64_t) ||
               member.offset > pointee_type->byte_size ||
               member.byte_size > pointee_type->byte_size - member.offset ||
-              member.pointee_type || member.bit_slice || member.enum_type ||
-              !member.members.empty()) {
+              member.bit_slice || member.enum_type || !member.members.empty()) {
             throw std::logic_error(
-                "live pointer structure pointee is outside the flat integer-member model");
+                "live pointer structure pointee has invalid bounded direct-member metadata");
           }
+          if (member.kind == LocalValueKind::Integer) {
+            if (member.pointee_type) {
+              throw std::logic_error(
+                  "live pointer structure integer member unexpectedly carries pointee metadata");
+            }
+            ++integer_members;
+            continue;
+          }
+          if (member.kind == LocalValueKind::Pointer) {
+            if (member.byte_size != sizeof(std::uintptr_t) ||
+                member.is_signed || !member.pointee_type ||
+                member.pointee_type->byte_size != sizeof(std::int32_t) ||
+                !member.pointee_type->is_signed) {
+              throw std::logic_error(
+                  "live pointer structure pointer member is outside the bounded signed-int32 pointee model");
+            }
+            ++pointer_members;
+            continue;
+          }
+          throw std::logic_error(
+              "live pointer structure pointee has an unsupported direct-member kind");
+        }
+        if (pointer_members != 0 &&
+            (pointee_type->members.size() != 2 ||
+             integer_members != 1 || pointer_members != 1)) {
+          throw std::logic_error(
+              "live pointer structure pointee exceeds the one-scalar/one-pointer member model");
         }
       } else {
         throw std::logic_error(
@@ -2854,15 +2881,15 @@ LocalScalarValue inspect_local_value(const Debugger& debugger,
       "inspection-frame PC is not covered by a supported DWARF4/5 subprogram");
 }
 
-LocalScalarValue dereference_local_pointer(
-    const Debugger& debugger, const ElfFile& preferred_elf,
-    const InspectionFrameContext& frame, std::string_view name) {
-  const auto pointer =
-      inspect_local_value(debugger, preferred_elf, frame, name);
+namespace {
+
+LocalScalarValue dereference_materialized_live_pointer(
+    const Debugger& debugger, const LocalScalarValue& pointer,
+    std::string result_name) {
   if (pointer.kind != LocalValueKind::Pointer || !pointer.pointee_type) {
     throw std::runtime_error(
         "local value is not a pointer with bounded pointee metadata: " +
-        std::string(name));
+        pointer.name);
   }
   if (pointer.raw_value == 0) {
     throw std::runtime_error("cannot dereference a null live pointer");
@@ -2894,16 +2921,35 @@ LocalScalarValue dereference_local_pointer(
           "live pointer integer pointee has invalid bounded metadata");
     }
     return LocalScalarValue{
-        pointer.module_path, "*" + pointer.name,
+        pointer.module_path, std::move(result_name),
         decode_integer(bytes, 0, pointee.byte_size),
         pointee.byte_size, pointee.is_signed, LocalValueKind::Integer};
   }
   if (pointee.kind == LocalValueKind::Structure) {
     const ElfFile module(pointer.module_path);
-    return decode_structure(module, "*" + pointer.name, pointee, bytes);
+    return decode_structure(module, result_name, pointee, bytes);
   }
   throw std::runtime_error(
       "live pointer pointee kind is unsupported for bounded dereference");
+}
+
+}  // namespace
+
+LocalScalarValue dereference_local_pointer(
+    const Debugger& debugger, const InspectionFrameContext& frame,
+    const LocalScalarValue& pointer) {
+  validate_inspection_frame(debugger, frame);
+  return dereference_materialized_live_pointer(
+      debugger, pointer, "*(" + pointer.name + ")");
+}
+
+LocalScalarValue dereference_local_pointer(
+    const Debugger& debugger, const ElfFile& preferred_elf,
+    const InspectionFrameContext& frame, std::string_view name) {
+  const auto pointer =
+      inspect_local_value(debugger, preferred_elf, frame, name);
+  return dereference_materialized_live_pointer(
+      debugger, pointer, "*" + pointer.name);
 }
 
 LocalIntegerValue inspect_local_integer(const Debugger& debugger,

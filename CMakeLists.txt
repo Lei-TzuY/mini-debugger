@@ -333,18 +333,31 @@ if(BUILD_TESTING)
   add_executable(dwarf_line_integration tests/dwarf_line_integration.cpp)
   target_link_libraries(dwarf_line_integration PRIVATE mdbg_core)
   target_compile_options(dwarf_line_integration PRIVATE -Wall -Wextra -Wpedantic -Werror)
+  add_test(NAME live_enum_dwarf_oracle_pie
+    COMMAND python3
+      ${CMAKE_CURRENT_SOURCE_DIR}/tests/live_enum_dwarf_oracle.py
+      $<TARGET_FILE:formal_parameter_fixture_pie>)
+  add_test(NAME live_enum_dwarf_oracle_nopie
+    COMMAND python3
+      ${CMAKE_CURRENT_SOURCE_DIR}/tests/live_enum_dwarf_oracle.py
+      $<TARGET_FILE:formal_parameter_fixture_nopie>)
+
   add_test(NAME dwarf_line_integration_pie
     COMMAND dwarf_line_integration
       $<TARGET_FILE:debug_line_fixture_pie>
       $<TARGET_FILE:debugger_fixture_stripped>
       $<TARGET_FILE:debug_line_fixture_v5>
       $<TARGET_FILE:formal_parameter_fixture_pie>)
+  set_tests_properties(dwarf_line_integration_pie PROPERTIES
+    DEPENDS live_enum_dwarf_oracle_pie)
   add_test(NAME dwarf_line_integration_nopie
     COMMAND dwarf_line_integration
       $<TARGET_FILE:debug_line_fixture_nopie>
       $<TARGET_FILE:debugger_fixture_stripped>
       $<TARGET_FILE:debug_line_fixture_v5>
       $<TARGET_FILE:formal_parameter_fixture_nopie>)
+  set_tests_properties(dwarf_line_integration_nopie PROPERTIES
+    DEPENDS live_enum_dwarf_oracle_nopie)
 
   add_executable(dwarf5_local_value_integration tests/dwarf5_local_value_integration.cpp)
   target_link_libraries(dwarf5_local_value_integration PRIVATE mdbg_core)

@@ -2608,10 +2608,6 @@ std::optional<LocalScalarValue> inspect_unit(const DebugSections& sections,
   }
 
   const auto value_type = resolve_value_type(dies, type->number);
-  if (value_type.kind == LocalValueKind::Array) {
-    throw std::runtime_error(
-        "live fixed-array materialization is outside current compiler evidence");
-  }
   if (value_type.kind == LocalValueKind::Union) {
     throw std::runtime_error(
         "live union materialization is outside current compiler evidence");
@@ -2626,7 +2622,8 @@ std::optional<LocalScalarValue> inspect_unit(const DebugSections& sections,
     throw std::runtime_error("local value has no supported DW_AT_location form");
   }
 
-  if (value_type.kind != LocalValueKind::Structure && location_expression.size() == 1) {
+  if (value_type.kind != LocalValueKind::Structure &&
+      value_type.kind != LocalValueKind::Array && location_expression.size() == 1) {
     const auto op = std::to_integer<std::uint8_t>(location_expression.front());
     const auto regs = debugger.registers();
     if (op == kDwOpReg0) {
@@ -2639,7 +2636,8 @@ std::optional<LocalScalarValue> inspect_unit(const DebugSections& sections,
     }
   }
 
-  if (value_type.kind != LocalValueKind::Structure && !location_expression.empty() &&
+  if (value_type.kind != LocalValueKind::Structure &&
+      value_type.kind != LocalValueKind::Array && !location_expression.empty() &&
       std::to_integer<std::uint8_t>(location_expression.front()) == kDwOpEntryValue) {
     const auto raw = truncate_integer(
         evaluate_entry_rdi(location_expression, debugger, module, subprogram_die),
@@ -2647,7 +2645,8 @@ std::optional<LocalScalarValue> inspect_unit(const DebugSections& sections,
     return materialize_live_scalar(module, name, value_type, raw);
   }
 
-  if (value_type.kind != LocalValueKind::Structure && !location_expression.empty() &&
+  if (value_type.kind != LocalValueKind::Structure &&
+      value_type.kind != LocalValueKind::Array && !location_expression.empty() &&
       std::to_integer<std::uint8_t>(location_expression.front()) == kDwOpBreg8) {
     const auto raw = truncate_integer(
         evaluate_composite_stack_value(location_expression, debugger),
@@ -2655,7 +2654,8 @@ std::optional<LocalScalarValue> inspect_unit(const DebugSections& sections,
     return materialize_live_scalar(module, name, value_type, raw);
   }
 
-  if (value_type.kind != LocalValueKind::Structure && !location_expression.empty() &&
+  if (value_type.kind != LocalValueKind::Structure &&
+      value_type.kind != LocalValueKind::Array && !location_expression.empty() &&
       std::to_integer<std::uint8_t>(location_expression.front()) == kDwOpBreg3) {
     const auto raw = truncate_integer(
         evaluate_breg3_xor_stack_value(location_expression, debugger.registers().rbx),
@@ -2663,7 +2663,8 @@ std::optional<LocalScalarValue> inspect_unit(const DebugSections& sections,
     return materialize_live_scalar(module, name, value_type, raw);
   }
 
-  if (value_type.kind != LocalValueKind::Structure && !location_expression.empty() &&
+  if (value_type.kind != LocalValueKind::Structure &&
+      value_type.kind != LocalValueKind::Array && !location_expression.empty() &&
       std::to_integer<std::uint8_t>(location_expression.front()) == kDwOpBreg5) {
     const bool stack_value =
         std::to_integer<std::uint8_t>(location_expression.back()) == kDwOpStackValue;
@@ -2699,6 +2700,10 @@ std::optional<LocalScalarValue> inspect_unit(const DebugSections& sections,
       throw std::runtime_error(
           "local struct is not in a supported compiler-proven fbreg/register-piece form");
     }
+    if (value_type.kind == LocalValueKind::Array) {
+      throw std::runtime_error(
+          "live fixed array is not in the compiler-proven DW_OP_fbreg form");
+    }
     throw std::runtime_error(
         "local value location is not a supported compiler-proven register/stack/fbreg form");
   }
@@ -2716,6 +2721,15 @@ std::optional<LocalScalarValue> inspect_unit(const DebugSections& sections,
       throw std::runtime_error("short local-struct memory read");
     }
     return decode_structure(module, name, value_type, bytes);
+  }
+  if (value_type.kind == LocalValueKind::Array) {
+    const auto bytes = debugger.read_memory(static_cast<std::uintptr_t>(address),
+                                            value_type.byte_size);
+    if (bytes.size() != value_type.byte_size) {
+      throw std::runtime_error("short live fixed-array memory read");
+    }
+    return materialize_bounded_array_bytes(
+        module.path(), name, value_type, bytes);
   }
   return materialize_live_scalar(
       module, name, value_type,
@@ -2859,7 +2873,8 @@ std::optional<LocalScalarValue> inspect_caller_stack_unit(
         "historical live enum requires compiler-proven DW_OP_reg3 (rbx)");
   }
 
-  if (value_type.kind != LocalValueKind::Structure && !location_expression.empty() &&
+  if (value_type.kind != LocalValueKind::Structure &&
+      value_type.kind != LocalValueKind::Array && !location_expression.empty() &&
       std::to_integer<std::uint8_t>(location_expression.front()) == kDwOpBreg3) {
     if (!frame.registers.rbx) {
       throw std::runtime_error(

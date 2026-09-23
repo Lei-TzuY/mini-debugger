@@ -52,8 +52,10 @@ std::string run_cli(const std::string& mdbg_path,
   const std::string script =
       "break historical_pointer_callee_probe\n"
       "continue\n"
+      "locals\n"
       "bt\n"
       "frame 1\n"
+      "locals\n"
       "print historical_pointer\n"
       "deref historical_pointer\n"
       "continue\n";
@@ -114,11 +116,31 @@ std::string run_cli(const std::string& mdbg_path,
 void verify_historical_pointer_cli(const std::string& fixture,
                                    const std::string& mdbg_path) {
   const auto output = run_cli(mdbg_path, fixture);
+  const auto selected = output.find("selected inspection frame 1");
+  require(selected != std::string::npos,
+          "live CLI did not select historical inspection frame 1\n" + output);
   require(output.find("#0 ") != std::string::npos &&
               output.find("#1 ") != std::string::npos,
           "live CLI backtrace did not expose a caller frame\n" + output);
-  require(output.find("selected inspection frame 1") != std::string::npos,
-          "live CLI did not select historical inspection frame 1\n" + output);
+
+  const auto current_catalogue = output.substr(0, selected);
+  require(current_catalogue.find("parameter input") != std::string::npos,
+          "live current-frame locals did not expose callee parameter input\n" +
+              output);
+  require(current_catalogue.find("parameter historical_pointer") ==
+              std::string::npos,
+          "live current-frame locals leaked caller-only historical_pointer\n" +
+              output);
+
+  const auto historical_catalogue = output.substr(selected);
+  require(historical_catalogue.find("parameter historical_pointer") !=
+              std::string::npos,
+          "live historical-frame locals did not expose caller parameter historical_pointer\n" +
+              output);
+  require(historical_catalogue.find("parameter input") == std::string::npos,
+          "live historical-frame locals leaked callee-only parameter input\n" +
+              output);
+
   require(output.find("historical_pointer = 0x") != std::string::npos,
           "live CLI did not inspect the historical pointer\n" + output);
   require(output.find("*historical_pointer = 324508639") !=

@@ -422,7 +422,20 @@ std::optional<LocalValueType> selected_inline_direct_structure_type(
   throw std::runtime_error("selected-inline local type chain is too deep");
 }
 
-bool frame_zero_fbreg_value_eligible(const LocalValueType& value_type) {
+bool frame_zero_fbreg_value_eligible(
+    const LocalValueType& value_type,
+    const std::optional<LocalValueType>& pointee_type) {
+  if (value_type.kind == LocalValueKind::Pointer) {
+    return value_type.byte_size == sizeof(std::uintptr_t) &&
+           !value_type.is_signed && value_type.members.empty() &&
+           !value_type.array_type && !value_type.enum_type &&
+           pointee_type.has_value() &&
+           pointee_type->kind == LocalValueKind::Integer &&
+           pointee_type->byte_size == sizeof(std::int32_t) &&
+           pointee_type->is_signed && pointee_type->members.empty() &&
+           !pointee_type->array_type && !pointee_type->enum_type;
+  }
+
   if (value_type.kind == LocalValueKind::Enumeration) {
     return value_type.byte_size == sizeof(std::uint32_t) &&
            !value_type.is_signed && value_type.members.empty() &&
@@ -670,7 +683,8 @@ std::optional<LocalScalarValue> inspect_inline_scalar_unit(
 
   const auto opcode = std::to_integer<std::uint8_t>(expression.front());
   const bool frame_zero_fbreg_value =
-      frame.index == 0 && frame_zero_fbreg_value_eligible(value_type);
+      frame.index == 0 &&
+      frame_zero_fbreg_value_eligible(value_type, pointee_type);
 
   if (frame.index != 0 ||
       (frame_zero_fbreg_value && opcode == kDwOpFbreg)) {

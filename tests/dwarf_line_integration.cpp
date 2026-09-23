@@ -334,6 +334,67 @@ void test_live_array_api(const std::string& fixture) {
           "live-array fixture did not exit cleanly after inspection");
 }
 
+void test_live_union_api(const std::string& fixture) {
+  auto debugger = mdbg::Debugger::launch(fixture, {});
+  const mdbg::ElfFile elf(fixture);
+  const auto probe = elf.find_symbol("live_union_probe");
+  require(probe.has_value(),
+          "live_union_probe symbol missing from optimized fixture");
+  const auto address =
+      static_cast<std::uintptr_t>(elf.runtime_address(debugger.pid(), *probe));
+  debugger.add_breakpoint(address);
+  const auto stop = debugger.continue_execution();
+  require(stop.reason == mdbg::StopReason::Breakpoint &&
+              stop.breakpoint_address == address,
+          "live-union fixture did not stop while the union was active");
+
+  const auto value = mdbg::inspect_local_value(debugger, elf, "live_union");
+  require(value.name == "live_union" &&
+              value.kind == mdbg::LocalValueKind::Union &&
+              value.byte_size == sizeof(std::uint32_t) &&
+              value.members.size() == 2,
+          "live union lost canonical root identity");
+  require(value.members[0].name == "signed_value" &&
+              value.members[0].offset == 0 &&
+              value.members[0].byte_size == sizeof(std::int32_t) &&
+              value.members[0].is_signed &&
+              value.members[1].name == "unsigned_value" &&
+              value.members[1].offset == 0 &&
+              value.members[1].byte_size == sizeof(std::uint32_t) &&
+              !value.members[1].is_signed,
+          "live union member metadata does not match compiler evidence");
+
+  const auto signed_view =
+      mdbg::inspect_local_union_member(value, "signed_value");
+  require(signed_view.name == "live_union.signed_value" &&
+              signed_view.kind == mdbg::LocalValueKind::Integer &&
+              signed_view.raw_value == UINT64_C(0x44556677) &&
+              signed_view.byte_size == sizeof(std::int32_t) &&
+              signed_view.is_signed,
+          "live signed union member view was not recovered exactly");
+
+  const auto unsigned_view =
+      mdbg::inspect_local_union_member(value, "unsigned_value");
+  require(unsigned_view.name == "live_union.unsigned_value" &&
+              unsigned_view.kind == mdbg::LocalValueKind::Integer &&
+              unsigned_view.raw_value == UINT64_C(0x44556677) &&
+              unsigned_view.byte_size == sizeof(std::uint32_t) &&
+              !unsigned_view.is_signed,
+          "live unsigned union member view was not recovered exactly");
+
+  bool missing = false;
+  try {
+    (void)mdbg::inspect_local_union_member(value, "missing");
+  } catch (const std::runtime_error&) {
+    missing = true;
+  }
+  require(missing, "live union accepted an unknown member");
+
+  const auto exit = debugger.continue_execution();
+  require(exit.reason == mdbg::StopReason::Exited && exit.value == 0,
+          "live-union fixture did not exit cleanly after inspection");
+}
+
 std::string run_cli_script(const std::string& integration_path, const std::string& fixture,
                            const char* mode, const std::string& script,
                            const char* context) {
@@ -524,6 +585,35 @@ void test_cli_live_array(const std::string& integration_path,
           "CLI did not reject an out-of-range live array index\n" + output);
 }
 
+void test_cli_live_union(const std::string& integration_path,
+                         const std::string& fixture) {
+  const auto output = run_cli_script(
+      integration_path, fixture, nullptr,
+      "break live_union_probe\n"
+      "continue\n"
+      "print live_union\n"
+      "union-member live_union signed_value\n"
+      "union-member live_union unsigned_value\n"
+      "union-member live_union missing\n"
+      "continue\n",
+      "live union CLI");
+  require(output.find("Breakpoint 1") != std::string::npos,
+          "CLI did not install the live-union probe breakpoint\n" + output);
+  require(output.find("live_union = union{signed_value, unsigned_value}") !=
+              std::string::npos,
+          "CLI did not render explicit live union member choices\n" + output);
+  require(output.find("live_union.signed_value = 0x44556677") !=
+              std::string::npos,
+          "CLI did not render signed live union member selection\n" + output);
+  require(output.find("live_union.unsigned_value = 0x44556677") !=
+              std::string::npos,
+          "CLI did not render unsigned live union member selection\n" + output);
+  require(output.find(
+              "union-member failed: bounded selected-inline union has no member named: missing") !=
+              std::string::npos,
+          "CLI did not deterministically reject missing live union member\n" + output);
+}
+
 void test_missing_debug_line(const std::string& stripped_fixture) {
   const mdbg::DwarfLineTable lines(stripped_fixture);
   require(!lines.available(), "stripped fixture must not claim DWARF line coverage");
@@ -551,6 +641,8 @@ int main(int argc, char** argv) {
     test_cli_live_enum(argv[0], argv[4]);
     test_live_array_api(argv[4]);
     test_cli_live_array(argv[0], argv[4]);
+    test_live_union_api(argv[4]);
+    test_cli_live_union(argv[0], argv[4]);
     return 0;
   } catch (const std::exception& error) {
     std::fprintf(stderr, "DWARF line integration failure: %s\n", error.what());

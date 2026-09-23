@@ -2408,6 +2408,10 @@ LocalScalarValue materialize_bounded_array_bytes(
     std::string_view module_path, std::string_view name,
     const LocalValueType& value_type, const std::vector<std::byte>& bytes);
 
+LocalScalarValue materialize_bounded_union_bytes(
+    std::string_view module_path, std::string_view name,
+    const LocalValueType& value_type, const std::vector<std::byte>& bytes);
+
 LocalScalarValue materialize_live_scalar(
     const ElfFile& module, std::string_view name,
     const LocalValueType& value_type, std::uint64_t raw,
@@ -2614,10 +2618,6 @@ std::optional<LocalScalarValue> inspect_unit(const DebugSections& sections,
   }
 
   const auto value_type = resolve_value_type(dies, type->number);
-  if (value_type.kind == LocalValueKind::Union) {
-    throw std::runtime_error(
-        "live union materialization is outside current compiler evidence");
-  }
   std::vector<std::byte> location_expression;
   if (location->form == kDwFormExprloc) {
     location_expression = location->expression;
@@ -2629,6 +2629,7 @@ std::optional<LocalScalarValue> inspect_unit(const DebugSections& sections,
   }
 
   if (value_type.kind != LocalValueKind::Structure &&
+      value_type.kind != LocalValueKind::Union &&
       value_type.kind != LocalValueKind::Array && location_expression.size() == 1) {
     const auto op = std::to_integer<std::uint8_t>(location_expression.front());
     const auto regs = debugger.registers();
@@ -2643,6 +2644,7 @@ std::optional<LocalScalarValue> inspect_unit(const DebugSections& sections,
   }
 
   if (value_type.kind != LocalValueKind::Structure &&
+      value_type.kind != LocalValueKind::Union &&
       value_type.kind != LocalValueKind::Array && !location_expression.empty() &&
       std::to_integer<std::uint8_t>(location_expression.front()) == kDwOpEntryValue) {
     const auto raw = truncate_integer(
@@ -2652,6 +2654,7 @@ std::optional<LocalScalarValue> inspect_unit(const DebugSections& sections,
   }
 
   if (value_type.kind != LocalValueKind::Structure &&
+      value_type.kind != LocalValueKind::Union &&
       value_type.kind != LocalValueKind::Array && !location_expression.empty() &&
       std::to_integer<std::uint8_t>(location_expression.front()) == kDwOpBreg8) {
     const auto raw = truncate_integer(
@@ -2661,6 +2664,7 @@ std::optional<LocalScalarValue> inspect_unit(const DebugSections& sections,
   }
 
   if (value_type.kind != LocalValueKind::Structure &&
+      value_type.kind != LocalValueKind::Union &&
       value_type.kind != LocalValueKind::Array && !location_expression.empty() &&
       std::to_integer<std::uint8_t>(location_expression.front()) == kDwOpBreg3) {
     const auto raw = truncate_integer(
@@ -2670,6 +2674,7 @@ std::optional<LocalScalarValue> inspect_unit(const DebugSections& sections,
   }
 
   if (value_type.kind != LocalValueKind::Structure &&
+      value_type.kind != LocalValueKind::Union &&
       value_type.kind != LocalValueKind::Array && !location_expression.empty() &&
       std::to_integer<std::uint8_t>(location_expression.front()) == kDwOpBreg5) {
     const bool stack_value =
@@ -2710,6 +2715,10 @@ std::optional<LocalScalarValue> inspect_unit(const DebugSections& sections,
       throw std::runtime_error(
           "live fixed array is not in the compiler-proven DW_OP_fbreg form");
     }
+    if (value_type.kind == LocalValueKind::Union) {
+      throw std::runtime_error(
+          "live union is not in the compiler-proven DW_OP_fbreg form");
+    }
     throw std::runtime_error(
         "local value location is not a supported compiler-proven register/stack/fbreg form");
   }
@@ -2735,6 +2744,15 @@ std::optional<LocalScalarValue> inspect_unit(const DebugSections& sections,
       throw std::runtime_error("short live fixed-array memory read");
     }
     return materialize_bounded_array_bytes(
+        module.path(), name, value_type, bytes);
+  }
+  if (value_type.kind == LocalValueKind::Union) {
+    const auto bytes = debugger.read_memory(static_cast<std::uintptr_t>(address),
+                                            value_type.byte_size);
+    if (bytes.size() != value_type.byte_size) {
+      throw std::runtime_error("short live union memory read");
+    }
+    return materialize_bounded_union_bytes(
         module.path(), name, value_type, bytes);
   }
   return materialize_live_scalar(
@@ -2880,6 +2898,7 @@ std::optional<LocalScalarValue> inspect_caller_stack_unit(
   }
 
   if (value_type.kind != LocalValueKind::Structure &&
+      value_type.kind != LocalValueKind::Union &&
       value_type.kind != LocalValueKind::Array && !location_expression.empty() &&
       std::to_integer<std::uint8_t>(location_expression.front()) == kDwOpBreg3) {
     if (!frame.registers.rbx) {

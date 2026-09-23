@@ -88,10 +88,36 @@ inline void validate_terminal_member(const LocalStructMember& member,
   } else if (member.kind == LocalValueKind::Pointer) {
     if (member.byte_size != sizeof(std::uintptr_t) || member.is_signed ||
         !member.pointee_type || member.enum_type || member.bit_slice ||
-        member.pointee_type->byte_size == 0 ||
-        member.pointee_type->byte_size > sizeof(std::uint64_t)) {
+        member.pointee_type->byte_size == 0) {
       throw std::logic_error(std::string(context) +
                              " pointer has invalid bounded pointee metadata");
+    }
+    const auto& pointee = *member.pointee_type;
+    if (pointee.kind == LocalValueKind::Integer) {
+      if (pointee.byte_size > sizeof(std::uint64_t) ||
+          !pointee.members.empty()) {
+        throw std::logic_error(std::string(context) +
+                               " integer pointee metadata is malformed");
+      }
+    } else if (pointee.kind == LocalValueKind::Structure) {
+      if (pointee.byte_size > sizeof(std::uint64_t) ||
+          pointee.members.empty() || pointee.members.size() > 32) {
+        throw std::logic_error(std::string(context) +
+                               " structure pointee exceeds the bounded shallow model");
+      }
+      for (const auto& nested : pointee.members) {
+        if (nested.kind != LocalValueKind::Integer ||
+            nested.byte_size == 0 ||
+            nested.byte_size > sizeof(std::uint64_t) ||
+            nested.offset > pointee.byte_size ||
+            nested.byte_size > pointee.byte_size - nested.offset) {
+          throw std::logic_error(std::string(context) +
+                                 " structure pointee member metadata is malformed");
+        }
+      }
+    } else {
+      throw std::logic_error(std::string(context) +
+                             " pointer pointee kind is unsupported");
     }
   } else if (member.kind == LocalValueKind::Enumeration) {
     if (member.pointee_type || member.bit_slice || !member.enum_type ||
@@ -297,9 +323,18 @@ inline LocalScalarValue inspect_local_aggregate_member(
       member.kind};
   inline_member_detail::copy_storage(result, aggregate, member.offset);
   if (member.kind == LocalValueKind::Pointer) {
-    result.pointee_type = LocalValueType{
-        member.pointee_type->byte_size, member.pointee_type->is_signed,
-        LocalValueKind::Integer, {}};
+    const auto& pointee = *member.pointee_type;
+    LocalValueType selected_pointee{
+        pointee.byte_size, pointee.is_signed, pointee.kind, {}};
+    if (pointee.kind == LocalValueKind::Structure) {
+      selected_pointee.members.reserve(pointee.members.size());
+      for (const auto& nested : pointee.members) {
+        selected_pointee.members.push_back(LocalStructMemberType{
+            nested.name, nested.offset, nested.byte_size,
+            nested.is_signed, nested.kind});
+      }
+    }
+    result.pointee_type = std::move(selected_pointee);
   } else if (member.kind == LocalValueKind::Enumeration) {
     result.enum_type = member.enum_type;
   } else if (member.kind == LocalValueKind::Structure) {

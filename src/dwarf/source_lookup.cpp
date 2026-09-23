@@ -551,6 +551,7 @@ std::optional<LocalScalarValue> inspect_inline_scalar_unit(
   const auto opcode = std::to_integer<std::uint8_t>(expression.front());
   bool frame_zero_bit_field_structure = false;
   bool frame_zero_nested_structure = false;
+  bool frame_zero_pointer_structure = false;
   if (frame.index == 0 && direct_structure &&
       !value_type.members.empty()) {
     frame_zero_bit_field_structure = std::all_of(
@@ -590,10 +591,22 @@ std::optional<LocalScalarValue> inspect_inline_scalar_unit(
           supported_nested_shape && direct_scalar_count == 1 &&
           nested_structure_count == 1;
     }
+
+    if (value_type.members.size() == 1) {
+      const auto& member = value_type.members.front();
+      frame_zero_pointer_structure =
+          member.kind == LocalValueKind::Pointer && member.offset == 0 &&
+          member.byte_size == sizeof(std::uintptr_t) &&
+          member.pointee_type.has_value() &&
+          member.pointee_type->byte_size == sizeof(std::int32_t) &&
+          member.pointee_type->is_signed && !member.bit_slice &&
+          !member.enum_type && member.members.empty();
+    }
   }
 
   if (frame.index != 0 ||
-      ((frame_zero_bit_field_structure || frame_zero_nested_structure) &&
+      ((frame_zero_bit_field_structure || frame_zero_nested_structure ||
+        frame_zero_pointer_structure) &&
        opcode == kDwOpFbreg)) {
     if (opcode != kDwOpFbreg) {
       throw std::runtime_error(

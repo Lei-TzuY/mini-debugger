@@ -114,9 +114,14 @@ def verify(path):
 
     return_pc = call_return_pc(path)
     expression, owned_range = active_location(path, location, return_pc)
-    if not expression.startswith("DW_OP_"):
+    supported = (
+        expression.startswith("DW_OP_fbreg")
+        or expression.startswith("DW_OP_breg3 (rbx)")
+    )
+    if not supported:
         raise RuntimeError(
-            "historical enum active location is not a DWARF operation"
+            "historical enum requires a new historical machine-state form: "
+            + expression
         )
     range_text = (
         "direct"

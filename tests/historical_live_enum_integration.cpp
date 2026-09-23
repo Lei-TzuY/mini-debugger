@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <filesystem>
+#include <limits>
 #include <stdexcept>
 #include <string>
 
@@ -42,10 +43,18 @@ void verify_historical_enum(const std::string& fixture) {
   const auto frames = mdbg::build_inspection_frames(debugger, elf, cfi, 3);
   require(frames.size() >= 2,
           "CFI did not recover the historical enum caller frame");
-  const auto caller = elf.find_symbol_by_runtime_address(
-      debugger.pid(), frames[1].runtime_pc);
-  require(caller && caller->symbol.name == "historical_enum_caller",
-          "historical enum frame 1 is not the expected caller");
+  const auto caller_function = elf.find_symbol("historical_enum_caller");
+  require(caller_function.has_value() && caller_function->size != 0,
+          "historical enum caller symbol is missing or has zero size");
+  const auto caller_begin = static_cast<std::uintptr_t>(
+      elf.runtime_address(debugger.pid(), *caller_function));
+  require(caller_function->size <=
+              std::numeric_limits<std::uintptr_t>::max() - caller_begin,
+          "historical enum caller symbol range overflows");
+  const auto caller_end = caller_begin + caller_function->size;
+  require(frames[1].runtime_pc >= caller_begin &&
+              frames[1].runtime_pc < caller_end,
+          "historical enum frame 1 PC is outside the caller function range");
 
   const auto value =
       mdbg::inspect_local_value(debugger, elf, frames[1], "historical_mode");

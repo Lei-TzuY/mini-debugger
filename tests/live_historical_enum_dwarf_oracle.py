@@ -17,24 +17,23 @@ from core_physical_enum_dwarf_oracle import integral_representation
 
 
 def call_return_pc(path):
-    text = run("objdump", "-d", "--disassemble=inspect_entry_parameter", path)
+    text = run("objdump", "-d", "--disassemble=historical_enum_caller", path)
     lines = text.splitlines()
     for index, line in enumerate(lines):
-        if "call" not in line or "<clobber_argument_registers>" not in line:
+        if "call" not in line or "<historical_enum_callee>" not in line:
             continue
         for following in lines[index + 1 :]:
             match = re.match(r"^\s*([0-9a-fA-F]+):", following)
             if match:
                 return int(match.group(1), 16)
     raise RuntimeError(
-        "inspect_entry_parameter has no decodable call to clobber_argument_registers"
+        "historical_enum_caller has no decodable call to historical_enum_callee"
     )
 
 
 def active_location(path, location, pc):
     if "(DW_OP_" in location and "location list" not in location:
-        expression = location.split("(", 1)[1].rsplit(")", 1)[0]
-        return expression, None
+        return location.split("(", 1)[1].rsplit(")", 1)[0], None
 
     match = re.search(r"0x([0-9a-fA-F]+)\s+\(location list\)", location)
     if not match:
@@ -73,7 +72,7 @@ def verify(path):
     info = run("readelf", "--debug-dump=info", path)
     records = parse_records(info)
     variable = find_variable(
-        records, "inspect_entry_parameter", "historical_mode"
+        records, "historical_enum_caller", "historical_mode"
     )
     type_attr = variable["attrs"].get("type")
     location = variable["attrs"].get("location")
@@ -86,19 +85,21 @@ def verify(path):
         records, type_reference(type_attr, "historical_mode"), "historical_mode"
     )
     if enum_type["tag"] != "DW_TAG_enumeration_type":
-        raise RuntimeError("historical_mode is not a compiler enumeration type")
-    if clean_name(enum_type["attrs"].get("name", "")) != "LiveMode":
-        raise RuntimeError("historical_mode compiler enum name changed")
+        raise RuntimeError("historical_mode is not a compiler enum")
+    if clean_name(enum_type["attrs"].get("name", "")) != "HistoricalLiveMode":
+        raise RuntimeError("historical enum compiler name changed")
     size = enum_type["attrs"].get("byte_size")
     if not size or scalar_number(size, "historical enum byte size") != 4:
-        raise RuntimeError("historical_mode enum is not exactly four bytes")
+        raise RuntimeError("historical enum is not exactly four bytes")
     representation, is_signed = integral_representation(records, enum_type)
     if is_signed:
-        raise RuntimeError(
-            "historical_mode compiler enum representation is unexpectedly signed"
-        )
+        raise RuntimeError("historical enum representation is unexpectedly signed")
 
-    expected = {"LiveIdle": 3, "LiveReady": 7, "LiveBusy": 42}
+    expected = {
+        "HistoricalIdle": 3,
+        "HistoricalReady": 7,
+        "HistoricalBusy": 42,
+    }
     actual = {}
     for child in direct_children(records, enum_type):
         if child["tag"] != "DW_TAG_enumerator":
@@ -106,18 +107,16 @@ def verify(path):
         name = clean_name(child["attrs"].get("name", ""))
         value = child["attrs"].get("const_value")
         if not name or value is None:
-            raise RuntimeError("historical enum enumerator lost compiler name/value")
+            raise RuntimeError("historical enum enumerator lost name/value")
         actual[name] = scalar_number(value, f"{name} const_value")
     if actual != expected:
-        raise RuntimeError(
-            f"historical_mode enumerator table changed: {actual}"
-        )
+        raise RuntimeError(f"historical enum table changed: {actual}")
 
     return_pc = call_return_pc(path)
     expression, owned_range = active_location(path, location, return_pc)
     if not expression.startswith("DW_OP_"):
         raise RuntimeError(
-            "historical_mode active compiler location is not a DWARF operation"
+            "historical enum active location is not a DWARF operation"
         )
     range_text = (
         "direct"
@@ -127,8 +126,8 @@ def verify(path):
     print(
         "historical live enum DWARF oracle passed: "
         f"return-pc=0x{return_pc:x} location={expression} range={range_text} "
-        f"type=LiveMode byte-size=4 unsigned representation={representation} "
-        "LiveIdle=3 LiveReady=7 LiveBusy=42"
+        f"type=HistoricalLiveMode byte-size=4 unsigned "
+        f"representation={representation}"
     )
 
 

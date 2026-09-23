@@ -96,6 +96,18 @@ if(BUILD_TESTING)
   target_compile_options(formal_parameter_fixture_v5_nopie PRIVATE -O1 -g -gdwarf-5 -fno-pie)
   target_link_options(formal_parameter_fixture_v5_nopie PRIVATE -no-pie)
 
+  add_executable(historical_live_enum_fixture_pie
+    tests/fixtures/historical_live_enum_fixture.c)
+  target_compile_options(historical_live_enum_fixture_pie PRIVATE
+    -O1 -g -gdwarf-5 -fPIE)
+  target_link_options(historical_live_enum_fixture_pie PRIVATE -pie)
+
+  add_executable(historical_live_enum_fixture_nopie
+    tests/fixtures/historical_live_enum_fixture.c)
+  target_compile_options(historical_live_enum_fixture_nopie PRIVATE
+    -O1 -g -gdwarf-5 -fno-pie)
+  target_link_options(historical_live_enum_fixture_nopie PRIVATE -no-pie)
+
   add_executable(register_piece_fixture_pie tests/fixtures/register_piece_fixture.c)
   target_compile_options(register_piece_fixture_pie PRIVATE -O1 -g -gdwarf-5 -fPIE)
   target_link_options(register_piece_fixture_pie PRIVATE -pie)
@@ -362,25 +374,40 @@ if(BUILD_TESTING)
   add_executable(dwarf5_local_value_integration tests/dwarf5_local_value_integration.cpp)
   target_link_libraries(dwarf5_local_value_integration PRIVATE mdbg_core)
   target_compile_options(dwarf5_local_value_integration PRIVATE -Wall -Wextra -Wpedantic -Werror)
-  add_test(NAME historical_live_enum_dwarf_oracle_pie
-    COMMAND python3
-      ${CMAKE_CURRENT_SOURCE_DIR}/tests/live_historical_enum_dwarf_oracle.py
-      $<TARGET_FILE:formal_parameter_fixture_v5_pie>)
-  add_test(NAME historical_live_enum_dwarf_oracle_nopie
-    COMMAND python3
-      ${CMAKE_CURRENT_SOURCE_DIR}/tests/live_historical_enum_dwarf_oracle.py
-      $<TARGET_FILE:formal_parameter_fixture_v5_nopie>)
   add_test(NAME dwarf5_local_value_integration_pie
     COMMAND dwarf5_local_value_integration
       $<TARGET_FILE:formal_parameter_fixture_v5_pie>
       $<TARGET_FILE:mdbg>)
-  set_tests_properties(dwarf5_local_value_integration_pie PROPERTIES
-    DEPENDS historical_live_enum_dwarf_oracle_pie)
   add_test(NAME dwarf5_local_value_integration_nopie
     COMMAND dwarf5_local_value_integration
       $<TARGET_FILE:formal_parameter_fixture_v5_nopie>
       $<TARGET_FILE:mdbg>)
-  set_tests_properties(dwarf5_local_value_integration_nopie PROPERTIES
+
+  add_executable(historical_live_enum_integration
+    tests/historical_live_enum_integration.cpp)
+  target_link_libraries(historical_live_enum_integration PRIVATE mdbg_core)
+  target_compile_options(historical_live_enum_integration PRIVATE
+    -Wall -Wextra -Wpedantic -Werror)
+
+  add_test(NAME historical_live_enum_dwarf_oracle_pie
+    COMMAND python3
+      ${CMAKE_CURRENT_SOURCE_DIR}/tests/live_historical_enum_dwarf_oracle.py
+      $<TARGET_FILE:historical_live_enum_fixture_pie>)
+  add_test(NAME historical_live_enum_dwarf_oracle_nopie
+    COMMAND python3
+      ${CMAKE_CURRENT_SOURCE_DIR}/tests/live_historical_enum_dwarf_oracle.py
+      $<TARGET_FILE:historical_live_enum_fixture_nopie>)
+
+  add_test(NAME historical_live_enum_integration_pie
+    COMMAND historical_live_enum_integration
+      $<TARGET_FILE:historical_live_enum_fixture_pie>)
+  set_tests_properties(historical_live_enum_integration_pie PROPERTIES
+    DEPENDS historical_live_enum_dwarf_oracle_pie)
+
+  add_test(NAME historical_live_enum_integration_nopie
+    COMMAND historical_live_enum_integration
+      $<TARGET_FILE:historical_live_enum_fixture_nopie>)
+  set_tests_properties(historical_live_enum_integration_nopie PROPERTIES
     DEPENDS historical_live_enum_dwarf_oracle_nopie)
 
   add_executable(register_piece_value_integration tests/register_piece_value_integration.cpp)

@@ -20,7 +20,7 @@ from core_physical_enum_dwarf_oracle import integral_representation
 def active_location(path, location, probe):
     direct = re.search(r"DW_OP_reg0 \(rax\)", location)
     if direct:
-        return "DW_OP_reg0 (rax)", None
+        return "DW_OP_reg5 (rdi)", None
 
     match = re.search(r"0x([0-9a-fA-F]+)\s+\(location list\)", location)
     if not match:
@@ -96,10 +96,10 @@ def verify(path):
         raise RuntimeError(f"live_mode enumerator table changed: {actual}")
 
     expression, owned_range = active_location(path, location, probe)
-    if expression != "DW_OP_reg0 (rax)":
+    if expression != "DW_OP_reg5 (rdi)":
         raise RuntimeError(
-            "live_mode active compiler location is outside the already-supported "
-            "live evaluator: " + expression
+            "live_mode active compiler location is not the compiler-proven "
+            "DW_OP_reg5 (rdi) form: " + expression
         )
 
     range_text = (

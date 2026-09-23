@@ -422,10 +422,17 @@ std::optional<LocalValueType> selected_inline_direct_structure_type(
   throw std::runtime_error("selected-inline local type chain is too deep");
 }
 
-bool frame_zero_fbreg_structure_eligible(
-    const LocalValueType& value_type) {
+bool frame_zero_fbreg_value_eligible(const LocalValueType& value_type) {
+  if (value_type.kind == LocalValueKind::Array) {
+    return value_type.byte_size == 2 * sizeof(std::int32_t) &&
+           value_type.members.empty() && value_type.array_type.has_value() &&
+           value_type.array_type->element_count == 2 &&
+           value_type.array_type->element_byte_size == sizeof(std::int32_t) &&
+           value_type.array_type->element_is_signed &&
+           value_type.array_type->element_kind == LocalValueKind::Integer;
+  }
   if (value_type.kind != LocalValueKind::Structure ||
-      value_type.members.empty()) {
+      value_type.members.empty() || value_type.array_type) {
     return false;
   }
 
@@ -629,12 +636,11 @@ std::optional<LocalScalarValue> inspect_inline_scalar_unit(
   }
 
   const auto opcode = std::to_integer<std::uint8_t>(expression.front());
-  const bool frame_zero_fbreg_structure =
-      frame.index == 0 && direct_structure &&
-      frame_zero_fbreg_structure_eligible(value_type);
+  const bool frame_zero_fbreg_value =
+      frame.index == 0 && frame_zero_fbreg_value_eligible(value_type);
 
   if (frame.index != 0 ||
-      (frame_zero_fbreg_structure && opcode == kDwOpFbreg)) {
+      (frame_zero_fbreg_value && opcode == kDwOpFbreg)) {
     if (opcode != kDwOpFbreg) {
       throw std::runtime_error(
           "caller-frame selected-inline value currently requires compiler-proven DW_OP_fbreg");

@@ -680,6 +680,39 @@ int main(int argc, char** argv) {
         } catch (const std::exception& error) {
           std::cout << "aggregate-member failed: " << error.what() << '\n';
         }
+      } else if (command == "deref-aggregate-member") {
+        std::string name;
+        std::string member_name;
+        std::string extra;
+        input >> name >> member_name >> extra;
+        if (name.empty() || member_name.empty() || !extra.empty()) {
+          std::cout << "usage: deref-aggregate-member <name> <member>\n";
+          continue;
+        }
+        try {
+          const auto aggregate =
+              mdbg::inspect_local_value(debugger, elf, name);
+          const auto member =
+              mdbg::inspect_local_aggregate_member(aggregate, member_name);
+          const auto frame =
+              mdbg::current_inspection_frame(debugger, elf);
+          const auto pointee =
+              mdbg::dereference_local_pointer(debugger, frame, member);
+          if (pointee.kind != mdbg::LocalValueKind::Integer) {
+            throw std::runtime_error(
+                "deref-aggregate-member requires a bounded integer pointee");
+          }
+          std::cout << pointee.name << " = ";
+          if (pointee.is_signed) {
+            std::cout << signed_local_value(pointee);
+          } else {
+            std::cout << pointee.raw_value;
+          }
+          std::cout << '\n';
+        } catch (const std::exception& error) {
+          std::cout << "deref-aggregate-member failed: " << error.what()
+                    << '\n';
+        }
       } else if (command == "union-member") {
         std::string name;
         std::string member_name;
@@ -900,7 +933,9 @@ int main(int argc, char** argv) {
         }
       } else {
         std::cout << "commands: continue, step, next, finish, stepi, regs, bt, list, "
-                     "line <addr|symbol>, print <name>, set follow-fork-mode <parent|child|both>, "
+                     "line <addr|symbol>, print <name>, aggregate-member <name> <member>, "
+                     "deref-aggregate-member <name> <member>, "
+                     "set follow-fork-mode <parent|child|both>, "
                      "set register <name> <value>, set memory <addr|symbol> <byte> [byte...], "
                      "set substitute-path <from> <to>, reg <name>, x <addr|symbol> [len], "
                      "break <addr|symbol|file:line>, delete <id>, process <pid>, thread <tid>, "

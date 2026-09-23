@@ -1,4 +1,5 @@
 #include "debugger/debugger.hpp"
+#include "dwarf/inline_member.hpp"
 #include "dwarf/line_table.hpp"
 #include "dwarf/local_value.hpp"
 #include "elf/elf.hpp"
@@ -281,6 +282,58 @@ void test_live_enum_api(const std::string& fixture) {
           "live-enum fixture did not exit cleanly after inspection");
 }
 
+void test_live_array_api(const std::string& fixture) {
+  auto debugger = mdbg::Debugger::launch(fixture, {});
+  const mdbg::ElfFile elf(fixture);
+  const auto probe = elf.find_symbol("live_array_probe");
+  require(probe.has_value(),
+          "live_array_probe symbol missing from optimized fixture");
+  const auto address =
+      static_cast<std::uintptr_t>(elf.runtime_address(debugger.pid(), *probe));
+  debugger.add_breakpoint(address);
+  const auto stop = debugger.continue_execution();
+  require(stop.reason == mdbg::StopReason::Breakpoint &&
+              stop.breakpoint_address == address,
+          "live-array fixture did not stop while the fixed array was active");
+
+  const auto value = mdbg::inspect_local_value(debugger, elf, "live_array");
+  require(value.name == "live_array" &&
+              value.kind == mdbg::LocalValueKind::Array &&
+              value.byte_size == 3 * sizeof(std::int32_t) &&
+              value.array_type.has_value(),
+          "live fixed array lost canonical root identity");
+  require(value.array_type->element_count == 3 &&
+              value.array_type->element_byte_size == sizeof(std::int32_t) &&
+              value.array_type->element_is_signed &&
+              value.array_type->element_kind == mdbg::LocalValueKind::Integer,
+          "live fixed-array compiler metadata is incorrect");
+  require(value.elements.size() == 3 &&
+              value.elements[0].raw_value == UINT64_C(0x10203040) &&
+              value.elements[1].raw_value == UINT64_C(0x22334455) &&
+              value.elements[2].raw_value == UINT64_C(0x33445566),
+          "live fixed-array bytes were not materialized exactly");
+
+  const auto middle = mdbg::inspect_local_array_element(value, 1);
+  require(middle.name == "live_array[1]" &&
+              middle.kind == mdbg::LocalValueKind::Integer &&
+              middle.byte_size == sizeof(std::int32_t) &&
+              middle.is_signed &&
+              middle.raw_value == UINT64_C(0x22334455),
+          "live fixed-array checked index 1 was not recovered exactly");
+
+  bool rejected = false;
+  try {
+    (void)mdbg::inspect_local_array_element(value, 3);
+  } catch (const std::out_of_range&) {
+    rejected = true;
+  }
+  require(rejected, "live fixed-array out-of-range index was accepted");
+
+  const auto exit = debugger.continue_execution();
+  require(exit.reason == mdbg::StopReason::Exited && exit.value == 0,
+          "live-array fixture did not exit cleanly after inspection");
+}
+
 std::string run_cli_script(const std::string& integration_path, const std::string& fixture,
                            const char* mode, const std::string& script,
                            const char* context) {
@@ -447,6 +500,30 @@ void test_cli_live_enum(const std::string& integration_path,
           "CLI did not render symbolic + numeric live enum identity\n" + output);
 }
 
+void test_cli_live_array(const std::string& integration_path,
+                         const std::string& fixture) {
+  const auto output = run_cli_script(
+      integration_path, fixture, nullptr,
+      "break live_array_probe\n"
+      "continue\n"
+      "print live_array\n"
+      "array-element live_array 1\n"
+      "array-element live_array 3\n"
+      "continue\n",
+      "live fixed-array CLI");
+  require(output.find("Breakpoint 1") != std::string::npos,
+          "CLI did not install the live-array probe breakpoint\n" + output);
+  require(output.find(
+              "live_array = [0x10203040, 0x22334455, 0x33445566]") !=
+              std::string::npos,
+          "CLI did not render the bounded live fixed array\n" + output);
+  require(output.find("live_array[1] = 0x22334455") != std::string::npos,
+          "CLI did not render checked live array index 1\n" + output);
+  require(output.find("array-element failed: array index is out of range") !=
+              std::string::npos,
+          "CLI did not reject an out-of-range live array index\n" + output);
+}
+
 void test_missing_debug_line(const std::string& stripped_fixture) {
   const mdbg::DwarfLineTable lines(stripped_fixture);
   require(!lines.available(), "stripped fixture must not claim DWARF line coverage");
@@ -472,6 +549,8 @@ int main(int argc, char** argv) {
     test_cli_optimized_local(argv[0], argv[4]);
     test_live_enum_api(argv[4]);
     test_cli_live_enum(argv[0], argv[4]);
+    test_live_array_api(argv[4]);
+    test_cli_live_array(argv[0], argv[4]);
     return 0;
   } catch (const std::exception& error) {
     std::fprintf(stderr, "DWARF line integration failure: %s\n", error.what());

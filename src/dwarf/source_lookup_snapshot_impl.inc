@@ -338,7 +338,7 @@ LocalScalarValue materialize_snapshot_xmm_value(
 }
 
 LocalScalarValue materialize_bounded_array_bytes(
-    const SnapshotModuleAddress& owner, std::string_view name,
+    std::string_view module_path, std::string_view name,
     const LocalValueType& value_type, const std::vector<std::byte>& bytes) {
   if (value_type.kind != LocalValueKind::Array || !value_type.array_type ||
       !value_type.members.empty() ||
@@ -354,7 +354,7 @@ LocalScalarValue materialize_bounded_array_bytes(
     throw std::runtime_error(
         "bounded fixed-array bytes exceed the canonical array model");
   }
-  LocalScalarValue result{owner.module_path, std::string(name), 0,
+  LocalScalarValue result{std::string(module_path), std::string(name), 0,
                           value_type.byte_size, false,
                           LocalValueKind::Array};
   result.array_type = value_type.array_type;
@@ -370,6 +370,13 @@ LocalScalarValue materialize_bounded_array_bytes(
         LocalValueKind::Integer});
   }
   return result;
+}
+
+LocalScalarValue materialize_bounded_array_bytes(
+    const SnapshotModuleAddress& owner, std::string_view name,
+    const LocalValueType& value_type, const std::vector<std::byte>& bytes) {
+  return materialize_bounded_array_bytes(
+      owner.module_path, name, value_type, bytes);
 }
 
 LocalScalarValue materialize_bounded_union_bytes(

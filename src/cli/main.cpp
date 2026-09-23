@@ -1,6 +1,7 @@
 #include "breakpoints/user_breakpoint_registry.hpp"
 #include "debugger/debugger.hpp"
 #include "dwarf/eh_frame.hpp"
+#include "dwarf/inline_member.hpp"
 #include "dwarf/line_table.hpp"
 #include "dwarf/local_value.hpp"
 #include "elf/elf.hpp"
@@ -567,6 +568,19 @@ int main(int argc, char** argv) {
               }
             }
             std::cout << " }";
+          } else if (value.kind == mdbg::LocalValueKind::Array) {
+            if (!value.array_type ||
+                value.elements.size() != value.array_type->element_count) {
+              throw std::logic_error(
+                  "live fixed array lost bounded element metadata");
+            }
+            std::cout << '[';
+            for (std::size_t index = 0; index < value.elements.size(); ++index) {
+              if (index != 0) std::cout << ", ";
+              std::cout << "0x" << std::hex << value.elements[index].raw_value
+                        << std::dec;
+            }
+            std::cout << ']';
           } else if (value.kind == mdbg::LocalValueKind::Enumeration) {
             if (!value.enum_type) {
               throw std::logic_error("live enum value lost its type metadata");
@@ -587,6 +601,30 @@ int main(int argc, char** argv) {
           std::cout << '\n';
         } catch (const std::exception& error) {
           std::cout << "print failed: " << error.what() << '\n';
+        }
+      } else if (command == "array-element") {
+        std::string name;
+        std::string index_text;
+        std::string extra;
+        input >> name >> index_text >> extra;
+        if (name.empty() || index_text.empty() || !extra.empty()) {
+          std::cout << "usage: array-element <name> <index>\n";
+          continue;
+        }
+        try {
+          std::size_t consumed = 0;
+          const auto parsed = std::stoull(index_text, &consumed, 10);
+          if (consumed != index_text.size() ||
+              parsed > std::numeric_limits<std::size_t>::max()) {
+            throw std::invalid_argument("invalid array index");
+          }
+          const auto array = mdbg::inspect_local_value(debugger, elf, name);
+          const auto element = mdbg::inspect_local_array_element(
+              array, static_cast<std::size_t>(parsed));
+          std::cout << element.name << " = 0x" << std::hex
+                    << element.raw_value << std::dec << '\n';
+        } catch (const std::exception& error) {
+          std::cout << "array-element failed: " << error.what() << '\n';
         }
       } else if (command == "set") {
         std::string topic;

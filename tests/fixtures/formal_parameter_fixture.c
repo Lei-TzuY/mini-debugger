@@ -18,6 +18,9 @@
 #define SNAPSHOT_FILE_SCALAR_EXPECTED UINT64_C(0x6a09e667f3bcc909)
 #define SNAPSHOT_AGGREGATE_FIRST UINT64_C(0xbb67ae8584caa73b)
 #define SNAPSHOT_AGGREGATE_SECOND UINT64_C(0x3c6ef372fe94f82b)
+#define LIVE_ARRAY_FIRST INT32_C(0x10203040)
+#define LIVE_ARRAY_SECOND INT32_C(0x22334455)
+#define LIVE_ARRAY_THIRD INT32_C(0x33445566)
 
 enum LiveMode {
   LiveIdle = 3,
@@ -143,6 +146,19 @@ __attribute__((noinline)) enum LiveMode inspect_live_enum(void) {
   return live_mode;
 }
 
+__attribute__((noinline)) int32_t inspect_live_array(void) {
+  int32_t live_array[3] = {
+      LIVE_ARRAY_FIRST, LIVE_ARRAY_SECOND, LIVE_ARRAY_THIRD};
+  __asm__ volatile("" : "+m"(live_array) : : "memory");
+  __asm__ volatile(".globl live_array_probe\n"
+                   "live_array_probe:\n"
+                   "nop\n"
+                   : "+m"(live_array)
+                   :
+                   : "memory");
+  return live_array[0] ^ live_array[1] ^ live_array[2];
+}
+
 __attribute__((noinline)) uint64_t inspect_arithmetic_local(
     uint64_t first, uint64_t second, uint64_t third,
     uint64_t fourth, uint64_t fifth, uint64_t sixth) {
@@ -190,6 +206,10 @@ int main(int argc, char** argv) {
   if (inspect_entry_parameter(parameter) != ENTRY_RESULT_EXPECTED) return 2;
   if (inspect_optimized_local() != OPTIMIZED_LOCAL_EXPECTED) return 3;
   if (inspect_live_enum() != LiveBusy) return 8;
+  if (inspect_live_array() !=
+      (LIVE_ARRAY_FIRST ^ LIVE_ARRAY_SECOND ^ LIVE_ARRAY_THIRD)) {
+    return 9;
+  }
   if (inspect_arithmetic_local(UINT64_C(0xa5), UINT64_C(0x70), UINT64_C(0x60),
                                UINT64_C(0x50), UINT64_C(0x40), UINT64_C(0x102030)) !=
       ARITHMETIC_LOCAL_EXPECTED) {

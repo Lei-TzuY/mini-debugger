@@ -420,6 +420,15 @@ if(BUILD_TESTING)
       ${CMAKE_CURRENT_SOURCE_DIR}/tests/live_union_dwarf_oracle.py
       $<TARGET_FILE:formal_parameter_fixture_nopie>)
 
+  add_test(NAME live_bitfield_dwarf_oracle_pie
+    COMMAND python3
+      ${CMAKE_CURRENT_SOURCE_DIR}/tests/live_bitfield_dwarf_oracle.py
+      $<TARGET_FILE:formal_parameter_fixture_pie>)
+  add_test(NAME live_bitfield_dwarf_oracle_nopie
+    COMMAND python3
+      ${CMAKE_CURRENT_SOURCE_DIR}/tests/live_bitfield_dwarf_oracle.py
+      $<TARGET_FILE:formal_parameter_fixture_nopie>)
+
   add_test(NAME dwarf_line_integration_pie
     COMMAND dwarf_line_integration
       $<TARGET_FILE:debug_line_fixture_pie>
@@ -427,7 +436,7 @@ if(BUILD_TESTING)
       $<TARGET_FILE:debug_line_fixture_v5>
       $<TARGET_FILE:formal_parameter_fixture_pie>)
   set_tests_properties(dwarf_line_integration_pie PROPERTIES
-    DEPENDS "live_enum_dwarf_oracle_pie;live_array_dwarf_oracle_pie;live_union_dwarf_oracle_pie")
+    DEPENDS "live_enum_dwarf_oracle_pie;live_array_dwarf_oracle_pie;live_union_dwarf_oracle_pie;live_bitfield_dwarf_oracle_pie")
   add_test(NAME dwarf_line_integration_nopie
     COMMAND dwarf_line_integration
       $<TARGET_FILE:debug_line_fixture_nopie>
@@ -435,7 +444,7 @@ if(BUILD_TESTING)
       $<TARGET_FILE:debug_line_fixture_v5>
       $<TARGET_FILE:formal_parameter_fixture_nopie>)
   set_tests_properties(dwarf_line_integration_nopie PROPERTIES
-    DEPENDS "live_enum_dwarf_oracle_nopie;live_array_dwarf_oracle_nopie;live_union_dwarf_oracle_nopie")
+    DEPENDS "live_enum_dwarf_oracle_nopie;live_array_dwarf_oracle_nopie;live_union_dwarf_oracle_nopie;live_bitfield_dwarf_oracle_nopie")
 
   add_executable(dwarf5_local_value_integration tests/dwarf5_local_value_integration.cpp)
   target_link_libraries(dwarf5_local_value_integration PRIVATE mdbg_core)

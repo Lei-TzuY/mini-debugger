@@ -395,6 +395,63 @@ void test_live_union_api(const std::string& fixture) {
           "live-union fixture did not exit cleanly after inspection");
 }
 
+void test_live_bit_field_api(const std::string& fixture) {
+  auto debugger = mdbg::Debugger::launch(fixture, {});
+  const mdbg::ElfFile elf(fixture);
+  const auto probe = elf.find_symbol("live_bit_field_probe");
+  require(probe.has_value(),
+          "live_bit_field_probe symbol missing from optimized fixture");
+  const auto address =
+      static_cast<std::uintptr_t>(elf.runtime_address(debugger.pid(), *probe));
+  debugger.add_breakpoint(address);
+  const auto stop = debugger.continue_execution();
+  require(stop.reason == mdbg::StopReason::Breakpoint &&
+              stop.breakpoint_address == address,
+          "live bit-field fixture did not stop while the structure was active");
+
+  const auto value = mdbg::inspect_local_value(debugger, elf, "live_bit_fields");
+  require(value.name == "live_bit_fields" &&
+              value.kind == mdbg::LocalValueKind::Structure &&
+              value.byte_size == sizeof(std::uint32_t) &&
+              value.members.size() == 2,
+          "live bit-field structure lost canonical root identity");
+  require(value.members[0].name == "signed_bits" &&
+              value.members[0].kind == mdbg::LocalValueKind::Integer &&
+              value.members[0].byte_size == sizeof(std::int32_t) &&
+              value.members[0].is_signed &&
+              value.members[0].bit_slice.has_value() &&
+              value.members[0].bit_slice->bit_size == 5 &&
+              value.members[0].raw_value == UINT64_C(0xfffffff9),
+          "live signed bit field was not normalized to int32 -7");
+  require(value.members[1].name == "unsigned_bits" &&
+              value.members[1].kind == mdbg::LocalValueKind::Integer &&
+              value.members[1].byte_size == sizeof(std::uint32_t) &&
+              !value.members[1].is_signed &&
+              value.members[1].bit_slice.has_value() &&
+              value.members[1].bit_slice->bit_size == 6 &&
+              value.members[1].raw_value == UINT64_C(41),
+          "live unsigned bit field was not normalized to uint32 41");
+
+  const auto signed_view =
+      mdbg::inspect_local_aggregate_member(value, "signed_bits");
+  require(signed_view.name == "live_bit_fields.signed_bits" &&
+              signed_view.raw_value == UINT64_C(0xfffffff9) &&
+              signed_view.byte_size == sizeof(std::int32_t) &&
+              signed_view.is_signed,
+          "live signed bit-field member selection lost exact value identity");
+  const auto unsigned_view =
+      mdbg::inspect_local_aggregate_member(value, "unsigned_bits");
+  require(unsigned_view.name == "live_bit_fields.unsigned_bits" &&
+              unsigned_view.raw_value == UINT64_C(41) &&
+              unsigned_view.byte_size == sizeof(std::uint32_t) &&
+              !unsigned_view.is_signed,
+          "live unsigned bit-field member selection lost exact value identity");
+
+  const auto exit = debugger.continue_execution();
+  require(exit.reason == mdbg::StopReason::Exited && exit.value == 0,
+          "live bit-field fixture did not exit cleanly after inspection");
+}
+
 std::string run_cli_script(const std::string& integration_path, const std::string& fixture,
                            const char* mode, const std::string& script,
                            const char* context) {
@@ -614,6 +671,30 @@ void test_cli_live_union(const std::string& integration_path,
           "CLI did not deterministically reject missing live union member\n" + output);
 }
 
+void test_cli_live_bit_fields(const std::string& integration_path,
+                              const std::string& fixture) {
+  const auto output = run_cli_script(
+      integration_path, fixture, nullptr,
+      "break live_bit_field_probe\n"
+      "continue\n"
+      "print live_bit_fields\n"
+      "aggregate-member live_bit_fields signed_bits\n"
+      "aggregate-member live_bit_fields unsigned_bits\n"
+      "continue\n",
+      "live bit-field CLI");
+  require(output.find("Breakpoint 1") != std::string::npos,
+          "CLI did not install the live bit-field probe breakpoint\n" + output);
+  require(output.find(
+              "live_bit_fields = { signed_bits = -7, unsigned_bits = 41 }") !=
+              std::string::npos,
+          "CLI did not render compiler-described live bit fields\n" + output);
+  require(output.find("live_bit_fields.signed_bits = -7") != std::string::npos,
+          "CLI did not select the signed live bit field\n" + output);
+  require(output.find("live_bit_fields.unsigned_bits = 41") !=
+              std::string::npos,
+          "CLI did not select the unsigned live bit field\n" + output);
+}
+
 void test_missing_debug_line(const std::string& stripped_fixture) {
   const mdbg::DwarfLineTable lines(stripped_fixture);
   require(!lines.available(), "stripped fixture must not claim DWARF line coverage");
@@ -643,6 +724,8 @@ int main(int argc, char** argv) {
     test_cli_live_array(argv[0], argv[4]);
     test_live_union_api(argv[4]);
     test_cli_live_union(argv[0], argv[4]);
+    test_live_bit_field_api(argv[4]);
+    test_cli_live_bit_fields(argv[0], argv[4]);
     return 0;
   } catch (const std::exception& error) {
     std::fprintf(stderr, "DWARF line integration failure: %s\n", error.what());

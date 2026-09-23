@@ -431,6 +431,29 @@ bool frame_zero_fbreg_value_eligible(const LocalValueType& value_type) {
            value_type.array_type->element_is_signed &&
            value_type.array_type->element_kind == LocalValueKind::Integer;
   }
+
+  if (value_type.kind == LocalValueKind::Union) {
+    if (value_type.byte_size != sizeof(std::uint32_t) ||
+        value_type.members.size() != 2 || value_type.array_type) {
+      return false;
+    }
+    const auto& signed_member = value_type.members[0];
+    const auto& unsigned_member = value_type.members[1];
+    return signed_member.name == "signed_value" &&
+           signed_member.kind == LocalValueKind::Integer &&
+           signed_member.offset == 0 &&
+           signed_member.byte_size == sizeof(std::int32_t) &&
+           signed_member.is_signed && !signed_member.pointee_type &&
+           !signed_member.bit_slice && !signed_member.enum_type &&
+           signed_member.members.empty() &&
+           unsigned_member.name == "unsigned_value" &&
+           unsigned_member.kind == LocalValueKind::Integer &&
+           unsigned_member.offset == 0 &&
+           unsigned_member.byte_size == sizeof(std::uint32_t) &&
+           !unsigned_member.is_signed && !unsigned_member.pointee_type &&
+           !unsigned_member.bit_slice && !unsigned_member.enum_type &&
+           unsigned_member.members.empty();
+  }
   if (value_type.kind != LocalValueKind::Structure ||
       value_type.members.empty() || value_type.array_type) {
     return false;

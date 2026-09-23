@@ -44,6 +44,12 @@ jobs:
             tests/fixtures/frame_zero_inline_fbreg_array_fixture.c \
             -o /tmp/frame-zero-inline-fbreg-array-nopie
           "$CC" -O2 -g -gdwarf-4 -fPIE -pie \
+            tests/fixtures/frame_zero_inline_fbreg_union_fixture.c \
+            -o /tmp/frame-zero-inline-fbreg-union-pie
+          "$CC" -O2 -g -gdwarf-4 -fno-pie -no-pie \
+            tests/fixtures/frame_zero_inline_fbreg_union_fixture.c \
+            -o /tmp/frame-zero-inline-fbreg-union-nopie
+          "$CC" -O2 -g -gdwarf-4 -fPIE -pie \
             tests/fixtures/frame_zero_inline_union_fixture.c \
             -o /tmp/frame-zero-inline-union-pie
           "$CC" -O2 -g -gdwarf-4 -fno-pie -no-pie \
@@ -111,6 +117,10 @@ jobs:
             /tmp/frame-zero-inline-fbreg-array-pie
           python3 tests/core_frame_zero_inline_fbreg_array_dwarf_oracle.py \
             /tmp/frame-zero-inline-fbreg-array-nopie
+          python3 tests/core_frame_zero_inline_fbreg_union_dwarf_oracle.py \
+            /tmp/frame-zero-inline-fbreg-union-pie
+          python3 tests/core_frame_zero_inline_fbreg_union_dwarf_oracle.py \
+            /tmp/frame-zero-inline-fbreg-union-nopie
           python3 tests/core_frame_zero_inline_union_dwarf_oracle.py \
             /tmp/frame-zero-inline-union-pie
           python3 tests/core_frame_zero_inline_union_dwarf_oracle.py \
@@ -163,6 +173,10 @@ jobs:
             tests/core_frame_zero_inline_fbreg_array_integration.cpp \
             build/libmdbg_core.a -pthread \
             -o /tmp/core-frame-zero-inline-fbreg-array
+          "$CXX" -std=c++17 -Wall -Wextra -Wpedantic -Werror -Isrc \
+            tests/core_frame_zero_inline_fbreg_union_integration.cpp \
+            build/libmdbg_core.a -pthread \
+            -o /tmp/core-frame-zero-inline-fbreg-union
           "$CXX" -std=c++17 -Wall -Wextra -Wpedantic -Werror -Isrc \
             tests/core_frame_zero_inline_union_integration.cpp \
             build/libmdbg_core.a -pthread \
@@ -227,6 +241,10 @@ jobs:
             /tmp/frame-zero-inline-fbreg-array-pie build/mdbg-core
           /tmp/core-frame-zero-inline-fbreg-array \
             /tmp/frame-zero-inline-fbreg-array-nopie build/mdbg-core
+          /tmp/core-frame-zero-inline-fbreg-union \
+            /tmp/frame-zero-inline-fbreg-union-pie build/mdbg-core
+          /tmp/core-frame-zero-inline-fbreg-union \
+            /tmp/frame-zero-inline-fbreg-union-nopie build/mdbg-core
           /tmp/core-frame-zero-inline-union \
             /tmp/frame-zero-inline-union-pie build/mdbg-core
           /tmp/core-frame-zero-inline-union \

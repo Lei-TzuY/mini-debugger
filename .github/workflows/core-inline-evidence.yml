@@ -56,6 +56,12 @@ jobs:
             tests/fixtures/frame_zero_inline_fbreg_enum_fixture.c \
             -o /tmp/frame-zero-inline-fbreg-enum-nopie
           "$CC" -O2 -g -gdwarf-4 -fPIE -pie \
+            tests/fixtures/frame_zero_inline_fbreg_pointer_fixture.c \
+            -o /tmp/frame-zero-inline-fbreg-pointer-pie
+          "$CC" -O2 -g -gdwarf-4 -fno-pie -no-pie \
+            tests/fixtures/frame_zero_inline_fbreg_pointer_fixture.c \
+            -o /tmp/frame-zero-inline-fbreg-pointer-nopie
+          "$CC" -O2 -g -gdwarf-4 -fPIE -pie \
             tests/fixtures/frame_zero_inline_union_fixture.c \
             -o /tmp/frame-zero-inline-union-pie
           "$CC" -O2 -g -gdwarf-4 -fno-pie -no-pie \
@@ -131,6 +137,10 @@ jobs:
             /tmp/frame-zero-inline-fbreg-enum-pie
           python3 tests/core_frame_zero_inline_fbreg_enum_dwarf_oracle.py \
             /tmp/frame-zero-inline-fbreg-enum-nopie
+          python3 tests/core_frame_zero_inline_fbreg_pointer_dwarf_oracle.py \
+            /tmp/frame-zero-inline-fbreg-pointer-pie
+          python3 tests/core_frame_zero_inline_fbreg_pointer_dwarf_oracle.py \
+            /tmp/frame-zero-inline-fbreg-pointer-nopie
           python3 tests/core_frame_zero_inline_union_dwarf_oracle.py \
             /tmp/frame-zero-inline-union-pie
           python3 tests/core_frame_zero_inline_union_dwarf_oracle.py \
@@ -191,6 +201,10 @@ jobs:
             tests/core_frame_zero_inline_fbreg_enum_integration.cpp \
             build/libmdbg_core.a -pthread \
             -o /tmp/core-frame-zero-inline-fbreg-enum
+          "$CXX" -std=c++17 -Wall -Wextra -Wpedantic -Werror -Isrc \
+            tests/core_frame_zero_inline_fbreg_pointer_integration.cpp \
+            build/libmdbg_core.a -pthread \
+            -o /tmp/core-frame-zero-inline-fbreg-pointer
           "$CXX" -std=c++17 -Wall -Wextra -Wpedantic -Werror -Isrc \
             tests/core_frame_zero_inline_union_integration.cpp \
             build/libmdbg_core.a -pthread \
@@ -263,6 +277,10 @@ jobs:
             /tmp/frame-zero-inline-fbreg-enum-pie build/mdbg-core
           /tmp/core-frame-zero-inline-fbreg-enum \
             /tmp/frame-zero-inline-fbreg-enum-nopie build/mdbg-core
+          /tmp/core-frame-zero-inline-fbreg-pointer \
+            /tmp/frame-zero-inline-fbreg-pointer-pie build/mdbg-core
+          /tmp/core-frame-zero-inline-fbreg-pointer \
+            /tmp/frame-zero-inline-fbreg-pointer-nopie build/mdbg-core
           /tmp/core-frame-zero-inline-union \
             /tmp/frame-zero-inline-union-pie build/mdbg-core
           /tmp/core-frame-zero-inline-union \

@@ -422,6 +422,86 @@ std::optional<LocalValueType> selected_inline_direct_structure_type(
   throw std::runtime_error("selected-inline local type chain is too deep");
 }
 
+bool frame_zero_fbreg_structure_eligible(
+    const LocalValueType& value_type) {
+  if (value_type.kind != LocalValueKind::Structure ||
+      value_type.members.empty()) {
+    return false;
+  }
+
+  const bool bit_field_structure = std::all_of(
+      value_type.members.begin(), value_type.members.end(),
+      [](const LocalStructMemberType& member) {
+        return member.kind == LocalValueKind::Integer &&
+               member.bit_slice.has_value() && !member.pointee_type &&
+               !member.enum_type && member.members.empty();
+      });
+
+  bool nested_structure = false;
+  if (value_type.members.size() == 2) {
+    std::size_t direct_scalar_count = 0;
+    std::size_t nested_structure_count = 0;
+    bool supported_nested_shape = true;
+    for (const auto& member : value_type.members) {
+      if (member.kind == LocalValueKind::Integer && !member.pointee_type &&
+          !member.bit_slice && !member.enum_type && member.members.empty()) {
+        ++direct_scalar_count;
+        continue;
+      }
+      if (member.kind != LocalValueKind::Structure || member.pointee_type ||
+          member.bit_slice || member.enum_type ||
+          member.members.size() != 1) {
+        supported_nested_shape = false;
+        break;
+      }
+      const auto& terminal = member.members.front();
+      if (terminal.kind != LocalValueKind::Integer ||
+          terminal.pointee_type || terminal.bit_slice ||
+          terminal.enum_type || !terminal.members.empty()) {
+        supported_nested_shape = false;
+        break;
+      }
+      ++nested_structure_count;
+    }
+    nested_structure =
+        supported_nested_shape && direct_scalar_count == 1 &&
+        nested_structure_count == 1;
+  }
+
+  bool pointer_structure = false;
+  if (value_type.members.size() == 1) {
+    const auto& member = value_type.members.front();
+    pointer_structure =
+        member.kind == LocalValueKind::Pointer && member.offset == 0 &&
+        member.byte_size == sizeof(std::uintptr_t) &&
+        member.pointee_type.has_value() &&
+        member.pointee_type->byte_size == sizeof(std::int32_t) &&
+        member.pointee_type->is_signed && !member.bit_slice &&
+        !member.enum_type && member.members.empty();
+  }
+
+  bool enum_structure = false;
+  if (value_type.members.size() == 2) {
+    const auto& direct = value_type.members[0];
+    const auto& mode = value_type.members[1];
+    enum_structure =
+        direct.kind == LocalValueKind::Integer && direct.offset == 0 &&
+        direct.byte_size == sizeof(std::int32_t) && direct.is_signed &&
+        !direct.pointee_type && !direct.bit_slice && !direct.enum_type &&
+        direct.members.empty() &&
+        mode.kind == LocalValueKind::Enumeration &&
+        mode.offset == sizeof(std::int32_t) &&
+        mode.byte_size == sizeof(std::uint32_t) && !mode.is_signed &&
+        !mode.pointee_type && !mode.bit_slice && mode.enum_type.has_value() &&
+        mode.enum_type->byte_size == sizeof(std::uint32_t) &&
+        !mode.enum_type->is_signed && !mode.enum_type->name.empty() &&
+        !mode.enum_type->enumerators.empty() && mode.members.empty();
+  }
+
+  return bit_field_structure || nested_structure || pointer_structure ||
+         enum_structure;
+}
+
 std::optional<LocalScalarValue> inspect_inline_scalar_unit(
     const DebugSections& sections, const std::vector<std::byte>& ranges,
     const CoreSnapshot& snapshot, const SnapshotInspectionFrameContext& frame,
@@ -549,83 +629,12 @@ std::optional<LocalScalarValue> inspect_inline_scalar_unit(
   }
 
   const auto opcode = std::to_integer<std::uint8_t>(expression.front());
-  bool frame_zero_bit_field_structure = false;
-  bool frame_zero_nested_structure = false;
-  bool frame_zero_pointer_structure = false;
-  bool frame_zero_enum_structure = false;
-  if (frame.index == 0 && direct_structure &&
-      !value_type.members.empty()) {
-    frame_zero_bit_field_structure = std::all_of(
-        value_type.members.begin(), value_type.members.end(),
-        [](const LocalStructMemberType& member) {
-          return member.kind == LocalValueKind::Integer &&
-                 member.bit_slice.has_value() && !member.pointee_type &&
-                 !member.enum_type && member.members.empty();
-        });
-
-    if (value_type.members.size() == 2) {
-      std::size_t direct_scalar_count = 0;
-      std::size_t nested_structure_count = 0;
-      bool supported_nested_shape = true;
-      for (const auto& member : value_type.members) {
-        if (member.kind == LocalValueKind::Integer && !member.pointee_type &&
-            !member.bit_slice && !member.enum_type && member.members.empty()) {
-          ++direct_scalar_count;
-          continue;
-        }
-        if (member.kind != LocalValueKind::Structure || member.pointee_type ||
-            member.bit_slice || member.enum_type ||
-            member.members.size() != 1) {
-          supported_nested_shape = false;
-          break;
-        }
-        const auto& terminal = member.members.front();
-        if (terminal.kind != LocalValueKind::Integer ||
-            terminal.pointee_type || terminal.bit_slice ||
-            terminal.enum_type || !terminal.members.empty()) {
-          supported_nested_shape = false;
-          break;
-        }
-        ++nested_structure_count;
-      }
-      frame_zero_nested_structure =
-          supported_nested_shape && direct_scalar_count == 1 &&
-          nested_structure_count == 1;
-    }
-
-    if (value_type.members.size() == 1) {
-      const auto& member = value_type.members.front();
-      frame_zero_pointer_structure =
-          member.kind == LocalValueKind::Pointer && member.offset == 0 &&
-          member.byte_size == sizeof(std::uintptr_t) &&
-          member.pointee_type.has_value() &&
-          member.pointee_type->byte_size == sizeof(std::int32_t) &&
-          member.pointee_type->is_signed && !member.bit_slice &&
-          !member.enum_type && member.members.empty();
-    }
-
-    if (value_type.members.size() == 2) {
-      const auto& direct = value_type.members[0];
-      const auto& mode = value_type.members[1];
-      frame_zero_enum_structure =
-          direct.kind == LocalValueKind::Integer && direct.offset == 0 &&
-          direct.byte_size == sizeof(std::int32_t) && direct.is_signed &&
-          !direct.pointee_type && !direct.bit_slice && !direct.enum_type &&
-          direct.members.empty() &&
-          mode.kind == LocalValueKind::Enumeration &&
-          mode.offset == sizeof(std::int32_t) &&
-          mode.byte_size == sizeof(std::uint32_t) && !mode.is_signed &&
-          !mode.pointee_type && !mode.bit_slice && mode.enum_type.has_value() &&
-          mode.enum_type->byte_size == sizeof(std::uint32_t) &&
-          !mode.enum_type->is_signed && !mode.enum_type->name.empty() &&
-          !mode.enum_type->enumerators.empty() && mode.members.empty();
-    }
-  }
+  const bool frame_zero_fbreg_structure =
+      frame.index == 0 && direct_structure &&
+      frame_zero_fbreg_structure_eligible(value_type);
 
   if (frame.index != 0 ||
-      ((frame_zero_bit_field_structure || frame_zero_nested_structure ||
-        frame_zero_pointer_structure || frame_zero_enum_structure) &&
-       opcode == kDwOpFbreg)) {
+      (frame_zero_fbreg_structure && opcode == kDwOpFbreg)) {
     if (opcode != kDwOpFbreg) {
       throw std::runtime_error(
           "caller-frame selected-inline value currently requires compiler-proven DW_OP_fbreg");

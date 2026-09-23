@@ -53,7 +53,9 @@ std::string run_cli(const std::string& mdbg_path,
       "break historical_pointer_callee_probe\n"
       "continue\n"
       "bt\n"
+      "locals\n"
       "frame 1\n"
+      "locals\n"
       "print historical_pointer\n"
       "deref historical_pointer\n"
       "continue\n";
@@ -117,8 +119,21 @@ void verify_historical_pointer_cli(const std::string& fixture,
   require(output.find("#0 ") != std::string::npos &&
               output.find("#1 ") != std::string::npos,
           "live CLI backtrace did not expose a caller frame\n" + output);
-  require(output.find("selected inspection frame 1") != std::string::npos,
+  const auto selected_marker = output.find("selected inspection frame 1");
+  require(selected_marker != std::string::npos,
           "live CLI did not select historical inspection frame 1\n" + output);
+  const auto current_catalogue = output.substr(0, selected_marker);
+  const auto historical_catalogue = output.substr(selected_marker);
+  require(current_catalogue.find("parameter input") != std::string::npos,
+          "live CLI current-frame locals did not expose callee parameter input\n" +
+              output);
+  require(historical_catalogue.find("parameter historical_pointer") !=
+              std::string::npos,
+          "live CLI historical-frame locals did not expose historical_pointer\n" +
+              output);
+  require(historical_catalogue.find("parameter input") == std::string::npos,
+          "live CLI historical-frame locals leaked the callee-only input binding\n" +
+              output);
   require(output.find("historical_pointer = 0x") != std::string::npos,
           "live CLI did not inspect the historical pointer\n" + output);
   require(output.find("*historical_pointer = 324508639") !=
@@ -168,6 +183,28 @@ void verify_historical_pointer(const std::string& fixture) {
   const auto frames = mdbg::build_inspection_frames(debugger, elf, cfi, 3);
   require(frames.size() >= 2,
           "CFI did not recover the historical pointer caller frame");
+
+  const auto current_locals =
+      mdbg::discover_local_values(debugger, elf, frames[0]);
+  const auto historical_locals =
+      mdbg::discover_local_values(debugger, elf, frames[1]);
+  const auto has_local =
+      [](const std::vector<mdbg::LocalDiscoveryEntry>& entries,
+         const std::string& name, mdbg::LocalDiscoveryKind kind) {
+        for (const auto& entry : entries) {
+          if (entry.name == name && entry.kind == kind) return true;
+        }
+        return false;
+      };
+  require(has_local(current_locals, "input",
+                    mdbg::LocalDiscoveryKind::FormalParameter),
+          "live current-frame discovery did not expose callee parameter input");
+  require(has_local(historical_locals, "historical_pointer",
+                    mdbg::LocalDiscoveryKind::FormalParameter),
+          "live historical-frame discovery did not expose historical_pointer");
+  require(!has_local(historical_locals, "input",
+                     mdbg::LocalDiscoveryKind::FormalParameter),
+          "live historical-frame discovery leaked the callee-only input binding");
   const auto caller_function = elf.find_symbol("historical_pointer_caller");
   require(caller_function.has_value() && caller_function->size != 0,
           "historical pointer caller symbol is missing or has zero size");
@@ -227,6 +264,15 @@ void verify_historical_pointer(const std::string& fixture) {
   }
   require(stale_rejected,
           "historical pointer accepted an inspection frame from an older stop");
+
+  bool stale_catalogue_rejected = false;
+  try {
+    (void)mdbg::discover_local_values(debugger, elf, stale_frame);
+  } catch (const std::logic_error&) {
+    stale_catalogue_rejected = true;
+  }
+  require(stale_catalogue_rejected,
+          "historical local discovery accepted a catalogue from an older stop");
 
   const auto exit = debugger.continue_execution();
   require(exit.reason == mdbg::StopReason::Exited && exit.value == 0,

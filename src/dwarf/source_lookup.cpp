@@ -233,7 +233,7 @@ std::optional<std::vector<InlineCallsiteContext>> discover_inline_unit(
   return result;
 }
 
-std::optional<std::vector<LocalDiscoveryEntry>> discover_snapshot_unit(
+std::optional<std::vector<LocalDiscoveryEntry>> discover_scoped_local_catalogue_unit(
     const DebugSections& sections, const std::vector<std::byte>& ranges,
     std::uint64_t virtual_pc, std::size_t unit_start, std::size_t& next_unit) {
   std::uint16_t unit_version = 0;
@@ -744,6 +744,40 @@ std::vector<InlineCallsiteContext> discover_inline_call_chain(
 }
 
 std::vector<LocalDiscoveryEntry> discover_local_values(
+    const Debugger& debugger, const ElfFile& preferred_elf,
+    const InspectionFrameContext& frame) {
+  validate_inspection_frame(debugger, frame);
+
+  const std::string module_path =
+      frame.module_path.empty() ? preferred_elf.path() : frame.module_path;
+  const ElfFile module(module_path);
+  const auto bias = module.load_bias(frame.process_pid);
+  if (frame.runtime_pc < bias) {
+    throw std::runtime_error(
+        "inspection-frame local discovery PC is below module load bias");
+  }
+  const auto virtual_pc =
+      static_cast<std::uint64_t>(frame.runtime_pc - bias);
+  const auto sections = read_debug_sections(module.path());
+  const auto ranges = read_debug_ranges(module.path());
+
+  std::size_t unit = 0;
+  while (unit < sections.info.size()) {
+    std::size_t next = unit;
+    const auto result = discover_scoped_local_catalogue_unit(
+        sections, ranges, virtual_pc, unit, next);
+    if (result) return *result;
+    if (next <= unit) {
+      throw std::runtime_error(
+          "DWARF local-discovery parser did not advance to the next unit");
+    }
+    unit = next;
+  }
+  throw std::runtime_error(
+      "inspection-frame local discovery PC is not covered by a supported DWARF4/5 subprogram");
+}
+
+std::vector<LocalDiscoveryEntry> discover_local_values(
     const CoreSnapshot& snapshot, const SnapshotInspectionFrameContext& frame,
     const SnapshotModulePathResolver& module_paths) {
   validate_snapshot_inspection_frame(snapshot, frame);
@@ -763,7 +797,7 @@ std::vector<LocalDiscoveryEntry> discover_local_values(
   while (unit < sections.info.size()) {
     std::size_t next = unit;
     const auto result =
-        discover_snapshot_unit(sections, ranges, owner.virtual_address, unit, next);
+        discover_scoped_local_catalogue_unit(sections, ranges, owner.virtual_address, unit, next);
     if (result) return *result;
     if (next <= unit) {
       throw std::runtime_error("DWARF parser did not advance to the next unit");

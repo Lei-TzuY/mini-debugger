@@ -165,6 +165,9 @@ LocalScalarValue inspect_local_value(const Debugger& debugger,
                                      const ElfFile& preferred_elf,
                                      const InspectionFrameContext& frame,
                                      std::string_view name);
+std::vector<LocalDiscoveryEntry> discover_local_values(
+    const Debugger& debugger, const ElfFile& preferred_elf,
+    const InspectionFrameContext& frame);
 LocalScalarValue inspect_local_value(const CoreSnapshot& snapshot,
                                      const SnapshotInspectionFrameContext& frame,
                                      std::string_view name);

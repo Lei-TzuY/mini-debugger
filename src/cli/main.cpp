@@ -596,6 +596,26 @@ int main(int argc, char** argv) {
         print_source_location(address, debugger, elf);
       } else if (command == "list" || command == "l") {
         print_source_location(static_cast<std::uintptr_t>(debugger.registers().rip), debugger, elf);
+      } else if (command == "locals") {
+        std::string extra;
+        input >> extra;
+        if (!extra.empty()) {
+          std::cout << "usage: locals\n";
+          continue;
+        }
+        try {
+          const auto entries = mdbg::discover_local_values(
+              debugger, elf, source_inspection_frame());
+          for (const auto& entry : entries) {
+            std::cout
+                << (entry.kind == mdbg::LocalDiscoveryKind::FormalParameter
+                        ? "parameter "
+                        : "variable ")
+                << entry.name << '\n';
+          }
+        } catch (const std::exception& error) {
+          std::cout << "locals unavailable: " << error.what() << '\n';
+        }
       } else if (command == "print") {
         std::string name;
         input >> name;
@@ -1012,7 +1032,7 @@ int main(int argc, char** argv) {
                     << std::dec << ' ' << symbol.name << '\n';
         }
       } else {
-        std::cout << "commands: continue, step, next, finish, stepi, regs, bt, frame <index>, list, "
+        std::cout << "commands: continue, step, next, finish, stepi, regs, bt, frame <index>, list, locals, "
                      "line <addr|symbol>, print <name>, deref <name>, aggregate-member <name> <member>, "
                      "deref-aggregate-member <name> <member>, "
                      "set follow-fork-mode <parent|child|both>, "

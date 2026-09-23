@@ -158,6 +158,9 @@ LocalScalarValue inspect_local_value(const Debugger& debugger,
 LocalScalarValue inspect_local_value(const CoreSnapshot& snapshot,
                                      const SnapshotInspectionFrameContext& frame,
                                      std::string_view name);
+LocalScalarValue dereference_local_pointer(
+    const Debugger& debugger, const ElfFile& preferred_elf,
+    const InspectionFrameContext& frame, std::string_view name);
 LocalScalarValue inspect_local_value(const CoreSnapshot& snapshot,
                                      const SnapshotInspectionFrameContext& frame,
                                      std::string_view name,

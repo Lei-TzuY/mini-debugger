@@ -73,6 +73,15 @@ void verify_historical_pointer(const std::string& fixture) {
               frames[1].runtime_pc < caller_end,
           "historical pointer frame 1 PC is outside the caller function range");
 
+  const auto current_regs = debugger.registers();
+  require(current_regs.rbx == UINT64_C(0x1122334455667788),
+          "callee live RBX does not contain the deliberate clobber sentinel");
+  require(frames[1].registers.rbx.has_value() &&
+              *frames[1].registers.rbx == target_address,
+          "CFI did not recover caller-owned historical RBX pointer state");
+  require(*frames[1].registers.rbx != current_regs.rbx,
+          "historical pointer ownership accidentally reused current callee RBX");
+
   const auto pointer =
       mdbg::inspect_local_value(debugger, elf, frames[1], "historical_pointer");
   require(pointer.kind == mdbg::LocalValueKind::Pointer &&
@@ -85,6 +94,15 @@ void verify_historical_pointer(const std::string& fixture) {
               pointer.pointee_type->byte_size == sizeof(std::int32_t) &&
               pointer.pointee_type->is_signed,
           "historical pointer lost bounded signed-int32 pointee metadata");
+
+  const auto pointee = mdbg::dereference_local_pointer(
+      debugger, elf, frames[1], "historical_pointer");
+  require(pointee.name == "*historical_pointer" &&
+              pointee.kind == mdbg::LocalValueKind::Integer &&
+              pointee.byte_size == sizeof(std::int32_t) &&
+              pointee.is_signed &&
+              pointee.raw_value == UINT64_C(0x13579bdf),
+          "historical pointer one-hop dereference did not recover the live pointee");
 
   const auto stale_frame = frames[1];
   const auto next_stop = debugger.continue_execution();

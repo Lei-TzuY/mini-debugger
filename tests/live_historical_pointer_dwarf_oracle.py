@@ -151,10 +151,16 @@ def verify(path):
         if owned_range is None
         else f"[0x{owned_range[0]:x},0x{owned_range[1]:x})"
     )
-    raise RuntimeError(
-        "historical pointer register evidence: "
+    if regno != 3 or regname != "rbx":
+        raise RuntimeError(
+            "historical pointer requires exact compiler-proven DW_OP_reg3 (rbx): "
+            f"return-pc=0x{return_pc:x} location={expression} "
+            f"range={range_text}"
+        )
+    print(
+        "historical live pointer DWARF oracle passed: "
         f"return-pc=0x{return_pc:x} location={expression} "
-        f"regno={regno} regname={regname} range={range_text}"
+        f"range={range_text} pointee=signed-int32"
     )
 
 

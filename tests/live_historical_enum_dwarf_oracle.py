@@ -114,13 +114,9 @@ def verify(path):
 
     return_pc = call_return_pc(path)
     expression, owned_range = active_location(path, location, return_pc)
-    supported = (
-        expression.startswith("DW_OP_fbreg")
-        or expression.startswith("DW_OP_breg3 (rbx)")
-    )
-    if not supported:
+    if expression != "DW_OP_reg3 (rbx)":
         raise RuntimeError(
-            "historical enum requires a new historical machine-state form: "
+            "historical enum requires exact compiler-proven DW_OP_reg3 (rbx): "
             + expression
         )
     range_text = (

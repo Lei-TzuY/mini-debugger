@@ -100,6 +100,8 @@ constexpr std::uint8_t kDwOpReg1 =
     static_cast<std::uint8_t>(kDwOpReg0 + 1U);
 constexpr std::uint8_t kDwOpReg2 =
     static_cast<std::uint8_t>(kDwOpReg0 + 2U);
+constexpr std::uint8_t kDwOpReg3 =
+    static_cast<std::uint8_t>(kDwOpReg0 + 3U);
 constexpr std::uint8_t kDwOpReg4 = 0x54;
 constexpr std::uint8_t kDwOpReg5 = 0x55;
 constexpr std::uint8_t kDwOpReg6 = 0x56;
@@ -2635,10 +2637,6 @@ std::optional<LocalScalarValue> inspect_caller_stack_unit(
   }
 
   const auto value_type = resolve_value_type(dies, type->number);
-  if (value_type.kind == LocalValueKind::Enumeration) {
-    throw std::runtime_error(
-        "live historical enum materialization is outside current compiler evidence");
-  }
   std::vector<std::byte> location_expression;
   if (location->form == kDwFormExprloc) {
     location_expression = location->expression;
@@ -2647,6 +2645,21 @@ std::optional<LocalScalarValue> inspect_caller_stack_unit(
         sections, location->number, virtual_pc, compilation_unit_base, unit_version);
   } else {
     throw std::runtime_error("local value has no supported DW_AT_location form");
+  }
+
+  if (value_type.kind == LocalValueKind::Enumeration) {
+    if (location_expression.size() != 1 ||
+        std::to_integer<std::uint8_t>(location_expression.front()) != kDwOpReg3) {
+      throw std::runtime_error(
+          "historical live enum requires compiler-proven DW_OP_reg3 (rbx)");
+    }
+    if (!frame.registers.rbx) {
+      throw std::runtime_error(
+          "historical live enum DW_OP_reg3 requires CFI-recovered RBX");
+    }
+    const auto raw =
+        truncate_integer(*frame.registers.rbx, value_type.byte_size);
+    return materialize_live_scalar(module, name, value_type, raw);
   }
 
   if (value_type.kind != LocalValueKind::Structure && !location_expression.empty() &&

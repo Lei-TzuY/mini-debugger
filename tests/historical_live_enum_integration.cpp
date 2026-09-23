@@ -55,6 +55,11 @@ void verify_historical_enum(const std::string& fixture) {
   require(frames[1].runtime_pc >= caller_begin &&
               frames[1].runtime_pc < caller_end,
           "historical enum frame 1 PC is outside the caller function range");
+  require(frames[1].registers.rbx.has_value(),
+          "historical enum frame is missing CFI-recovered RBX ownership");
+  require(static_cast<std::uint32_t>(*frames[1].registers.rbx) ==
+              UINT32_C(42),
+          "historical enum recovered RBX does not carry the compiler-owned enum value");
 
   const auto value =
       mdbg::inspect_local_value(debugger, elf, frames[1], "historical_mode");

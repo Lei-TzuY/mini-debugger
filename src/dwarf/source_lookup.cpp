@@ -354,72 +354,30 @@ std::optional<std::vector<LocalDiscoveryEntry>> discover_inline_locals_unit(
   return result;
 }
 
-std::optional<LocalValueType> selected_inline_direct_structure_type(
-    const std::vector<Die>& dies, std::uint64_t type_offset) {
-  for (unsigned depth = 0; depth < 16; ++depth) {
-    const auto index = die_index_by_offset(dies, type_offset);
-    if (!index) {
-      throw std::runtime_error("selected-inline local type references an unknown DIE");
-    }
-    const auto& die = dies[*index];
-    if (die.tag == kDwTagTypedef || die.tag == kDwTagConstType) {
-      const auto* wrapped = attribute(die, kDwAtType);
-      if (wrapped == nullptr || wrapped->form != kDwFormRef4) {
-        throw std::runtime_error(
-            "selected-inline local type wrapper does not use DW_FORM_ref4");
-      }
-      type_offset = wrapped->number;
-      continue;
-    }
-    if (die.tag != kDwTagStructureType) return std::nullopt;
-
-    const auto* size = attribute(die, kDwAtByteSize);
-    if (size == nullptr || size->number == 0 || size->number > kMaxLocalStructSize) {
-      throw std::runtime_error("selected-inline structure has an unsupported byte size");
-    }
-    const auto struct_size = static_cast<std::size_t>(size->number);
-    LocalValueType result{struct_size, false, LocalValueKind::Structure, {}};
-    for (std::size_t child = 0; child < dies.size(); ++child) {
-      if (dies[child].parent != *index) continue;
-      if (dies[child].tag != kDwTagMember) {
-        throw std::runtime_error(
-            "selected-inline structure has an unsupported direct child DIE");
-      }
-      if (result.members.size() >= kMaxLocalStructMembers) {
-        throw std::runtime_error("selected-inline structure has too many direct members");
-      }
-
-      const auto& member_die = dies[child];
-      LocalStructMemberType member;
-      if (const auto bit_field =
-              resolve_bounded_bit_field_member_type(
-                  dies, member_die, struct_size)) {
-        member = *bit_field;
-      } else {
-        const auto nested = resolve_bounded_nested_structure_member_type(
-            dies, member_die, struct_size);
-        member = nested
-                     ? std::move(*nested)
-                     : resolve_bounded_direct_structure_member_type(
-                           dies, member_die, struct_size);
-      }
-
-      const auto duplicate = std::find_if(
-          result.members.begin(), result.members.end(),
-          [&member](const LocalStructMemberType& existing) {
-            return existing.name == member.name;
-          });
-      if (duplicate != result.members.end()) {
-        throw std::runtime_error("selected-inline structure has duplicate member names");
-      }
-      result.members.push_back(std::move(member));
-    }
-    if (result.members.empty()) {
-      throw std::runtime_error("selected-inline structure has no supported direct members");
-    }
-    return result;
+void validate_selected_inline_structure_type(
+    const LocalValueType& value_type) {
+  if (value_type.kind != LocalValueKind::Structure) return;
+  if (value_type.byte_size == 0 ||
+      value_type.byte_size > kMaxLocalStructSize ||
+      value_type.members.empty() ||
+      value_type.members.size() > kMaxLocalStructMembers) {
+    throw std::runtime_error(
+        "selected-inline structure exceeds the bounded canonical model");
   }
-  throw std::runtime_error("selected-inline local type chain is too deep");
+  for (std::size_t index = 0; index < value_type.members.size(); ++index) {
+    if (value_type.members[index].name.empty()) {
+      throw std::runtime_error(
+          "selected-inline structure has an unnamed direct member");
+    }
+    for (std::size_t other = index + 1;
+         other < value_type.members.size(); ++other) {
+      if (value_type.members[index].name ==
+          value_type.members[other].name) {
+        throw std::runtime_error(
+            "selected-inline structure has duplicate member names");
+      }
+    }
+  }
 }
 
 bool frame_zero_fbreg_value_eligible(
@@ -631,54 +589,15 @@ std::optional<LocalScalarValue> inspect_inline_scalar_unit(
         "selected-inline local has no supported DW_FORM_ref4 type");
   }
 
-  const auto floating_type =
-      resolve_snapshot_floating_type(dies, type->number);
-  const auto pointee_type =
-      floating_type ? std::optional<LocalValueType>{}
-                    : resolve_pointer_pointee_type(dies, type->number);
-  const auto direct_structure =
-      (floating_type || pointee_type)
-          ? std::optional<LocalValueType>{}
-          : selected_inline_direct_structure_type(dies, type->number);
-  const auto direct_union =
-      (floating_type || pointee_type || direct_structure)
-          ? std::optional<LocalValueType>{}
-          : resolve_bounded_union_type(dies, type->number);
-  const auto direct_array =
-      (floating_type || pointee_type || direct_structure || direct_union)
-          ? std::optional<LocalValueType>{}
-          : resolve_bounded_fixed_array_type(dies, type->number);
-  const auto direct_enum =
-      (floating_type || pointee_type || direct_structure || direct_union ||
-       direct_array)
-          ? std::optional<LocalEnumType>{}
-          : resolve_bounded_enum_type(dies, type->number);
-  auto value_type =
-      floating_type
-          ? *floating_type
-          : pointee_type
-                ? LocalValueType{sizeof(std::uintptr_t), false,
-                                 LocalValueKind::Pointer, {}}
-                : direct_structure
-                      ? *direct_structure
-                      : direct_union
-                            ? *direct_union
-                            : direct_array
-                                  ? *direct_array
-                                  : direct_enum
-                                        ? LocalValueType{
-                                              direct_enum->byte_size,
-                                              direct_enum->is_signed,
-                                              LocalValueKind::Enumeration, {}}
-                                        : resolve_value_type(dies, type->number);
-  if (direct_enum) {
-    value_type.enum_type = *direct_enum;
-  }
-  if (!floating_type && !direct_structure && !direct_union && !direct_array &&
-      !direct_enum &&
-      ((value_type.kind != LocalValueKind::Integer &&
-        value_type.kind != LocalValueKind::Pointer) ||
-       value_type.byte_size == 0 ||
+  const auto root_type =
+      resolve_bounded_root_value_type(dies, type->number);
+  auto value_type = root_type.value_type;
+  const auto& pointee_type = root_type.pointee_type;
+  validate_selected_inline_structure_type(value_type);
+
+  if ((value_type.kind == LocalValueKind::Integer ||
+       value_type.kind == LocalValueKind::Pointer) &&
+      (value_type.byte_size == 0 ||
        value_type.byte_size > sizeof(std::uint64_t))) {
     throw std::runtime_error(
         "selected-inline value materialization requires a bounded scalar");
@@ -728,7 +647,9 @@ std::optional<LocalScalarValue> inspect_inline_scalar_unit(
     return result;
   }
 
-  if (direct_structure || direct_array || direct_union) {
+  if (value_type.kind == LocalValueKind::Structure ||
+      value_type.kind == LocalValueKind::Array ||
+      value_type.kind == LocalValueKind::Union) {
     const auto& regs = snapshot.thread(frame.thread_tid).registers;
     const auto register_value = [&](std::uint8_t op) -> std::uint64_t {
       if (op == kInlineDwOpRdx) return regs.rdx;
@@ -739,11 +660,11 @@ std::optional<LocalScalarValue> inspect_inline_scalar_unit(
     const auto bytes = evaluate_register_piece_value(
         expression, register_value, value_type);
     LocalScalarValue result;
-    if (direct_structure) {
+    if (value_type.kind == LocalValueKind::Structure) {
       const ElfFile module(owner.module_file_path);
       result = decode_structure(module, requested_name, value_type, bytes);
       result.module_path = owner.module_path;
-    } else if (direct_array) {
+    } else if (value_type.kind == LocalValueKind::Array) {
       result = materialize_bounded_array_bytes(
           owner, requested_name, value_type, bytes);
     } else {

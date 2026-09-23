@@ -3,6 +3,7 @@
 #include "dwarf/line_table.hpp"
 #include "dwarf/local_value.hpp"
 #include "elf/elf.hpp"
+#include "unwind/cfi.hpp"
 
 #include <poll.h>
 #include <sys/wait.h>
@@ -11,6 +12,7 @@
 #include <cerrno>
 #include <chrono>
 #include <cstdint>
+#include <cstring>
 #include <cstdio>
 #include <filesystem>
 #include <stdexcept>
@@ -519,6 +521,80 @@ void test_live_enum_aggregate_api(const std::string& fixture) {
           "live enum-aggregate fixture did not exit cleanly after inspection");
 }
 
+void test_live_pointer_aggregate_api(const std::string& fixture) {
+  auto debugger = mdbg::Debugger::launch(fixture, {});
+  const mdbg::ElfFile elf(fixture);
+  const auto probe = elf.find_symbol("live_pointer_aggregate_probe");
+  require(probe.has_value(),
+          "live_pointer_aggregate_probe symbol missing from optimized fixture");
+  const auto address =
+      static_cast<std::uintptr_t>(elf.runtime_address(debugger.pid(), *probe));
+  debugger.add_breakpoint(address);
+  const auto stop = debugger.continue_execution();
+  require(stop.reason == mdbg::StopReason::Breakpoint &&
+              stop.breakpoint_address == address,
+          "live pointer aggregate did not stop while the structure was active");
+
+  const auto target_symbol = elf.find_symbol("live_pointer_target");
+  require(target_symbol.has_value(),
+          "live_pointer_target symbol missing from optimized fixture");
+  const auto target_address = static_cast<std::uintptr_t>(
+      elf.runtime_address(debugger.pid(), *target_symbol));
+  const auto target_bytes =
+      debugger.read_memory(target_address, sizeof(std::int32_t));
+  require(target_bytes.size() == sizeof(std::int32_t),
+          "independent live pointer target read was truncated");
+  std::int32_t target_value = 0;
+  std::memcpy(&target_value, target_bytes.data(), sizeof(target_value));
+  require(target_value == INT32_C(0x02468ace),
+          "independent live pointer target value changed before source inspection");
+
+  const auto aggregate =
+      mdbg::inspect_local_value(debugger, elf, "live_pointer_aggregate");
+  require(aggregate.name == "live_pointer_aggregate" &&
+              aggregate.kind == mdbg::LocalValueKind::Structure &&
+              aggregate.byte_size == 16 && aggregate.members.size() == 2,
+          "live pointer aggregate lost bounded structure identity");
+  require(aggregate.members[0].name == "direct" &&
+              aggregate.members[0].offset == 0 &&
+              aggregate.members[0].kind == mdbg::LocalValueKind::Integer &&
+              aggregate.members[0].raw_value == UINT64_C(0x11223344),
+          "live pointer aggregate direct member changed unexpectedly");
+  require(aggregate.members[1].name == "linked" &&
+              aggregate.members[1].offset == 8 &&
+              aggregate.members[1].kind == mdbg::LocalValueKind::Pointer &&
+              aggregate.members[1].raw_value == target_address &&
+              aggregate.members[1].pointee_type.has_value() &&
+              aggregate.members[1].pointee_type->kind ==
+                  mdbg::LocalValueKind::Integer &&
+              aggregate.members[1].pointee_type->byte_size ==
+                  sizeof(std::int32_t) &&
+              aggregate.members[1].pointee_type->is_signed,
+          "live pointer aggregate member lost canonical pointer metadata");
+
+  const auto selected =
+      mdbg::inspect_local_aggregate_member(aggregate, "linked");
+  require(selected.name == "live_pointer_aggregate.linked" &&
+              selected.kind == mdbg::LocalValueKind::Pointer &&
+              selected.raw_value == target_address &&
+              selected.pointee_type.has_value(),
+          "live pointer aggregate selection lost pointer identity");
+
+  const auto frame = mdbg::current_inspection_frame(debugger, elf);
+  const auto pointee =
+      mdbg::dereference_local_pointer(debugger, frame, selected);
+  require(pointee.name == "*(live_pointer_aggregate.linked)" &&
+              pointee.kind == mdbg::LocalValueKind::Integer &&
+              pointee.raw_value == UINT64_C(0x02468ace) &&
+              pointee.byte_size == sizeof(std::int32_t) &&
+              pointee.is_signed,
+          "live pointer aggregate one-hop dereference did not recover the exact target");
+
+  const auto exit = debugger.continue_execution();
+  require(exit.reason == mdbg::StopReason::Exited && exit.value == 0,
+          "live pointer-aggregate fixture did not exit cleanly after inspection");
+}
+
 std::string run_cli_script(const std::string& integration_path, const std::string& fixture,
                            const char* mode, const std::string& script,
                            const char* context) {
@@ -785,6 +861,30 @@ void test_cli_live_enum_aggregate(const std::string& integration_path,
           "CLI did not render symbolic + numeric live enum member\n" + output);
 }
 
+void test_cli_live_pointer_aggregate(const std::string& integration_path,
+                                     const std::string& fixture) {
+  const auto output = run_cli_script(
+      integration_path, fixture, nullptr,
+      "break live_pointer_aggregate_probe\n"
+      "continue\n"
+      "print live_pointer_aggregate\n"
+      "aggregate-member live_pointer_aggregate linked\n"
+      "deref-aggregate-member live_pointer_aggregate linked\n"
+      "continue\n",
+      "live pointer-aggregate CLI");
+  require(output.find("Breakpoint 1") != std::string::npos,
+          "CLI did not install the live pointer-aggregate breakpoint\n" + output);
+  require(output.find("live_pointer_aggregate = { direct = 287454020, linked = ") !=
+              std::string::npos,
+          "CLI did not render the live pointer aggregate\n" + output);
+  require(output.find("live_pointer_aggregate.linked = 0x") != std::string::npos,
+          "CLI did not select the live pointer member\n" + output);
+  require(output.find(
+              "*(live_pointer_aggregate.linked) = 38177486") !=
+              std::string::npos,
+          "CLI did not dereference the live pointer aggregate member\n" + output);
+}
+
 void test_missing_debug_line(const std::string& stripped_fixture) {
   const mdbg::DwarfLineTable lines(stripped_fixture);
   require(!lines.available(), "stripped fixture must not claim DWARF line coverage");
@@ -818,6 +918,8 @@ int main(int argc, char** argv) {
     test_cli_live_bit_fields(argv[0], argv[4]);
     test_live_enum_aggregate_api(argv[4]);
     test_cli_live_enum_aggregate(argv[0], argv[4]);
+    test_live_pointer_aggregate_api(argv[4]);
+    test_cli_live_pointer_aggregate(argv[0], argv[4]);
     return 0;
   } catch (const std::exception& error) {
     std::fprintf(stderr, "DWARF line integration failure: %s\n", error.what());

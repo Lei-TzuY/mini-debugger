@@ -25,6 +25,8 @@
 #define LIVE_BIT_SIGNED_VALUE (-7)
 #define LIVE_BIT_UNSIGNED_VALUE UINT32_C(41)
 #define LIVE_ENUM_AGGREGATE_DIRECT INT32_C(0x31415926)
+#define LIVE_POINTER_DIRECT INT32_C(0x11223344)
+#define LIVE_POINTER_TARGET INT32_C(0x02468ace)
 
 enum LiveMode {
   LiveIdle = 3,
@@ -47,6 +49,11 @@ struct LiveEnumAggregate {
   enum LiveMode mode;
 };
 
+struct LivePointerAggregate {
+  int32_t direct;
+  int32_t* linked;
+};
+
 struct SnapshotFileAggregate {
   uint64_t first;
   uint64_t second;
@@ -62,6 +69,7 @@ volatile uint32_t live_enum_seed = UINT32_C(42);
 volatile uint64_t inline_seed = INLINE_LOCAL_EXPECTED;
 uint64_t indirect_seed = INDIRECT_LOCAL_EXPECTED ^ INDIRECT_LOCAL_XOR;
 uint64_t* indirect_ptr = &indirect_seed;
+int32_t live_pointer_target = LIVE_POINTER_TARGET;
 static volatile int snapshot_crash_enabled = 0;
 static volatile int snapshot_sibling_ready = 0;
 
@@ -217,6 +225,19 @@ __attribute__((noinline)) int32_t inspect_live_enum_aggregate(void) {
   return live_enum_aggregate.direct ^ (int32_t)live_enum_aggregate.mode;
 }
 
+__attribute__((noinline)) int32_t inspect_live_pointer_aggregate(void) {
+  struct LivePointerAggregate live_pointer_aggregate = {
+      .direct = LIVE_POINTER_DIRECT, .linked = &live_pointer_target};
+  __asm__ volatile("" : "+m"(live_pointer_aggregate) : : "memory");
+  __asm__ volatile(".globl live_pointer_aggregate_probe\n"
+                   "live_pointer_aggregate_probe:\n"
+                   "nop\n"
+                   : "+m"(live_pointer_aggregate)
+                   :
+                   : "memory");
+  return live_pointer_aggregate.direct ^ *live_pointer_aggregate.linked;
+}
+
 __attribute__((noinline)) uint64_t inspect_arithmetic_local(
     uint64_t first, uint64_t second, uint64_t third,
     uint64_t fourth, uint64_t fifth, uint64_t sixth) {
@@ -276,6 +297,10 @@ int main(int argc, char** argv) {
   if (inspect_live_enum_aggregate() !=
       (LIVE_ENUM_AGGREGATE_DIRECT ^ (int32_t)LiveBusy)) {
     return 12;
+  }
+  if (inspect_live_pointer_aggregate() !=
+      (LIVE_POINTER_DIRECT ^ LIVE_POINTER_TARGET)) {
+    return 13;
   }
   if (inspect_arithmetic_local(UINT64_C(0xa5), UINT64_C(0x70), UINT64_C(0x60),
                                UINT64_C(0x50), UINT64_C(0x40), UINT64_C(0x102030)) !=

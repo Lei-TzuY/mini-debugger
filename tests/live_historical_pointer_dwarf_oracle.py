@@ -5,13 +5,36 @@ import sys
 
 from core_physical_aggregate_dwarf_oracle import (
     clean_name,
-    find_variable,
     parse_records,
     run,
     scalar_number,
     type_reference,
     unwrap_type,
 )
+
+
+def find_formal_parameter(records, function_name, parameter_name):
+    functions = [
+        (index, record)
+        for index, record in enumerate(records)
+        if record["tag"] == "DW_TAG_subprogram"
+        and clean_name(record["attrs"].get("name", "")) == function_name
+    ]
+    if len(functions) != 1:
+        raise RuntimeError(
+            f"{function_name}: expected exactly one subprogram DIE, found {len(functions)}"
+        )
+    function_index, function = functions[0]
+    for record in records[function_index + 1 :]:
+        if record["depth"] <= function["depth"]:
+            break
+        if record["tag"] != "DW_TAG_formal_parameter":
+            continue
+        if clean_name(record["attrs"].get("name", "")) == parameter_name:
+            return record
+    raise RuntimeError(
+        f"{function_name}: {parameter_name} formal parameter DIE not found"
+    )
 
 
 def call_return_pc(path):
@@ -69,7 +92,7 @@ def active_location(path, location, pc):
 def verify(path):
     info = run("readelf", "--debug-dump=info", path)
     records = parse_records(info)
-    variable = find_variable(
+    variable = find_formal_parameter(
         records, "historical_pointer_caller", "historical_pointer"
     )
     if variable["tag"] != "DW_TAG_formal_parameter":

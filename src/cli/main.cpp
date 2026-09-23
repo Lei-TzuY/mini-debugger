@@ -567,6 +567,16 @@ int main(int argc, char** argv) {
               }
             }
             std::cout << " }";
+          } else if (value.kind == mdbg::LocalValueKind::Enumeration) {
+            if (!value.enum_type) {
+              throw std::logic_error("live enum value lost its type metadata");
+            }
+            if (const auto symbol = mdbg::local_enum_symbol(value)) {
+              std::cout << value.enum_type->name << "::" << *symbol << " (0x"
+                        << std::hex << value.raw_value << std::dec << ')';
+            } else {
+              std::cout << "0x" << std::hex << value.raw_value << std::dec;
+            }
           } else if (value.kind == mdbg::LocalValueKind::Pointer) {
             std::cout << "0x" << std::hex << value.raw_value << std::dec;
           } else if (value.is_signed) {

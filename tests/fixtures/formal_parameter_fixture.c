@@ -19,6 +19,12 @@
 #define SNAPSHOT_AGGREGATE_FIRST UINT64_C(0xbb67ae8584caa73b)
 #define SNAPSHOT_AGGREGATE_SECOND UINT64_C(0x3c6ef372fe94f82b)
 
+enum LiveMode {
+  LiveIdle = 3,
+  LiveReady = 7,
+  LiveBusy = 42,
+};
+
 struct SnapshotFileAggregate {
   uint64_t first;
   uint64_t second;
@@ -30,6 +36,7 @@ static const uint64_t snapshot_sibling_xmm15[2] = {
     UINT64_C(0x0f1e2d3c4b5a6978), UINT64_C(0x8877665544332211)};
 
 volatile uint64_t parameter_seed = UINT64_C(0x1122334455667788);
+volatile uint32_t live_enum_seed = UINT32_C(42);
 volatile uint64_t inline_seed = INLINE_LOCAL_EXPECTED;
 uint64_t indirect_seed = INDIRECT_LOCAL_EXPECTED ^ INDIRECT_LOCAL_XOR;
 uint64_t* indirect_ptr = &indirect_seed;
@@ -124,6 +131,18 @@ __attribute__((noinline)) uint64_t inspect_optimized_local(void) {
   return optimized_local;
 }
 
+__attribute__((noinline)) enum LiveMode inspect_live_enum(void) {
+  enum LiveMode live_mode = (enum LiveMode)live_enum_seed;
+  __asm__ volatile("" : "+D"(live_mode) : : "memory");
+  __asm__ volatile(".globl live_enum_probe\n"
+                   "live_enum_probe:\n"
+                   "nop\n"
+                   : "+a"(live_mode)
+                   :
+                   : "memory");
+  return live_mode;
+}
+
 __attribute__((noinline)) uint64_t inspect_arithmetic_local(
     uint64_t first, uint64_t second, uint64_t third,
     uint64_t fourth, uint64_t fifth, uint64_t sixth) {
@@ -170,6 +189,7 @@ int main(int argc, char** argv) {
   if (inspect_parameter_value(parameter) != PARAMETER_EXPECTED) return 1;
   if (inspect_entry_parameter(parameter) != ENTRY_RESULT_EXPECTED) return 2;
   if (inspect_optimized_local() != OPTIMIZED_LOCAL_EXPECTED) return 3;
+  if (inspect_live_enum() != LiveBusy) return 8;
   if (inspect_arithmetic_local(UINT64_C(0xa5), UINT64_C(0x70), UINT64_C(0x60),
                                UINT64_C(0x50), UINT64_C(0x40), UINT64_C(0x102030)) !=
       ARITHMETIC_LOCAL_EXPECTED) {

@@ -637,6 +637,49 @@ int main(int argc, char** argv) {
         } catch (const std::exception& error) {
           std::cout << "array-element failed: " << error.what() << '\n';
         }
+      } else if (command == "aggregate-member") {
+        std::string name;
+        std::string member_name;
+        std::string extra;
+        input >> name >> member_name >> extra;
+        if (name.empty() || member_name.empty() || !extra.empty()) {
+          std::cout << "usage: aggregate-member <name> <member>\n";
+          continue;
+        }
+        try {
+          const auto value = mdbg::inspect_local_value(debugger, elf, name);
+          const auto member =
+              mdbg::inspect_local_aggregate_member(value, member_name);
+          std::cout << member.name << " = ";
+          if (member.kind == mdbg::LocalValueKind::Enumeration) {
+            if (!member.enum_type) {
+              throw std::logic_error(
+                  "live enum member lost its type metadata");
+            }
+            if (const auto symbol = mdbg::local_enum_symbol(member)) {
+              std::cout << member.enum_type->name << "::" << *symbol
+                        << " (0x" << std::hex << member.raw_value
+                        << std::dec << ')';
+            } else {
+              std::cout << "0x" << std::hex << member.raw_value
+                        << std::dec;
+            }
+          } else if (member.kind == mdbg::LocalValueKind::Pointer) {
+            std::cout << "0x" << std::hex << member.raw_value << std::dec;
+          } else if (member.kind == mdbg::LocalValueKind::Integer) {
+            if (member.is_signed) {
+              std::cout << signed_local_value(member);
+            } else {
+              std::cout << member.raw_value;
+            }
+          } else {
+            throw std::runtime_error(
+                "aggregate-member requires a bounded scalar direct member");
+          }
+          std::cout << '\n';
+        } catch (const std::exception& error) {
+          std::cout << "aggregate-member failed: " << error.what() << '\n';
+        }
       } else if (command == "union-member") {
         std::string name;
         std::string member_name;

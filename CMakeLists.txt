@@ -144,6 +144,18 @@ if(BUILD_TESTING)
     -O1 -g -gdwarf-5 -fno-pie)
   target_link_options(historical_live_pointer_member_fixture_nopie PRIVATE -no-pie)
 
+  add_executable(historical_live_nested_pointer_member_fixture_pie
+    tests/fixtures/historical_live_nested_pointer_member_fixture.c)
+  target_compile_options(historical_live_nested_pointer_member_fixture_pie PRIVATE
+    -O1 -g -gdwarf-5 -fPIE)
+  target_link_options(historical_live_nested_pointer_member_fixture_pie PRIVATE -pie)
+
+  add_executable(historical_live_nested_pointer_member_fixture_nopie
+    tests/fixtures/historical_live_nested_pointer_member_fixture.c)
+  target_compile_options(historical_live_nested_pointer_member_fixture_nopie PRIVATE
+    -O1 -g -gdwarf-5 -fno-pie)
+  target_link_options(historical_live_nested_pointer_member_fixture_nopie PRIVATE -no-pie)
+
   add_executable(register_piece_fixture_pie tests/fixtures/register_piece_fixture.c)
   target_compile_options(register_piece_fixture_pie PRIVATE -O1 -g -gdwarf-5 -fPIE)
   target_link_options(register_piece_fixture_pie PRIVATE -pie)
@@ -526,6 +538,33 @@ if(BUILD_TESTING)
       $<TARGET_FILE:historical_live_pointer_member_fixture_nopie>)
   set_tests_properties(historical_live_pointer_member_integration_nopie PROPERTIES
     DEPENDS historical_live_pointer_member_dwarf_oracle_nopie)
+
+  add_executable(historical_live_nested_pointer_member_integration
+    tests/historical_live_nested_pointer_member_integration.cpp)
+  target_link_libraries(historical_live_nested_pointer_member_integration PRIVATE mdbg_core)
+  target_compile_options(historical_live_nested_pointer_member_integration PRIVATE
+    -Wall -Wextra -Wpedantic -Werror)
+
+  add_test(NAME historical_live_nested_pointer_member_dwarf_oracle_pie
+    COMMAND python3
+      ${CMAKE_CURRENT_SOURCE_DIR}/tests/live_historical_nested_pointer_member_dwarf_oracle.py
+      $<TARGET_FILE:historical_live_nested_pointer_member_fixture_pie>)
+  add_test(NAME historical_live_nested_pointer_member_dwarf_oracle_nopie
+    COMMAND python3
+      ${CMAKE_CURRENT_SOURCE_DIR}/tests/live_historical_nested_pointer_member_dwarf_oracle.py
+      $<TARGET_FILE:historical_live_nested_pointer_member_fixture_nopie>)
+
+  add_test(NAME historical_live_nested_pointer_member_integration_pie
+    COMMAND historical_live_nested_pointer_member_integration
+      $<TARGET_FILE:historical_live_nested_pointer_member_fixture_pie>)
+  set_tests_properties(historical_live_nested_pointer_member_integration_pie PROPERTIES
+    DEPENDS historical_live_nested_pointer_member_dwarf_oracle_pie)
+
+  add_test(NAME historical_live_nested_pointer_member_integration_nopie
+    COMMAND historical_live_nested_pointer_member_integration
+      $<TARGET_FILE:historical_live_nested_pointer_member_fixture_nopie>)
+  set_tests_properties(historical_live_nested_pointer_member_integration_nopie PROPERTIES
+    DEPENDS historical_live_nested_pointer_member_dwarf_oracle_nopie)
 
   add_executable(register_piece_value_integration tests/register_piece_value_integration.cpp)
   target_link_libraries(register_piece_value_integration PRIVATE mdbg_core)

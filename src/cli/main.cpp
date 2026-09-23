@@ -448,6 +448,22 @@ int main(int argc, char** argv) {
 
     mdbg::ElfFile elf(executable);
     mdbg::UserBreakpointRegistry breakpoints(debugger, elf);
+    std::optional<mdbg::InspectionFrameContext> selected_inspection_frame;
+
+    auto invalidate_inspection_frame = [&]() {
+      selected_inspection_frame.reset();
+    };
+    auto inspect_source_value = [&](std::string_view name) {
+      if (selected_inspection_frame) {
+        return mdbg::inspect_local_value(
+            debugger, elf, *selected_inspection_frame, name);
+      }
+      return inspect_source_value(name);
+    };
+    auto source_inspection_frame = [&]() {
+      if (selected_inspection_frame) return *selected_inspection_frame;
+      return mdbg::current_inspection_frame(debugger, elf);
+    };
 
     auto refresh_image = [&](const mdbg::StopInfo& info) {
       if (info.reason != mdbg::StopReason::Exec) return;
@@ -456,6 +472,7 @@ int main(int argc, char** argv) {
       elf = mdbg::ElfFile(executable);
     };
     auto report_stop = [&](const mdbg::StopInfo& info) {
+      invalidate_inspection_frame();
       refresh_image(info);
       print_stop(info, elf, debugger.pid());
     };
@@ -492,6 +509,7 @@ int main(int argc, char** argv) {
         report_stop(debugger.single_step());
       } else if (command == "step" || command == "s" || command == "next" || command == "n") {
         if (reject_motion_with_pending_breakpoints(breakpoints)) continue;
+        invalidate_inspection_frame();
         const bool next = command == "next" || command == "n";
         try {
           const auto result = next ? mdbg::next_source(debugger, elf)
@@ -507,6 +525,7 @@ int main(int argc, char** argv) {
         }
       } else if (command == "finish" || command == "fin") {
         if (reject_motion_with_pending_breakpoints(breakpoints)) continue;
+        invalidate_inspection_frame();
         try {
           const auto result = mdbg::finish_frame(debugger);
           refresh_image(result.stop);
@@ -534,6 +553,38 @@ int main(int argc, char** argv) {
         }
       } else if (command == "bt") {
         print_backtrace(debugger, elf);
+      } else if (command == "frame") {
+        std::string index_text;
+        std::string extra;
+        input >> index_text >> extra;
+        if (index_text.empty() || !extra.empty()) {
+          std::cout << "usage: frame <index>\n";
+          continue;
+        }
+        try {
+          std::size_t consumed = 0;
+          const auto parsed = std::stoull(index_text, &consumed, 10);
+          if (consumed != index_text.size() ||
+              parsed > std::numeric_limits<std::size_t>::max()) {
+            throw std::invalid_argument("invalid frame index");
+          }
+          const mdbg::EhFrame cfi(elf.path());
+          if (!cfi.available()) {
+            throw std::runtime_error("CFI is unavailable for frame selection");
+          }
+          const auto frames =
+              mdbg::build_inspection_frames(debugger, elf, cfi, 64);
+          const auto index = static_cast<std::size_t>(parsed);
+          if (index >= frames.size()) {
+            throw std::out_of_range("inspection frame index is out of range");
+          }
+          selected_inspection_frame = frames[index];
+          std::cout << "selected inspection frame " << index << " 0x"
+                    << std::hex << selected_inspection_frame->runtime_pc
+                    << std::dec << '\n';
+        } catch (const std::exception& error) {
+          std::cout << "frame selection failed: " << error.what() << '\n';
+        }
       } else if (command == "line") {
         std::string location;
         input >> location;
@@ -553,7 +604,7 @@ int main(int argc, char** argv) {
           continue;
         }
         try {
-          const auto value = mdbg::inspect_local_value(debugger, elf, name);
+          const auto value = inspect_source_value(name);
           std::cout << value.name << " = ";
           if (value.kind == mdbg::LocalValueKind::Structure) {
             std::cout << "{ ";
@@ -613,6 +664,32 @@ int main(int argc, char** argv) {
         } catch (const std::exception& error) {
           std::cout << "print failed: " << error.what() << '\n';
         }
+      } else if (command == "deref") {
+        std::string name;
+        std::string extra;
+        input >> name >> extra;
+        if (name.empty() || !extra.empty()) {
+          std::cout << "usage: deref <name>\n";
+          continue;
+        }
+        try {
+          const auto frame = source_inspection_frame();
+          const auto pointee =
+              mdbg::dereference_local_pointer(debugger, elf, frame, name);
+          if (pointee.kind != mdbg::LocalValueKind::Integer) {
+            throw std::runtime_error(
+                "deref requires a bounded integer pointee");
+          }
+          std::cout << pointee.name << " = ";
+          if (pointee.is_signed) {
+            std::cout << signed_local_value(pointee);
+          } else {
+            std::cout << pointee.raw_value;
+          }
+          std::cout << '\n';
+        } catch (const std::exception& error) {
+          std::cout << "deref failed: " << error.what() << '\n';
+        }
       } else if (command == "array-element") {
         std::string name;
         std::string index_text;
@@ -629,7 +706,7 @@ int main(int argc, char** argv) {
               parsed > std::numeric_limits<std::size_t>::max()) {
             throw std::invalid_argument("invalid array index");
           }
-          const auto array = mdbg::inspect_local_value(debugger, elf, name);
+          const auto array = inspect_source_value(name);
           const auto element = mdbg::inspect_local_array_element(
               array, static_cast<std::size_t>(parsed));
           std::cout << element.name << " = 0x" << std::hex
@@ -647,7 +724,7 @@ int main(int argc, char** argv) {
           continue;
         }
         try {
-          const auto value = mdbg::inspect_local_value(debugger, elf, name);
+          const auto value = inspect_source_value(name);
           const auto member =
               mdbg::inspect_local_aggregate_member(value, member_name);
           std::cout << member.name << " = ";
@@ -691,11 +768,10 @@ int main(int argc, char** argv) {
         }
         try {
           const auto aggregate =
-              mdbg::inspect_local_value(debugger, elf, name);
+              inspect_source_value(name);
           const auto member =
               mdbg::inspect_local_aggregate_member(aggregate, member_name);
-          const auto frame =
-              mdbg::current_inspection_frame(debugger, elf);
+          const auto frame = source_inspection_frame();
           const auto pointee =
               mdbg::dereference_local_pointer(debugger, frame, member);
           if (pointee.kind != mdbg::LocalValueKind::Integer) {
@@ -723,7 +799,7 @@ int main(int argc, char** argv) {
           continue;
         }
         try {
-          const auto value = mdbg::inspect_local_value(debugger, elf, name);
+          const auto value = inspect_source_value(name);
           const auto member =
               mdbg::inspect_local_union_member(value, member_name);
           std::cout << member.name << " = 0x" << std::hex
@@ -769,6 +845,7 @@ int main(int argc, char** argv) {
               throw std::invalid_argument("invalid register value: " + value_text);
             }
             debugger.set_register(name, value);
+            invalidate_inspection_frame();
             std::cout << name << " = 0x" << std::hex << value << std::dec << '\n';
           } catch (const std::exception& error) {
             std::cout << "register assignment failed: " << error.what() << '\n';
@@ -800,6 +877,7 @@ int main(int argc, char** argv) {
           try {
             const auto address = resolve_location(location, elf, debugger.pid());
             debugger.write_memory(address, bytes);
+            invalidate_inspection_frame();
             std::cout << "wrote " << bytes.size() << " byte" << (bytes.size() == 1 ? "" : "s")
                       << " at 0x" << std::hex << address << std::dec << '\n';
           } catch (const std::exception& error) {
@@ -888,6 +966,7 @@ int main(int argc, char** argv) {
         try {
           const auto selected = parse_pid(pid_text);
           debugger.select_process(selected);
+          invalidate_inspection_frame();
           executable = debugger.executable_path();
           elf = mdbg::ElfFile(executable);
           std::cout << "selected process " << selected << '\n';
@@ -904,6 +983,7 @@ int main(int argc, char** argv) {
         try {
           const auto tid = parse_pid(tid_text);
           debugger.select_thread(tid);
+          invalidate_inspection_frame();
           std::cout << "selected thread " << tid << '\n';
         } catch (const std::exception& error) {
           std::cout << "thread selection failed: " << error.what() << '\n';
@@ -932,8 +1012,8 @@ int main(int argc, char** argv) {
                     << std::dec << ' ' << symbol.name << '\n';
         }
       } else {
-        std::cout << "commands: continue, step, next, finish, stepi, regs, bt, list, "
-                     "line <addr|symbol>, print <name>, aggregate-member <name> <member>, "
+        std::cout << "commands: continue, step, next, finish, stepi, regs, bt, frame <index>, list, "
+                     "line <addr|symbol>, print <name>, deref <name>, aggregate-member <name> <member>, "
                      "deref-aggregate-member <name> <member>, "
                      "set follow-fork-mode <parent|child|both>, "
                      "set register <name> <value>, set memory <addr|symbol> <byte> [byte...], "

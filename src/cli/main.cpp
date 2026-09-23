@@ -458,7 +458,7 @@ int main(int argc, char** argv) {
         return mdbg::inspect_local_value(
             debugger, elf, *selected_inspection_frame, name);
       }
-      return inspect_source_value(name);
+      return mdbg::inspect_local_value(debugger, elf, name);
     };
     auto source_inspection_frame = [&]() {
       if (selected_inspection_frame) return *selected_inspection_frame;

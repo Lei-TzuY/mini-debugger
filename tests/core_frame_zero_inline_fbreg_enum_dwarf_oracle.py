@@ -154,6 +154,11 @@ def require_binding(path, probe, records, by_offset):
         if child["tag"] != "DW_TAG_enumerator":
             continue
         entry_name = child["attrs"].get("name", "")
+        entry_name = re.sub(
+            r"^\\(indirect string, offset: 0x[0-9a-fA-F]+\\):\\s*",
+            "",
+            entry_name,
+        )
         value = child["attrs"].get("const_value")
         if entry_name and value is not None:
             actual[entry_name] = numeric_attr(

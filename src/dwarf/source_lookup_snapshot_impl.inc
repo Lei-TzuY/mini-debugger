@@ -262,11 +262,6 @@ std::optional<LocalValueType> resolve_pointer_pointee_type(
   }
   throw std::runtime_error("snapshot pointer type chain is too deep");
 }
-struct BoundedRootTypeResolution {
-  LocalValueType value_type;
-  std::optional<LocalValueType> pointee_type{};
-};
-
 BoundedRootTypeResolution resolve_bounded_root_value_type(
     const std::vector<Die>& dies, std::uint64_t type_offset) {
   if (const auto floating =

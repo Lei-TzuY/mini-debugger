@@ -2315,9 +2315,18 @@ std::uint64_t evaluate_entry_rdi(
   return snapshot->rdi;
 }
 
+struct BoundedRootTypeResolution {
+  LocalValueType value_type;
+  std::optional<LocalValueType> pointee_type{};
+};
+
+BoundedRootTypeResolution resolve_bounded_root_value_type(
+    const std::vector<Die>& dies, std::uint64_t type_offset);
+
 LocalScalarValue materialize_live_scalar(
     const ElfFile& module, std::string_view name,
-    const LocalValueType& value_type, std::uint64_t raw) {
+    const LocalValueType& value_type, std::uint64_t raw,
+    const std::optional<LocalValueType>& pointee_type = std::nullopt) {
   if (value_type.kind == LocalValueKind::Structure ||
       value_type.kind == LocalValueKind::Union ||
       value_type.kind == LocalValueKind::Array ||
@@ -2342,6 +2351,21 @@ LocalScalarValue materialize_live_scalar(
   } else if (value_type.enum_type) {
     throw std::logic_error(
         "non-enum live scalar unexpectedly carries enum metadata");
+  }
+
+  if (value_type.kind == LocalValueKind::Pointer) {
+    if (pointee_type) {
+      if (pointee_type->kind != LocalValueKind::Integer ||
+          pointee_type->byte_size == 0 ||
+          pointee_type->byte_size > sizeof(std::uint64_t)) {
+        throw std::logic_error(
+            "live pointer received unsupported bounded pointee metadata");
+      }
+      result.pointee_type = pointee_type;
+    }
+  } else if (pointee_type) {
+    throw std::logic_error(
+        "non-pointer live scalar unexpectedly carries pointee metadata");
   }
   return result;
 }
@@ -2636,7 +2660,10 @@ std::optional<LocalScalarValue> inspect_caller_stack_unit(
     throw std::runtime_error("local value has no supported DW_FORM_ref4 type");
   }
 
-  const auto value_type = resolve_value_type(dies, type->number);
+  const auto root_type =
+      resolve_bounded_root_value_type(dies, type->number);
+  const auto& value_type = root_type.value_type;
+  const auto& pointee_type = root_type.pointee_type;
   std::vector<std::byte> location_expression;
   if (location->form == kDwFormExprloc) {
     location_expression = location->expression;
@@ -2647,19 +2674,28 @@ std::optional<LocalScalarValue> inspect_caller_stack_unit(
     throw std::runtime_error("local value has no supported DW_AT_location form");
   }
 
-  if (value_type.kind == LocalValueKind::Enumeration) {
-    if (location_expression.size() != 1 ||
-        std::to_integer<std::uint8_t>(location_expression.front()) != kDwOpReg3) {
-      throw std::runtime_error(
-          "historical live enum requires compiler-proven DW_OP_reg3 (rbx)");
-    }
+  const bool exact_historical_rbx =
+      location_expression.size() == 1 &&
+      std::to_integer<std::uint8_t>(location_expression.front()) == kDwOpReg3;
+  if (exact_historical_rbx &&
+      (value_type.kind == LocalValueKind::Enumeration ||
+       value_type.kind == LocalValueKind::Pointer)) {
     if (!frame.registers.rbx) {
       throw std::runtime_error(
-          "historical live enum DW_OP_reg3 requires CFI-recovered RBX");
+          "historical live DW_OP_reg3 requires CFI-recovered RBX");
+    }
+    if (value_type.kind == LocalValueKind::Pointer && !pointee_type) {
+      throw std::logic_error(
+          "historical live pointer lost canonical bounded pointee metadata");
     }
     const auto raw =
         truncate_integer(*frame.registers.rbx, value_type.byte_size);
-    return materialize_live_scalar(module, name, value_type, raw);
+    return materialize_live_scalar(
+        module, name, value_type, raw, pointee_type);
+  }
+  if (value_type.kind == LocalValueKind::Enumeration) {
+    throw std::runtime_error(
+        "historical live enum requires compiler-proven DW_OP_reg3 (rbx)");
   }
 
   if (value_type.kind != LocalValueKind::Structure && !location_expression.empty() &&
@@ -2789,6 +2825,45 @@ LocalScalarValue inspect_local_value(const Debugger& debugger,
   }
   throw std::runtime_error(
       "inspection-frame PC is not covered by a supported DWARF4/5 subprogram");
+}
+
+LocalScalarValue dereference_local_pointer(
+    const Debugger& debugger, const ElfFile& preferred_elf,
+    const InspectionFrameContext& frame, std::string_view name) {
+  const auto pointer =
+      inspect_local_value(debugger, preferred_elf, frame, name);
+  if (pointer.kind != LocalValueKind::Pointer || !pointer.pointee_type) {
+    throw std::runtime_error(
+        "local value is not a pointer with bounded pointee metadata: " +
+        std::string(name));
+  }
+  if (pointer.raw_value == 0) {
+    throw std::runtime_error("cannot dereference a null live pointer");
+  }
+  if (pointer.raw_value >
+      static_cast<std::uint64_t>(
+          std::numeric_limits<std::uintptr_t>::max())) {
+    throw std::overflow_error(
+        "live pointer exceeds host address width");
+  }
+  const auto& pointee = *pointer.pointee_type;
+  if (pointee.kind != LocalValueKind::Integer ||
+      pointee.byte_size == 0 ||
+      pointee.byte_size > sizeof(std::uint64_t) ||
+      !pointee.members.empty() || pointee.array_type || pointee.enum_type) {
+    throw std::runtime_error(
+        "live pointer pointee is outside the bounded integer model");
+  }
+
+  const auto address = static_cast<std::uintptr_t>(pointer.raw_value);
+  const auto bytes = debugger.read_memory(address, pointee.byte_size);
+  if (bytes.size() != pointee.byte_size) {
+    throw std::runtime_error("short live pointer pointee memory read");
+  }
+  return LocalScalarValue{
+      pointer.module_path, "*" + pointer.name,
+      decode_integer(bytes, 0, pointee.byte_size),
+      pointee.byte_size, pointee.is_signed, LocalValueKind::Integer};
 }
 
 LocalIntegerValue inspect_local_integer(const Debugger& debugger,

@@ -262,6 +262,30 @@ std::optional<LocalValueType> resolve_pointer_pointee_type(
   }
   throw std::runtime_error("snapshot pointer type chain is too deep");
 }
+struct BoundedRootTypeResolution {
+  LocalValueType value_type;
+  std::optional<LocalValueType> pointee_type{};
+};
+
+BoundedRootTypeResolution resolve_bounded_root_value_type(
+    const std::vector<Die>& dies, std::uint64_t type_offset) {
+  if (const auto floating =
+          resolve_snapshot_floating_type(dies, type_offset)) {
+    return BoundedRootTypeResolution{*floating, std::nullopt};
+  }
+
+  auto pointee_type = resolve_pointer_pointee_type(dies, type_offset);
+  if (pointee_type) {
+    return BoundedRootTypeResolution{
+        LocalValueType{sizeof(std::uintptr_t), false,
+                       LocalValueKind::Pointer, {}},
+        std::move(pointee_type)};
+  }
+
+  return BoundedRootTypeResolution{
+      resolve_value_type(dies, type_offset), std::nullopt};
+}
+
 
 std::size_t snapshot_xmm_index(const std::vector<std::byte>& expression) {
   if (expression.size() != 1) {
@@ -592,16 +616,10 @@ std::optional<LocalScalarValue> inspect_snapshot_unit(
     throw std::runtime_error("local value has no supported DW_FORM_ref4 type");
   }
 
-  const auto floating_type = resolve_snapshot_floating_type(dies, type->number);
-  const auto pointee_type = floating_type
-                                ? std::optional<LocalValueType>{}
-                                : resolve_pointer_pointee_type(dies, type->number);
-  const auto value_type = floating_type
-                              ? *floating_type
-                              : pointee_type
-                                    ? LocalValueType{sizeof(std::uintptr_t), false,
-                                                LocalValueKind::Pointer, {}}
-                                    : resolve_value_type(dies, type->number);
+  const auto root_type =
+      resolve_bounded_root_value_type(dies, type->number);
+  const auto& value_type = root_type.value_type;
+  const auto& pointee_type = root_type.pointee_type;
   std::vector<std::byte> location_expression;
   if (location->form == kDwFormExprloc) {
     location_expression = location->expression;

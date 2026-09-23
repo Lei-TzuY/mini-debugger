@@ -151,11 +151,10 @@ def verify(path):
         if owned_range is None
         else f"[0x{owned_range[0]:x},0x{owned_range[1]:x})"
     )
-    print(
-        "historical live pointer DWARF oracle passed: "
+    raise RuntimeError(
+        "historical pointer register evidence: "
         f"return-pc=0x{return_pc:x} location={expression} "
-        f"regno={regno} regname={regname} range={range_text} "
-        "type=pointer byte-size=8 pointee=4-byte-signed"
+        f"regno={regno} regname={regname} range={range_text}"
     )
 
 

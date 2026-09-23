@@ -53,7 +53,9 @@ std::string run_cli(const std::string& mdbg_path,
       "break historical_pointer_callee_probe\n"
       "continue\n"
       "bt\n"
+      "locals\n"
       "frame 1\n"
+      "locals\n"
       "print historical_pointer\n"
       "deref historical_pointer\n"
       "continue\n";
@@ -117,8 +119,21 @@ void verify_historical_pointer_cli(const std::string& fixture,
   require(output.find("#0 ") != std::string::npos &&
               output.find("#1 ") != std::string::npos,
           "live CLI backtrace did not expose a caller frame\n" + output);
-  require(output.find("selected inspection frame 1") != std::string::npos,
+  const auto selected_marker = output.find("selected inspection frame 1");
+  require(selected_marker != std::string::npos,
           "live CLI did not select historical inspection frame 1\n" + output);
+  const auto current_catalogue = output.substr(0, selected_marker);
+  const auto historical_catalogue = output.substr(selected_marker);
+  require(current_catalogue.find("parameter input") != std::string::npos,
+          "live CLI current-frame locals did not expose callee parameter input\n" +
+              output);
+  require(historical_catalogue.find("parameter historical_pointer") !=
+              std::string::npos,
+          "live CLI historical-frame locals did not expose historical_pointer\n" +
+              output);
+  require(historical_catalogue.find("parameter input") == std::string::npos,
+          "live CLI historical-frame locals leaked the callee-only input binding\n" +
+              output);
   require(output.find("historical_pointer = 0x") != std::string::npos,
           "live CLI did not inspect the historical pointer\n" + output);
   require(output.find("*historical_pointer = 324508639") !=

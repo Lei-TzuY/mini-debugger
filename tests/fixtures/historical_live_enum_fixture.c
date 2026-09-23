@@ -9,12 +9,13 @@ enum HistoricalLiveMode {
 volatile uint32_t historical_mode_seed = UINT32_C(42);
 
 __attribute__((noinline)) uint64_t historical_enum_callee(uint64_t input) {
-  __asm__ volatile(".globl historical_enum_callee_probe\n"
+  __asm__ volatile("movabs $0x1122334455667788, %%rbx\n"
+                   ".globl historical_enum_callee_probe\n"
                    "historical_enum_callee_probe:\n"
                    "nop\n"
                    :
                    : "r"(input)
-                   : "memory");
+                   : "rbx", "memory");
   return input + UINT64_C(1);
 }
 

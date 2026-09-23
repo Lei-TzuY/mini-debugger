@@ -39,6 +39,9 @@ void verify_historical_enum(const std::string& fixture) {
   require(stop.reason == mdbg::StopReason::Breakpoint &&
               stop.breakpoint_address == callee_address,
           "historical enum fixture did not stop in the callee");
+  const auto live_regs = debugger.registers();
+  require(live_regs.rbx == UINT64_C(0x1122334455667788),
+          "historical enum callee did not hold the distinct live RBX sentinel");
 
   const auto frames = mdbg::build_inspection_frames(debugger, elf, cfi, 3);
   require(frames.size() >= 2,
@@ -60,6 +63,8 @@ void verify_historical_enum(const std::string& fixture) {
   require(static_cast<std::uint32_t>(*frames[1].registers.rbx) ==
               UINT32_C(42),
           "historical enum recovered RBX does not carry the compiler-owned enum value");
+  require(*frames[1].registers.rbx != live_regs.rbx,
+          "historical enum incorrectly borrowed current callee RBX");
 
   const auto value =
       mdbg::inspect_local_value(debugger, elf, frames[1], "historical_mode");

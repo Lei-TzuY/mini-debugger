@@ -120,18 +120,32 @@ struct LocalIntegerValue {
 
 using LocalScalarValue = LocalIntegerValue;
 
-inline std::optional<std::string_view> local_enum_symbol(const LocalScalarValue& value) {
-  if (value.kind != LocalValueKind::Enumeration || !value.enum_type) {
-    return std::nullopt;
-  }
+inline std::optional<std::string_view> local_enum_symbol(
+    std::uint64_t raw_value, const LocalEnumType& enum_type) {
   const LocalEnumEntry* match = nullptr;
-  for (const auto& enumerator : value.enum_type->enumerators) {
-    if (enumerator.raw_value != value.raw_value) continue;
+  for (const auto& enumerator : enum_type.enumerators) {
+    if (enumerator.raw_value != raw_value) continue;
     if (match != nullptr) return std::nullopt;
     match = &enumerator;
   }
   return match == nullptr ? std::nullopt
                           : std::optional<std::string_view>{match->name};
+}
+
+inline std::optional<std::string_view> local_enum_symbol(
+    const LocalScalarValue& value) {
+  if (value.kind != LocalValueKind::Enumeration || !value.enum_type) {
+    return std::nullopt;
+  }
+  return local_enum_symbol(value.raw_value, *value.enum_type);
+}
+
+inline std::optional<std::string_view> local_enum_symbol(
+    const LocalStructMember& member) {
+  if (member.kind != LocalValueKind::Enumeration || !member.enum_type) {
+    return std::nullopt;
+  }
+  return local_enum_symbol(member.raw_value, *member.enum_type);
 }
 
 LocalScalarValue inspect_local_value(const Debugger& debugger,

@@ -229,8 +229,22 @@ void print_value(const mdbg::LocalScalarValue& value) {
     std::cout << "{ ";
     for (std::size_t index = 0; index < value.members.size(); ++index) {
       if (index != 0) std::cout << ", ";
-      std::cout << value.members[index].name << "=0x" << std::hex
-                << value.members[index].raw_value << std::dec;
+      const auto& member = value.members[index];
+      std::cout << member.name << '=';
+      if (member.kind == mdbg::LocalValueKind::Enumeration) {
+        if (!member.enum_type) {
+          throw std::logic_error(
+              "bounded enum-valued structure member lost its type metadata");
+        }
+        if (const auto symbol = mdbg::local_enum_symbol(member)) {
+          std::cout << member.enum_type->name << "::" << *symbol << " (0x"
+                    << std::hex << member.raw_value << std::dec << ')';
+        } else {
+          std::cout << "0x" << std::hex << member.raw_value << std::dec;
+        }
+      } else {
+        std::cout << "0x" << std::hex << member.raw_value << std::dec;
+      }
     }
     std::cout << " }";
   } else if (value.kind == mdbg::LocalValueKind::Array) {

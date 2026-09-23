@@ -1004,7 +1004,7 @@ int main(int argc, char** argv) {
     require(cli_output.find("[4-byte enum unsigned]") != std::string::npos,
             "mdbg-core did not render the physical enum representation");
     require(cli_output.find(
-                "caller_enum_aggregate = { direct=0x31415926, mode=0x2a }") !=
+                "caller_enum_aggregate = { direct=0x31415926, mode=CallerPhysicalMode::CallerPhysicalBusy (0x2a) }") !=
                 std::string::npos,
             "mdbg-core did not render the historical physical enum aggregate");
     require(cli_output.find(

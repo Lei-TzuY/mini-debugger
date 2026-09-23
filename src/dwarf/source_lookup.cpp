@@ -552,6 +552,7 @@ std::optional<LocalScalarValue> inspect_inline_scalar_unit(
   bool frame_zero_bit_field_structure = false;
   bool frame_zero_nested_structure = false;
   bool frame_zero_pointer_structure = false;
+  bool frame_zero_enum_structure = false;
   if (frame.index == 0 && direct_structure &&
       !value_type.members.empty()) {
     frame_zero_bit_field_structure = std::all_of(
@@ -602,11 +603,28 @@ std::optional<LocalScalarValue> inspect_inline_scalar_unit(
           member.pointee_type->is_signed && !member.bit_slice &&
           !member.enum_type && member.members.empty();
     }
+
+    if (value_type.members.size() == 2) {
+      const auto& direct = value_type.members[0];
+      const auto& mode = value_type.members[1];
+      frame_zero_enum_structure =
+          direct.kind == LocalValueKind::Integer && direct.offset == 0 &&
+          direct.byte_size == sizeof(std::int32_t) && direct.is_signed &&
+          !direct.pointee_type && !direct.bit_slice && !direct.enum_type &&
+          direct.members.empty() &&
+          mode.kind == LocalValueKind::Enumeration &&
+          mode.offset == sizeof(std::int32_t) &&
+          mode.byte_size == sizeof(std::uint32_t) && !mode.is_signed &&
+          !mode.pointee_type && !mode.bit_slice && mode.enum_type.has_value() &&
+          mode.enum_type->byte_size == sizeof(std::uint32_t) &&
+          !mode.enum_type->is_signed && !mode.enum_type->name.empty() &&
+          !mode.enum_type->enumerators.empty() && mode.members.empty();
+    }
   }
 
   if (frame.index != 0 ||
       ((frame_zero_bit_field_structure || frame_zero_nested_structure ||
-        frame_zero_pointer_structure) &&
+        frame_zero_pointer_structure || frame_zero_enum_structure) &&
        opcode == kDwOpFbreg)) {
     if (opcode != kDwOpFbreg) {
       throw std::runtime_error(

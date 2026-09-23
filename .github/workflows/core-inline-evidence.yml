@@ -62,6 +62,12 @@ jobs:
             tests/fixtures/frame_zero_inline_typed_aggregate_fixture.c \
             -o /tmp/frame-zero-inline-typed-aggregate-nopie
           "$CC" -O2 -g -gdwarf-4 -fPIE -pie \
+            tests/fixtures/frame_zero_inline_enum_aggregate_fixture.c \
+            -o /tmp/frame-zero-inline-enum-aggregate-pie
+          "$CC" -O2 -g -gdwarf-4 -fno-pie -no-pie \
+            tests/fixtures/frame_zero_inline_enum_aggregate_fixture.c \
+            -o /tmp/frame-zero-inline-enum-aggregate-nopie
+          "$CC" -O2 -g -gdwarf-4 -fPIE -pie \
             tests/fixtures/caller_inline_core_fixture.c \
             tests/fixtures/caller_inline_crash_leaf.c -pthread \
             -o /tmp/caller-inline-pie
@@ -111,6 +117,10 @@ jobs:
             /tmp/frame-zero-inline-typed-aggregate-pie
           python3 tests/core_frame_zero_inline_typed_aggregate_dwarf_oracle.py \
             /tmp/frame-zero-inline-typed-aggregate-nopie
+          python3 tests/core_frame_zero_inline_enum_aggregate_dwarf_oracle.py \
+            /tmp/frame-zero-inline-enum-aggregate-pie
+          python3 tests/core_frame_zero_inline_enum_aggregate_dwarf_oracle.py \
+            /tmp/frame-zero-inline-enum-aggregate-nopie
           python3 tests/core_caller_inline_dwarf_oracle.py /tmp/caller-inline-pie
           python3 tests/core_caller_inline_dwarf_oracle.py /tmp/caller-inline-nopie
           python3 tests/core_caller_inline_union_dwarf_oracle.py /tmp/caller-inline-pie
@@ -155,6 +165,10 @@ jobs:
             tests/core_frame_zero_inline_typed_aggregate_integration.cpp \
             build/libmdbg_core.a -pthread \
             -o /tmp/core-frame-zero-inline-typed-aggregate
+          "$CXX" -std=c++17 -Wall -Wextra -Wpedantic -Werror -Isrc \
+            tests/core_frame_zero_inline_enum_aggregate_integration.cpp \
+            build/libmdbg_core.a -pthread \
+            -o /tmp/core-frame-zero-inline-enum-aggregate
           "$CXX" -std=c++17 -Wall -Wextra -Wpedantic -Werror -Isrc \
             tests/core_inline_aggregate_session_integration.cpp \
             build/libmdbg_core.a -pthread \
@@ -211,6 +225,10 @@ jobs:
             /tmp/frame-zero-inline-typed-aggregate-pie build/mdbg-core
           /tmp/core-frame-zero-inline-typed-aggregate \
             /tmp/frame-zero-inline-typed-aggregate-nopie build/mdbg-core
+          /tmp/core-frame-zero-inline-enum-aggregate \
+            /tmp/frame-zero-inline-enum-aggregate-pie build/mdbg-core
+          /tmp/core-frame-zero-inline-enum-aggregate \
+            /tmp/frame-zero-inline-enum-aggregate-nopie build/mdbg-core
           /tmp/core-inline-aggregate-session /tmp/caller-inline-pie build/mdbg-core
           /tmp/core-inline-aggregate-session /tmp/caller-inline-nopie build/mdbg-core
           /tmp/core-inline-array-session /tmp/caller-inline-pie build/mdbg-core

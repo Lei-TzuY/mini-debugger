@@ -183,6 +183,28 @@ void verify_historical_pointer(const std::string& fixture) {
   const auto frames = mdbg::build_inspection_frames(debugger, elf, cfi, 3);
   require(frames.size() >= 2,
           "CFI did not recover the historical pointer caller frame");
+
+  const auto current_locals =
+      mdbg::discover_local_values(debugger, elf, frames[0]);
+  const auto historical_locals =
+      mdbg::discover_local_values(debugger, elf, frames[1]);
+  const auto has_local =
+      [](const std::vector<mdbg::LocalDiscoveryEntry>& entries,
+         const std::string& name, mdbg::LocalDiscoveryKind kind) {
+        for (const auto& entry : entries) {
+          if (entry.name == name && entry.kind == kind) return true;
+        }
+        return false;
+      };
+  require(has_local(current_locals, "input",
+                    mdbg::LocalDiscoveryKind::FormalParameter),
+          "live current-frame discovery did not expose callee parameter input");
+  require(has_local(historical_locals, "historical_pointer",
+                    mdbg::LocalDiscoveryKind::FormalParameter),
+          "live historical-frame discovery did not expose historical_pointer");
+  require(!has_local(historical_locals, "input",
+                     mdbg::LocalDiscoveryKind::FormalParameter),
+          "live historical-frame discovery leaked the callee-only input binding");
   const auto caller_function = elf.find_symbol("historical_pointer_caller");
   require(caller_function.has_value() && caller_function->size != 0,
           "historical pointer caller symbol is missing or has zero size");
@@ -242,6 +264,15 @@ void verify_historical_pointer(const std::string& fixture) {
   }
   require(stale_rejected,
           "historical pointer accepted an inspection frame from an older stop");
+
+  bool stale_catalogue_rejected = false;
+  try {
+    (void)mdbg::discover_local_values(debugger, elf, stale_frame);
+  } catch (const std::logic_error&) {
+    stale_catalogue_rejected = true;
+  }
+  require(stale_catalogue_rejected,
+          "historical local discovery accepted a catalogue from an older stop");
 
   const auto exit = debugger.continue_execution();
   require(exit.reason == mdbg::StopReason::Exited && exit.value == 0,

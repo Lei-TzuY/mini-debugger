@@ -4,6 +4,12 @@
 #include "elf/elf.hpp"
 #include "unwind/cfi.hpp"
 
+#include <poll.h>
+#include <sys/wait.h>
+#include <unistd.h>
+
+#include <cerrno>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -16,6 +22,108 @@ namespace {
 
 void require(bool condition, const std::string& message) {
   if (!condition) throw std::runtime_error(message);
+}
+
+std::string run_cli(const std::string& mdbg_path,
+                    const std::string& fixture) {
+  int input_pipe[2];
+  int output_pipe[2];
+  if (::pipe(input_pipe) != 0 || ::pipe(output_pipe) != 0) {
+    throw std::runtime_error("failed to create historical frame CLI pipes");
+  }
+
+  const pid_t child = ::fork();
+  if (child == -1) throw std::runtime_error("failed to fork historical frame CLI");
+  if (child == 0) {
+    (void)::setpgid(0, 0);
+    ::dup2(input_pipe[0], STDIN_FILENO);
+    ::dup2(output_pipe[1], STDOUT_FILENO);
+    ::dup2(output_pipe[1], STDERR_FILENO);
+    ::close(input_pipe[0]);
+    ::close(input_pipe[1]);
+    ::close(output_pipe[0]);
+    ::close(output_pipe[1]);
+    ::execl(mdbg_path.c_str(), mdbg_path.c_str(), fixture.c_str(), nullptr);
+    _exit(127);
+  }
+
+  ::close(input_pipe[0]);
+  ::close(output_pipe[1]);
+  const std::string script =
+      "break historical_pointer_callee_probe\n"
+      "continue\n"
+      "bt\n"
+      "frame 1\n"
+      "print historical_pointer\n"
+      "deref historical_pointer\n"
+      "continue\n";
+  std::size_t written = 0;
+  while (written < script.size()) {
+    const auto count =
+        ::write(input_pipe[1], script.data() + written, script.size() - written);
+    if (count == -1 && errno == EINTR) continue;
+    if (count <= 0) {
+      throw std::runtime_error("failed to write historical frame CLI script");
+    }
+    written += static_cast<std::size_t>(count);
+  }
+  ::close(input_pipe[1]);
+
+  std::string output;
+  const auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(8);
+  while (true) {
+    const auto now = std::chrono::steady_clock::now();
+    if (now >= deadline) {
+      ::kill(-child, SIGKILL);
+      ::kill(child, SIGKILL);
+      throw std::runtime_error("timed out waiting for historical frame CLI");
+    }
+    const auto remaining =
+        std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now)
+            .count();
+    pollfd descriptor{output_pipe[0], POLLIN | POLLHUP, 0};
+    const int polled =
+        ::poll(&descriptor, 1, static_cast<int>(remaining));
+    if (polled == -1 && errno == EINTR) continue;
+    if (polled <= 0) {
+      throw std::runtime_error(
+          "timed out reading historical frame CLI output");
+    }
+    char buffer[512];
+    const auto count = ::read(output_pipe[0], buffer, sizeof(buffer));
+    if (count == -1 && errno == EINTR) continue;
+    if (count < 0) {
+      throw std::runtime_error("failed to read historical frame CLI output");
+    }
+    if (count == 0) break;
+    output.append(buffer, static_cast<std::size_t>(count));
+  }
+  ::close(output_pipe[0]);
+
+  int status = 0;
+  pid_t waited;
+  do {
+    waited = ::waitpid(child, &status, 0);
+  } while (waited == -1 && errno == EINTR);
+  require(waited == child && WIFEXITED(status) && WEXITSTATUS(status) == 0,
+          "historical frame CLI tracee did not exit cleanly\n" + output);
+  return output;
+}
+
+void verify_historical_pointer_cli(const std::string& fixture,
+                                   const std::string& mdbg_path) {
+  const auto output = run_cli(mdbg_path, fixture);
+  require(output.find("#0 ") != std::string::npos &&
+              output.find("#1 ") != std::string::npos,
+          "live CLI backtrace did not expose a caller frame\n" + output);
+  require(output.find("selected inspection frame 1") != std::string::npos,
+          "live CLI did not select historical inspection frame 1\n" + output);
+  require(output.find("historical_pointer = 0x") != std::string::npos,
+          "live CLI did not inspect the historical pointer\n" + output);
+  require(output.find("*historical_pointer = 324508639") !=
+              std::string::npos,
+          "live CLI did not dereference the historical pointer\n" + output);
 }
 
 std::int32_t read_i32(const mdbg::Debugger& debugger, std::uintptr_t address) {
@@ -128,9 +236,10 @@ void verify_historical_pointer(const std::string& fixture) {
 }  // namespace
 
 int main(int argc, char** argv) {
-  if (argc != 2) return 2;
+  if (argc != 3) return 2;
   try {
     verify_historical_pointer(argv[1]);
+    verify_historical_pointer_cli(argv[1], argv[2]);
     return 0;
   } catch (const std::exception& error) {
     std::fprintf(stderr, "historical live pointer integration failure: %s\n",

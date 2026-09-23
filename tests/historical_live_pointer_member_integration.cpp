@@ -1,5 +1,6 @@
 #include "debugger/debugger.hpp"
 #include "dwarf/eh_frame.hpp"
+#include "dwarf/inline_member.hpp"
 #include "dwarf/local_value.hpp"
 #include "elf/elf.hpp"
 #include "unwind/cfi.hpp"
@@ -70,9 +71,55 @@ void verify(const std::string& fixture){
               materialized.members[1].kind==mdbg::LocalValueKind::Pointer&&
               materialized.members[1].raw_value==linked_address,
           "historical linked object was not materialized exactly");
+  require(materialized.members[1].pointee_type &&
+              materialized.members[1].pointee_type->byte_size==4 &&
+              materialized.members[1].pointee_type->is_signed,
+          "historical linked object lost pointer-member pointee metadata");
+
+  const auto selected=mdbg::inspect_local_aggregate_member(materialized,"linked");
+  require(selected.kind==mdbg::LocalValueKind::Pointer&&
+              selected.raw_value==linked_address&&selected.pointee_type&&
+              selected.pointee_type->kind==mdbg::LocalValueKind::Integer&&
+              selected.pointee_type->byte_size==4&&selected.pointee_type->is_signed,
+          "historical live pointer-member selection lost bounded metadata");
+  const auto terminal=mdbg::dereference_local_pointer(
+      debugger,frames[1],selected);
+  require(terminal.kind==mdbg::LocalValueKind::Integer&&
+              terminal.byte_size==4&&terminal.is_signed&&
+              terminal.raw_value==UINT64_C(0x02468ace),
+          "historical live pointer-member dereference lost terminal int32 value");
+
+  auto null_member=selected;
+  null_member.raw_value=0;
+  bool null_rejected=false;
+  try{
+    (void)mdbg::dereference_local_pointer(debugger,frames[1],null_member);
+  }catch(const std::runtime_error&){
+    null_rejected=true;
+  }
+  require(null_rejected,"historical live null pointer member was dereferenced");
+
+  auto malformed_member=selected;
+  malformed_member.pointee_type->byte_size=0;
+  bool malformed_rejected=false;
+  try{
+    (void)mdbg::dereference_local_pointer(debugger,frames[1],malformed_member);
+  }catch(const std::runtime_error&){
+    malformed_rejected=true;
+  }
+  require(malformed_rejected,
+          "historical live malformed pointer-member metadata was accepted");
   const auto next=debugger.continue_execution();
   require(next.reason==mdbg::StopReason::Breakpoint&&next.breakpoint_address==after_address,
           "historical pointer-member fixture did not reach next stop");
+  bool stale_rejected=false;
+  try{
+    (void)mdbg::dereference_local_pointer(debugger,frames[1],selected);
+  }catch(const std::logic_error&){
+    stale_rejected=true;
+  }
+  require(stale_rejected,
+          "historical live pointer member accepted a stale inspection frame");
   const auto exit=debugger.continue_execution();
   require(exit.reason==mdbg::StopReason::Exited&&exit.value==0,
           "historical pointer-member fixture did not exit cleanly");

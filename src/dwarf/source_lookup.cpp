@@ -423,6 +423,16 @@ std::optional<LocalValueType> selected_inline_direct_structure_type(
 }
 
 bool frame_zero_fbreg_value_eligible(const LocalValueType& value_type) {
+  if (value_type.kind == LocalValueKind::Enumeration) {
+    return value_type.byte_size == sizeof(std::uint32_t) &&
+           !value_type.is_signed && value_type.members.empty() &&
+           !value_type.array_type && value_type.enum_type.has_value() &&
+           value_type.enum_type->byte_size == sizeof(std::uint32_t) &&
+           !value_type.enum_type->is_signed &&
+           !value_type.enum_type->name.empty() &&
+           !value_type.enum_type->enumerators.empty();
+  }
+
   if (value_type.kind == LocalValueKind::Array) {
     return value_type.byte_size == 2 * sizeof(std::int32_t) &&
            value_type.members.empty() && value_type.array_type.has_value() &&

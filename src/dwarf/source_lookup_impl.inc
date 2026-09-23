@@ -105,6 +105,7 @@ constexpr std::uint8_t kDwOpReg3 =
 constexpr std::uint8_t kDwOpReg4 = 0x54;
 constexpr std::uint8_t kDwOpReg5 = 0x55;
 constexpr std::uint8_t kDwOpReg6 = 0x56;
+constexpr std::uint8_t kDwOpReg7 = 0x57;
 constexpr std::uint8_t kDwOpBreg1 = 0x71;
 constexpr std::uint8_t kDwOpBreg2 = 0x72;
 constexpr std::uint8_t kDwOpBreg3 = 0x73;
@@ -1800,6 +1801,7 @@ std::uint64_t frame_base(const Debugger& debugger, const ElfFile& module,
   }
   const auto op = std::to_integer<std::uint8_t>(expression.front());
   if (op == kDwOpReg6) return regs.rbp;
+  if (op == kDwOpReg7) return regs.rsp;
   if (op != kDwOpCallFrameCfa) {
     throw std::runtime_error("unsupported DW_AT_frame_base operation");
   }

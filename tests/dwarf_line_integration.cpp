@@ -608,7 +608,8 @@ void test_cli_live_union(const std::string& integration_path,
   require(output.find("live_union.unsigned_value = 0x44556677") !=
               std::string::npos,
           "CLI did not render unsigned live union member selection\n" + output);
-  require(output.find("union-member failed: local union has no member named: missing") !=
+  require(output.find(
+              "union-member failed: bounded selected-inline union has no member named: missing") !=
               std::string::npos,
           "CLI did not deterministically reject missing live union member\n" + output);
 }

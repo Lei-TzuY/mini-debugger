@@ -568,6 +568,17 @@ int main(int argc, char** argv) {
               }
             }
             std::cout << " }";
+          } else if (value.kind == mdbg::LocalValueKind::Union) {
+            if (value.members.empty()) {
+              throw std::logic_error(
+                  "live union lost bounded overlapping member metadata");
+            }
+            std::cout << "union{";
+            for (std::size_t index = 0; index < value.members.size(); ++index) {
+              if (index != 0) std::cout << ", ";
+              std::cout << value.members[index].name;
+            }
+            std::cout << '}';
           } else if (value.kind == mdbg::LocalValueKind::Array) {
             if (!value.array_type ||
                 value.elements.size() != value.array_type->element_count) {
@@ -625,6 +636,24 @@ int main(int argc, char** argv) {
                     << element.raw_value << std::dec << '\n';
         } catch (const std::exception& error) {
           std::cout << "array-element failed: " << error.what() << '\n';
+        }
+      } else if (command == "union-member") {
+        std::string name;
+        std::string member_name;
+        std::string extra;
+        input >> name >> member_name >> extra;
+        if (name.empty() || member_name.empty() || !extra.empty()) {
+          std::cout << "usage: union-member <name> <member>\n";
+          continue;
+        }
+        try {
+          const auto value = mdbg::inspect_local_value(debugger, elf, name);
+          const auto member =
+              mdbg::inspect_local_union_member(value, member_name);
+          std::cout << member.name << " = 0x" << std::hex
+                    << member.raw_value << std::dec << '\n';
+        } catch (const std::exception& error) {
+          std::cout << "union-member failed: " << error.what() << '\n';
         }
       } else if (command == "set") {
         std::string topic;

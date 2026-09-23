@@ -380,7 +380,7 @@ LocalScalarValue materialize_bounded_array_bytes(
 }
 
 LocalScalarValue materialize_bounded_union_bytes(
-    const SnapshotModuleAddress& owner, std::string_view name,
+    std::string_view module_path, std::string_view name,
     const LocalValueType& value_type, const std::vector<std::byte>& bytes) {
   if (value_type.kind != LocalValueKind::Union ||
       value_type.byte_size == 0 ||
@@ -393,7 +393,7 @@ LocalScalarValue materialize_bounded_union_bytes(
         "bounded union bytes exceed the canonical overlapping-storage model");
   }
 
-  LocalScalarValue result{owner.module_path, std::string(name), 0,
+  LocalScalarValue result{std::string(module_path), std::string(name), 0,
                           value_type.byte_size, false,
                           LocalValueKind::Union};
   result.members.reserve(value_type.members.size());
@@ -414,6 +414,13 @@ LocalScalarValue materialize_bounded_union_bytes(
     result.members.push_back(std::move(materialized));
   }
   return result;
+}
+
+LocalScalarValue materialize_bounded_union_bytes(
+    const SnapshotModuleAddress& owner, std::string_view name,
+    const LocalValueType& value_type, const std::vector<std::byte>& bytes) {
+  return materialize_bounded_union_bytes(
+      owner.module_path, name, value_type, bytes);
 }
 
 LocalScalarValue materialize_snapshot_memory_value(

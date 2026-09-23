@@ -112,11 +112,46 @@ void test_caller_register_recovery(const std::string& fixture) {
       mdbg::inspect_local_integer(debugger, elf, frames[1], "transformed");
   require(value.raw_value == kExpectedTransformedLocal,
           "caller-register recovery returned the wrong transformed value");
+
+  const auto historical_mode =
+      mdbg::inspect_local_value(debugger, elf, frames[1], "historical_mode");
+  require(historical_mode.kind == mdbg::LocalValueKind::Enumeration &&
+              historical_mode.byte_size == sizeof(std::uint32_t) &&
+              !historical_mode.is_signed &&
+              historical_mode.raw_value == UINT64_C(42),
+          "historical live-frame enum lost value/type identity");
+  require(historical_mode.enum_type.has_value() &&
+              historical_mode.enum_type->name == "LiveMode" &&
+              historical_mode.enum_type->enumerators.size() == 3,
+          "historical live-frame enum lost canonical metadata");
+  const auto historical_symbol = mdbg::local_enum_symbol(historical_mode);
+  require(historical_symbol && *historical_symbol == "LiveBusy",
+          "historical live-frame enum did not resolve its unique symbol");
   require(frames[1].registers.rbx.has_value() &&
               *frames[1].registers.rbx == kExpectedEntryParameter,
           "caller inspection frame did not recover the compiler-owned RBX value");
   require(debugger.registers().rbx == kExpectedCallerRbxSentinel,
           "caller inspection replaced the live callee RBX instead of recovering history");
+
+  const auto old_frame = frames[1];
+  const auto transformed_probe = elf.find_symbol("transformed_local_probe");
+  require(transformed_probe.has_value(),
+          "transformed_local_probe symbol missing for stale-frame validation");
+  const auto transformed_address = static_cast<std::uintptr_t>(
+      elf.runtime_address(debugger.pid(), *transformed_probe));
+  debugger.add_breakpoint(transformed_address);
+  const auto next_stop = debugger.continue_execution();
+  require(next_stop.reason == mdbg::StopReason::Breakpoint &&
+              next_stop.breakpoint_address == transformed_address,
+          "historical enum stale-frame test did not reach a new debugger stop");
+  bool stale_rejected = false;
+  try {
+    (void)mdbg::inspect_local_value(debugger, elf, old_frame, "historical_mode");
+  } catch (const std::logic_error&) {
+    stale_rejected = true;
+  }
+  require(stale_rejected,
+          "historical enum inspection accepted a frame from an older stop");
 
   const auto exit = debugger.continue_execution();
   require(exit.reason == mdbg::StopReason::Exited && exit.value == 0,

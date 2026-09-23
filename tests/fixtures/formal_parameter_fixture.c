@@ -109,6 +109,7 @@ __attribute__((noinline)) uint64_t inspect_entry_parameter(uint64_t entry_parame
   static const struct SnapshotFileAggregate snapshot_file_aggregate = {
       SNAPSHOT_AGGREGATE_FIRST, SNAPSHOT_AGGREGATE_SECOND};
   uint64_t transformed = entry_parameter ^ ENTRY_PARAMETER_XOR;
+  enum LiveMode historical_mode = (enum LiveMode)live_enum_seed;
   __asm__ volatile("" : : "m"(snapshot_file_scalar), "m"(snapshot_file_aggregate) : "memory");
   const uint64_t side_effect = clobber_argument_registers(1, 2, 3, 4, 5, 6);
   __asm__ volatile("nop" ::: "memory");
@@ -116,7 +117,7 @@ __attribute__((noinline)) uint64_t inspect_entry_parameter(uint64_t entry_parame
                    "transformed_local_probe:\n"
                    "nop\n"
                    ::: "memory");
-  return transformed ^ side_effect;
+  return transformed ^ side_effect ^ (uint64_t)historical_mode ^ UINT64_C(42);
 }
 
 __attribute__((noinline)) uint64_t inspect_optimized_local(void) {

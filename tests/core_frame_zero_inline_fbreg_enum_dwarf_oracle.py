@@ -155,7 +155,7 @@ def require_binding(path, probe, records, by_offset):
             continue
         entry_name = child["attrs"].get("name", "")
         entry_name = re.sub(
-            r"^\\(indirect string, offset: 0x[0-9a-fA-F]+\\):\\s*",
+            r"^\(indirect string, offset: 0x[0-9a-fA-F]+\):\s*",
             "",
             entry_name,
         )

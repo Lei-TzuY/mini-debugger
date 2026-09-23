@@ -2402,6 +2402,10 @@ struct BoundedRootTypeResolution {
 BoundedRootTypeResolution resolve_bounded_root_value_type(
     const std::vector<Die>& dies, std::uint64_t type_offset);
 
+LocalScalarValue materialize_bounded_array_bytes(
+    std::string_view module_path, std::string_view name,
+    const LocalValueType& value_type, const std::vector<std::byte>& bytes);
+
 LocalScalarValue materialize_live_scalar(
     const ElfFile& module, std::string_view name,
     const LocalValueType& value_type, std::uint64_t raw,

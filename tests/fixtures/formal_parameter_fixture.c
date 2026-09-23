@@ -24,6 +24,7 @@
 #define LIVE_UNION_VALUE INT32_C(0x44556677)
 #define LIVE_BIT_SIGNED_VALUE (-7)
 #define LIVE_BIT_UNSIGNED_VALUE UINT32_C(41)
+#define LIVE_ENUM_AGGREGATE_DIRECT INT32_C(0x31415926)
 
 enum LiveMode {
   LiveIdle = 3,
@@ -39,6 +40,11 @@ union LiveUnion {
 struct LiveBitFields {
   signed int signed_bits : 5;
   unsigned int unsigned_bits : 6;
+};
+
+struct LiveEnumAggregate {
+  int32_t direct;
+  enum LiveMode mode;
 };
 
 struct SnapshotFileAggregate {
@@ -198,6 +204,19 @@ __attribute__((noinline)) int32_t inspect_live_bit_fields(void) {
   return live_bit_fields.signed_bits + (int32_t)live_bit_fields.unsigned_bits;
 }
 
+__attribute__((noinline)) int32_t inspect_live_enum_aggregate(void) {
+  struct LiveEnumAggregate live_enum_aggregate = {
+      .direct = LIVE_ENUM_AGGREGATE_DIRECT, .mode = LiveBusy};
+  __asm__ volatile("" : "+m"(live_enum_aggregate) : : "memory");
+  __asm__ volatile(".globl live_enum_aggregate_probe\n"
+                   "live_enum_aggregate_probe:\n"
+                   "nop\n"
+                   : "+m"(live_enum_aggregate)
+                   :
+                   : "memory");
+  return live_enum_aggregate.direct ^ (int32_t)live_enum_aggregate.mode;
+}
+
 __attribute__((noinline)) uint64_t inspect_arithmetic_local(
     uint64_t first, uint64_t second, uint64_t third,
     uint64_t fourth, uint64_t fifth, uint64_t sixth) {
@@ -253,6 +272,10 @@ int main(int argc, char** argv) {
   if (inspect_live_bit_fields() !=
       LIVE_BIT_SIGNED_VALUE + (int32_t)LIVE_BIT_UNSIGNED_VALUE) {
     return 11;
+  }
+  if (inspect_live_enum_aggregate() !=
+      (LIVE_ENUM_AGGREGATE_DIRECT ^ (int32_t)LiveBusy)) {
+    return 12;
   }
   if (inspect_arithmetic_local(UINT64_C(0xa5), UINT64_C(0x70), UINT64_C(0x60),
                                UINT64_C(0x50), UINT64_C(0x40), UINT64_C(0x102030)) !=

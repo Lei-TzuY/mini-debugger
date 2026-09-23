@@ -452,6 +452,73 @@ void test_live_bit_field_api(const std::string& fixture) {
           "live bit-field fixture did not exit cleanly after inspection");
 }
 
+
+void test_live_enum_aggregate_api(const std::string& fixture) {
+  auto debugger = mdbg::Debugger::launch(fixture, {});
+  const mdbg::ElfFile elf(fixture);
+  const auto probe = elf.find_symbol("live_enum_aggregate_probe");
+  require(probe.has_value(),
+          "live_enum_aggregate_probe symbol missing from optimized fixture");
+  const auto address =
+      static_cast<std::uintptr_t>(elf.runtime_address(debugger.pid(), *probe));
+  debugger.add_breakpoint(address);
+  const auto stop = debugger.continue_execution();
+  require(stop.reason == mdbg::StopReason::Breakpoint &&
+              stop.breakpoint_address == address,
+          "live enum aggregate did not stop while the structure was active");
+
+  const auto value =
+      mdbg::inspect_local_value(debugger, elf, "live_enum_aggregate");
+  require(value.name == "live_enum_aggregate" &&
+              value.kind == mdbg::LocalValueKind::Structure &&
+              value.byte_size == 2 * sizeof(std::uint32_t) &&
+              value.members.size() == 2,
+          "live enum aggregate lost bounded structure identity");
+
+  const auto& direct = value.members[0];
+  require(direct.name == "direct" && direct.offset == 0 &&
+              direct.kind == mdbg::LocalValueKind::Integer &&
+              direct.byte_size == sizeof(std::int32_t) && direct.is_signed &&
+              direct.raw_value == UINT64_C(0x31415926),
+          "live enum aggregate direct integer member changed unexpectedly");
+
+  const auto& mode = value.members[1];
+  require(mode.name == "mode" && mode.offset == sizeof(std::int32_t) &&
+              mode.kind == mdbg::LocalValueKind::Enumeration &&
+              mode.byte_size == sizeof(std::uint32_t) && !mode.is_signed &&
+              mode.raw_value == UINT64_C(42) && mode.enum_type.has_value(),
+          "live enum aggregate member lost enum identity");
+  require(mode.enum_type->name == "LiveMode" &&
+              mode.enum_type->byte_size == sizeof(std::uint32_t) &&
+              !mode.enum_type->is_signed &&
+              mode.enum_type->enumerators.size() == 3,
+          "live enum aggregate member lost bounded enum metadata");
+
+  const auto selected =
+      mdbg::inspect_local_aggregate_member(value, "mode");
+  require(selected.name == "live_enum_aggregate.mode" &&
+              selected.kind == mdbg::LocalValueKind::Enumeration &&
+              selected.raw_value == UINT64_C(42) &&
+              selected.enum_type.has_value(),
+          "live enum aggregate selection lost exact enum identity");
+  const auto symbol = mdbg::local_enum_symbol(selected);
+  require(symbol && *symbol == "LiveBusy",
+          "live enum aggregate selection lost symbolic identity");
+
+  auto unknown = selected;
+  unknown.raw_value = 11;
+  require(!mdbg::local_enum_symbol(unknown),
+          "unknown live enum-member value must remain numeric");
+  auto ambiguous = selected;
+  ambiguous.enum_type->enumerators.push_back({"LiveBusyAlias", 42});
+  require(!mdbg::local_enum_symbol(ambiguous),
+          "duplicate live enum-member aliases must remain ambiguous");
+
+  const auto exit = debugger.continue_execution();
+  require(exit.reason == mdbg::StopReason::Exited && exit.value == 0,
+          "live enum-aggregate fixture did not exit cleanly after inspection");
+}
+
 std::string run_cli_script(const std::string& integration_path, const std::string& fixture,
                            const char* mode, const std::string& script,
                            const char* context) {
@@ -695,6 +762,29 @@ void test_cli_live_bit_fields(const std::string& integration_path,
           "CLI did not select the unsigned live bit field\n" + output);
 }
 
+
+void test_cli_live_enum_aggregate(const std::string& integration_path,
+                                  const std::string& fixture) {
+  const auto output = run_cli_script(
+      integration_path, fixture, nullptr,
+      "break live_enum_aggregate_probe\n"
+      "continue\n"
+      "print live_enum_aggregate\n"
+      "aggregate-member live_enum_aggregate mode\n"
+      "continue\n",
+      "live enum-aggregate CLI");
+  require(output.find("Breakpoint 1") != std::string::npos,
+          "CLI did not install the live enum-aggregate breakpoint\n" + output);
+  require(output.find(
+              "live_enum_aggregate = { direct = 826366246, mode = 42 }") !=
+              std::string::npos,
+          "CLI did not render the live enum aggregate\n" + output);
+  require(output.find(
+              "live_enum_aggregate.mode = LiveMode::LiveBusy (0x2a)") !=
+              std::string::npos,
+          "CLI did not render symbolic + numeric live enum member\n" + output);
+}
+
 void test_missing_debug_line(const std::string& stripped_fixture) {
   const mdbg::DwarfLineTable lines(stripped_fixture);
   require(!lines.available(), "stripped fixture must not claim DWARF line coverage");
@@ -726,6 +816,8 @@ int main(int argc, char** argv) {
     test_cli_live_union(argv[0], argv[4]);
     test_live_bit_field_api(argv[4]);
     test_cli_live_bit_fields(argv[0], argv[4]);
+    test_live_enum_aggregate_api(argv[4]);
+    test_cli_live_enum_aggregate(argv[0], argv[4]);
     return 0;
   } catch (const std::exception& error) {
     std::fprintf(stderr, "DWARF line integration failure: %s\n", error.what());

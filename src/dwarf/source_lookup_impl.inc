@@ -2355,9 +2355,36 @@ LocalScalarValue materialize_live_scalar(
 
   if (value_type.kind == LocalValueKind::Pointer) {
     if (pointee_type) {
-      if (pointee_type->kind != LocalValueKind::Integer ||
-          pointee_type->byte_size == 0 ||
-          pointee_type->byte_size > sizeof(std::uint64_t)) {
+      if (pointee_type->kind == LocalValueKind::Integer) {
+        if (pointee_type->byte_size == 0 ||
+            pointee_type->byte_size > sizeof(std::uint64_t) ||
+            !pointee_type->members.empty() || pointee_type->array_type ||
+            pointee_type->enum_type) {
+          throw std::logic_error(
+              "live pointer received malformed bounded integer pointee metadata");
+        }
+      } else if (pointee_type->kind == LocalValueKind::Structure) {
+        if (pointee_type->byte_size == 0 ||
+            pointee_type->byte_size > kMaxLocalStructSize ||
+            pointee_type->members.empty() ||
+            pointee_type->members.size() > kMaxLocalStructMembers ||
+            pointee_type->array_type || pointee_type->enum_type) {
+          throw std::logic_error(
+              "live pointer received malformed bounded structure pointee metadata");
+        }
+        for (const auto& member : pointee_type->members) {
+          if (member.kind != LocalValueKind::Integer ||
+              member.byte_size == 0 ||
+              member.byte_size > sizeof(std::uint64_t) ||
+              member.offset > pointee_type->byte_size ||
+              member.byte_size > pointee_type->byte_size - member.offset ||
+              member.pointee_type || member.bit_slice || member.enum_type ||
+              !member.members.empty()) {
+            throw std::logic_error(
+                "live pointer structure pointee is outside the flat integer-member model");
+          }
+        }
+      } else {
         throw std::logic_error(
             "live pointer received unsupported bounded pointee metadata");
       }
@@ -2847,12 +2874,11 @@ LocalScalarValue dereference_local_pointer(
         "live pointer exceeds host address width");
   }
   const auto& pointee = *pointer.pointee_type;
-  if (pointee.kind != LocalValueKind::Integer ||
-      pointee.byte_size == 0 ||
-      pointee.byte_size > sizeof(std::uint64_t) ||
-      !pointee.members.empty() || pointee.array_type || pointee.enum_type) {
+  if (pointee.byte_size == 0 ||
+      pointee.byte_size > kMaxLocalStructSize ||
+      pointee.array_type || pointee.enum_type) {
     throw std::runtime_error(
-        "live pointer pointee is outside the bounded integer model");
+        "live pointer pointee is outside the bounded dereference model");
   }
 
   const auto address = static_cast<std::uintptr_t>(pointer.raw_value);
@@ -2860,10 +2886,24 @@ LocalScalarValue dereference_local_pointer(
   if (bytes.size() != pointee.byte_size) {
     throw std::runtime_error("short live pointer pointee memory read");
   }
-  return LocalScalarValue{
-      pointer.module_path, "*" + pointer.name,
-      decode_integer(bytes, 0, pointee.byte_size),
-      pointee.byte_size, pointee.is_signed, LocalValueKind::Integer};
+
+  if (pointee.kind == LocalValueKind::Integer) {
+    if (pointee.byte_size > sizeof(std::uint64_t) ||
+        !pointee.members.empty()) {
+      throw std::runtime_error(
+          "live pointer integer pointee has invalid bounded metadata");
+    }
+    return LocalScalarValue{
+        pointer.module_path, "*" + pointer.name,
+        decode_integer(bytes, 0, pointee.byte_size),
+        pointee.byte_size, pointee.is_signed, LocalValueKind::Integer};
+  }
+  if (pointee.kind == LocalValueKind::Structure) {
+    const ElfFile module(pointer.module_path);
+    return decode_structure(module, "*" + pointer.name, pointee, bytes);
+  }
+  throw std::runtime_error(
+      "live pointer pointee kind is unsupported for bounded dereference");
 }
 
 LocalIntegerValue inspect_local_integer(const Debugger& debugger,

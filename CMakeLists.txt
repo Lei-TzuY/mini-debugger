@@ -520,13 +520,15 @@ if(BUILD_TESTING)
 
   add_test(NAME historical_live_pointer_integration_pie
     COMMAND historical_live_pointer_integration
-      $<TARGET_FILE:historical_live_pointer_fixture_pie>)
+      $<TARGET_FILE:historical_live_pointer_fixture_pie>
+      $<TARGET_FILE:mdbg>)
   set_tests_properties(historical_live_pointer_integration_pie PROPERTIES
     DEPENDS historical_live_pointer_dwarf_oracle_pie)
 
   add_test(NAME historical_live_pointer_integration_nopie
     COMMAND historical_live_pointer_integration
-      $<TARGET_FILE:historical_live_pointer_fixture_nopie>)
+      $<TARGET_FILE:historical_live_pointer_fixture_nopie>
+      $<TARGET_FILE:mdbg>)
   set_tests_properties(historical_live_pointer_integration_nopie PROPERTIES
     DEPENDS historical_live_pointer_dwarf_oracle_nopie)
 

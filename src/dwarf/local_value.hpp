@@ -30,9 +30,19 @@ struct LocalDiscoveryEntry {
   LocalDiscoveryKind kind;
 };
 
+struct LocalPointerPointeeMemberType {
+  std::string name;
+  std::size_t offset;
+  std::size_t byte_size;
+  bool is_signed;
+  LocalValueKind kind{LocalValueKind::Integer};
+};
+
 struct LocalPointerPointeeType {
   std::size_t byte_size;
   bool is_signed;
+  LocalValueKind kind{LocalValueKind::Integer};
+  std::vector<LocalPointerPointeeMemberType> members{};
 };
 
 struct LocalBitSlice {

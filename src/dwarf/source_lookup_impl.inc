@@ -1404,6 +1404,87 @@ std::optional<LocalStructMemberType> resolve_bounded_nested_structure_member_typ
   return result;
 }
 
+LocalPointerPointeeType resolve_bounded_pointer_member_pointee_type(
+    const std::vector<Die>& dies, std::uint64_t type_offset) {
+  for (unsigned depth = 0; depth < 16; ++depth) {
+    const auto index = die_index_by_offset(dies, type_offset);
+    if (!index) {
+      throw std::runtime_error(
+          "bounded pointer-member pointee type references an unknown DIE");
+    }
+    const auto& die = dies[*index];
+    if (die.tag == kDwTagTypedef || die.tag == kDwTagConstType) {
+      const auto* wrapped = attribute(die, kDwAtType);
+      if (wrapped == nullptr || wrapped->form != kDwFormRef4) {
+        throw std::runtime_error(
+            "bounded pointer-member pointee wrapper does not use DW_FORM_ref4");
+      }
+      type_offset = wrapped->number;
+      continue;
+    }
+
+    if (die.tag != kDwTagStructureType) {
+      const auto integer = resolve_integer_type(dies, type_offset);
+      return LocalPointerPointeeType{
+          integer.byte_size, integer.is_signed,
+          LocalValueKind::Integer, {}};
+    }
+
+    const auto* size = attribute(die, kDwAtByteSize);
+    if (size == nullptr || size->number == 0 ||
+        size->number > kMaxLocalStructSize) {
+      throw std::runtime_error(
+          "bounded pointer-member structure pointee has an unsupported byte size");
+    }
+    const auto struct_size = static_cast<std::size_t>(size->number);
+    LocalPointerPointeeType result{
+        struct_size, false, LocalValueKind::Structure, {}};
+
+    for (std::size_t child = 0; child < dies.size(); ++child) {
+      if (dies[child].parent != *index) continue;
+      if (dies[child].tag != kDwTagMember) {
+        throw std::runtime_error(
+            "bounded pointer-member structure pointee has an unsupported direct child");
+      }
+      if (result.members.size() >= kMaxLocalStructMembers) {
+        throw std::runtime_error(
+            "bounded pointer-member structure pointee has too many members");
+      }
+      const auto& member = dies[child];
+      const auto* name = attribute(member, kDwAtName);
+      const auto* type = attribute(member, kDwAtType);
+      const auto* offset_attr = attribute(member, kDwAtDataMemberLocation);
+      if (name == nullptr || name->text.empty() ||
+          type == nullptr || type->form != kDwFormRef4 ||
+          offset_attr == nullptr ||
+          !is_constant_member_offset_form(offset_attr->form) ||
+          offset_attr->number > std::numeric_limits<std::size_t>::max()) {
+        throw std::runtime_error(
+            "bounded pointer-member structure pointee has unsupported member metadata");
+      }
+      const auto offset = static_cast<std::size_t>(offset_attr->number);
+      const auto integer = resolve_integer_type(dies, type->number);
+      if (integer.byte_size == 0 ||
+          integer.byte_size > sizeof(std::uint64_t) ||
+          offset > struct_size ||
+          integer.byte_size > struct_size - offset) {
+        throw std::runtime_error(
+            "bounded pointer-member structure pointee member exceeds storage");
+      }
+      result.members.push_back(LocalPointerPointeeMemberType{
+          name->text, offset, integer.byte_size, integer.is_signed,
+          LocalValueKind::Integer});
+    }
+    if (result.members.empty()) {
+      throw std::runtime_error(
+          "bounded pointer-member structure pointee has no direct integer members");
+    }
+    return result;
+  }
+  throw std::runtime_error(
+      "bounded pointer-member pointee type chain is too deep");
+}
+
 LocalStructMemberType resolve_bounded_direct_structure_member_type(
     const std::vector<Die>& dies, const Die& member, std::size_t struct_size) {
   const auto* member_name = attribute(member, kDwAtName);
@@ -1457,17 +1538,15 @@ LocalStructMemberType resolve_bounded_direct_structure_member_type(
         throw std::runtime_error(
             "bounded direct pointer member has no supported pointee type");
       }
-      const auto pointee_integer =
-          resolve_integer_type(dies, pointee->number);
+      const auto pointee_type =
+          resolve_bounded_pointer_member_pointee_type(dies, pointee->number);
       if (offset > struct_size || pointer_size > struct_size - offset) {
         throw std::runtime_error(
             "bounded direct pointer member exceeds aggregate storage");
       }
       return LocalStructMemberType{
           member_name->text, offset, pointer_size, false,
-          LocalValueKind::Pointer,
-          LocalPointerPointeeType{pointee_integer.byte_size,
-                                  pointee_integer.is_signed}};
+          LocalValueKind::Pointer, pointee_type};
     }
 
     if (const auto enum_type = resolve_bounded_enum_type(dies, type_offset)) {
@@ -2393,11 +2472,39 @@ LocalScalarValue materialize_live_scalar(
           }
           if (member.kind == LocalValueKind::Pointer) {
             if (member.byte_size != sizeof(std::uintptr_t) ||
-                member.is_signed || !member.pointee_type ||
-                member.pointee_type->byte_size != sizeof(std::int32_t) ||
-                !member.pointee_type->is_signed) {
+                member.is_signed || !member.pointee_type) {
               throw std::logic_error(
-                  "live pointer structure pointer member is outside the bounded signed-int32 pointee model");
+                  "live pointer structure pointer member has invalid bounded metadata");
+            }
+            const auto& member_pointee = *member.pointee_type;
+            if (member_pointee.kind == LocalValueKind::Integer) {
+              if (member_pointee.byte_size != sizeof(std::int32_t) ||
+                  !member_pointee.is_signed ||
+                  !member_pointee.members.empty()) {
+                throw std::logic_error(
+                    "live pointer structure pointer member is outside the bounded signed-int32 pointee model");
+              }
+            } else if (member_pointee.kind == LocalValueKind::Structure) {
+              if (member_pointee.byte_size == 0 ||
+                  member_pointee.byte_size > kMaxLocalStructSize ||
+                  member_pointee.members.empty() ||
+                  member_pointee.members.size() > kMaxLocalStructMembers) {
+                throw std::logic_error(
+                    "live pointer structure pointer member has malformed bounded structure pointee metadata");
+              }
+              for (const auto& nested : member_pointee.members) {
+                if (nested.kind != LocalValueKind::Integer ||
+                    nested.byte_size == 0 ||
+                    nested.byte_size > sizeof(std::uint64_t) ||
+                    nested.offset > member_pointee.byte_size ||
+                    nested.byte_size > member_pointee.byte_size - nested.offset) {
+                  throw std::logic_error(
+                      "live pointer structure pointer member pointee exceeds the flat integer-only model");
+                }
+              }
+            } else {
+              throw std::logic_error(
+                  "live pointer structure pointer member pointee kind is unsupported");
             }
             ++pointer_members;
             continue;

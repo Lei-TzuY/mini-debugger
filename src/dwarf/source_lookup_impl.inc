@@ -2313,6 +2313,37 @@ std::uint64_t evaluate_entry_rdi(
   return snapshot->rdi;
 }
 
+LocalScalarValue materialize_live_scalar(
+    const ElfFile& module, std::string_view name,
+    const LocalValueType& value_type, std::uint64_t raw) {
+  if (value_type.kind == LocalValueKind::Structure ||
+      value_type.kind == LocalValueKind::Union ||
+      value_type.kind == LocalValueKind::Array ||
+      value_type.kind == LocalValueKind::Floating) {
+    throw std::logic_error(
+        "live scalar materializer received a non-scalar bounded type");
+  }
+
+  LocalScalarValue result{module.path(), std::string(name), raw,
+                          value_type.byte_size, value_type.is_signed,
+                          value_type.kind};
+  if (value_type.kind == LocalValueKind::Enumeration) {
+    if (!value_type.enum_type ||
+        value_type.enum_type->byte_size != value_type.byte_size ||
+        value_type.enum_type->is_signed != value_type.is_signed ||
+        value_type.enum_type->name.empty() ||
+        value_type.enum_type->enumerators.empty()) {
+      throw std::logic_error(
+          "live enum value lost canonical bounded enum metadata");
+    }
+    result.enum_type = value_type.enum_type;
+  } else if (value_type.enum_type) {
+    throw std::logic_error(
+        "non-enum live scalar unexpectedly carries enum metadata");
+  }
+  return result;
+}
+
 std::optional<LocalScalarValue> inspect_unit(const DebugSections& sections,
                                              const Debugger& debugger,
                                              const ElfFile& module,
@@ -2390,10 +2421,6 @@ std::optional<LocalScalarValue> inspect_unit(const DebugSections& sections,
   }
 
   const auto value_type = resolve_value_type(dies, type->number);
-  if (value_type.kind == LocalValueKind::Enumeration) {
-    throw std::runtime_error(
-        "live enum materialization is outside current compiler evidence");
-  }
   if (value_type.kind == LocalValueKind::Array) {
     throw std::runtime_error(
         "live fixed-array materialization is outside current compiler evidence");
@@ -2417,15 +2444,11 @@ std::optional<LocalScalarValue> inspect_unit(const DebugSections& sections,
     const auto regs = debugger.registers();
     if (op == kDwOpReg0) {
       const auto raw = truncate_integer(regs.rax, value_type.byte_size);
-      return LocalScalarValue{module.path(), std::string(name), raw,
-                              value_type.byte_size, value_type.is_signed,
-                              value_type.kind};
+      return materialize_live_scalar(module, name, value_type, raw);
     }
     if (op == kDwOpReg5) {
       const auto raw = truncate_integer(regs.rdi, value_type.byte_size);
-      return LocalScalarValue{module.path(), std::string(name), raw,
-                              value_type.byte_size, value_type.is_signed,
-                              value_type.kind};
+      return materialize_live_scalar(module, name, value_type, raw);
     }
   }
 
@@ -2434,9 +2457,7 @@ std::optional<LocalScalarValue> inspect_unit(const DebugSections& sections,
     const auto raw = truncate_integer(
         evaluate_entry_rdi(location_expression, debugger, module, subprogram_die),
         value_type.byte_size);
-    return LocalScalarValue{module.path(), std::string(name), raw,
-                            value_type.byte_size, value_type.is_signed,
-                            value_type.kind};
+    return materialize_live_scalar(module, name, value_type, raw);
   }
 
   if (value_type.kind != LocalValueKind::Structure && !location_expression.empty() &&
@@ -2444,9 +2465,7 @@ std::optional<LocalScalarValue> inspect_unit(const DebugSections& sections,
     const auto raw = truncate_integer(
         evaluate_composite_stack_value(location_expression, debugger),
         value_type.byte_size);
-    return LocalScalarValue{module.path(), std::string(name), raw,
-                            value_type.byte_size, value_type.is_signed,
-                            value_type.kind};
+    return materialize_live_scalar(module, name, value_type, raw);
   }
 
   if (value_type.kind != LocalValueKind::Structure && !location_expression.empty() &&
@@ -2454,9 +2473,7 @@ std::optional<LocalScalarValue> inspect_unit(const DebugSections& sections,
     const auto raw = truncate_integer(
         evaluate_breg3_xor_stack_value(location_expression, debugger.registers().rbx),
         value_type.byte_size);
-    return LocalScalarValue{module.path(), std::string(name), raw,
-                            value_type.byte_size, value_type.is_signed,
-                            value_type.kind};
+    return materialize_live_scalar(module, name, value_type, raw);
   }
 
   if (value_type.kind != LocalValueKind::Structure && !location_expression.empty() &&
@@ -2471,9 +2488,7 @@ std::optional<LocalScalarValue> inspect_unit(const DebugSections& sections,
                                debugger,
                                evaluate_breg5_memory_address(location_expression, debugger),
                                value_type.byte_size);
-    return LocalScalarValue{module.path(), std::string(name), raw,
-                            value_type.byte_size, value_type.is_signed,
-                            value_type.kind};
+    return materialize_live_scalar(module, name, value_type, raw);
   }
 
   if (value_type.kind == LocalValueKind::Structure && !location_expression.empty() &&
@@ -2515,10 +2530,9 @@ std::optional<LocalScalarValue> inspect_unit(const DebugSections& sections,
     }
     return decode_structure(module, name, value_type, bytes);
   }
-  return LocalScalarValue{module.path(), std::string(name),
-                          read_integer(debugger, address, value_type.byte_size),
-                          value_type.byte_size, value_type.is_signed,
-                          value_type.kind};
+  return materialize_live_scalar(
+      module, name, value_type,
+      read_integer(debugger, address, value_type.byte_size));
 }
 
 std::uint64_t caller_frame_base(const Debugger& debugger, const ElfFile& module,

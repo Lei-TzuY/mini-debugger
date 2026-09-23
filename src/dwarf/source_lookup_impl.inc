@@ -1940,10 +1940,6 @@ LocalScalarValue decode_structure(const ElfFile& module, std::string_view name,
       throw std::logic_error(
           "non-structure member unexpectedly carries nested metadata");
     }
-    if (member.kind == LocalValueKind::Enumeration || member.enum_type) {
-      throw std::runtime_error(
-          "live enum-valued structure materialization is outside current compiler evidence");
-    }
     const auto raw = member.bit_slice
                          ? decode_bounded_bit_field(bytes, member)
                          : decode_integer(bytes, member.offset,
